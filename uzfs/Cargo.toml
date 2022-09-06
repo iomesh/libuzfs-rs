@@ -1,0 +1,14 @@
+[package]
+name = "uzfs"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+pkg-config = "0.3"
+build-env = "0.3"
+project-root = "0.2"
+uzfs-sys = { path = "../uzfs-sys", version = "0.1.0" }
+
+[dependencies]
+uzfs-sys = { path = "../uzfs-sys", version = "0.1.0" }
+cstr-argument = "0.1"

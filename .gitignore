@@ -1,0 +1,5 @@
+target
+uzfs-sys/src/bindings.rs
+zfs
+download
+libuzfs.pc
