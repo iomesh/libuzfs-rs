@@ -1,0 +1,6 @@
+[workspace]
+
+members = [
+    "uzfs-sys",
+    "uzfs",
+]
