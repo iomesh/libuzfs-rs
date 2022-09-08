@@ -13,4 +13,7 @@ fn main() {
     ld_path.push_str(":");
     ld_path.push_str(&link.to_string_lossy());
     println!("cargo:rustc-env=LD_LIBRARY_PATH={}", ld_path);
+
+    // temp workaround: used to pass ld_path to external crate
+    println!("cargo:ldpath={}", ld_path);
 }
