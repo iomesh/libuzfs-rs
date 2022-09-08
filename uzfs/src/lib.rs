@@ -172,6 +172,11 @@ impl Drop for Dataset {
     }
 }
 
+unsafe impl Send for Dataset {}
+unsafe impl Sync for Dataset {}
+unsafe impl Send for Uzfs {}
+unsafe impl Sync for Uzfs {}
+
 #[cfg(test)]
 mod tests {
 
