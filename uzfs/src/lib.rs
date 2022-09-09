@@ -88,7 +88,7 @@ impl Drop for Uzfs {
 }
 
 impl Dataset {
-    pub fn create_object(&mut self) -> Result<u64> {
+    pub fn create_object(&self) -> Result<u64> {
         let obj = Box::new(0 as u64);
         let obj_ptr: *mut u64 = Box::into_raw(obj);
         let err = unsafe { sys::libuzfs_object_create(self.dhp, obj_ptr) };
@@ -100,7 +100,16 @@ impl Dataset {
         }
     }
 
-    pub fn delete_object(&mut self, obj: u64) -> Result<()> {
+    pub fn claim_object(&self, obj: u64) -> Result<()> {
+        let err = unsafe { sys::libuzfs_object_claim(self.dhp, obj) };
+        if err == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(err))
+        }
+    }
+
+    pub fn delete_object(&self, obj: u64) -> Result<()> {
         let err = unsafe { sys::libuzfs_object_delete(self.dhp, obj) };
         if err == 0 {
             Ok(())
@@ -217,6 +226,8 @@ mod tests {
             ds.delete_object(obj).unwrap();
             let num3 = ds.list_object().unwrap();
             assert_eq!(num1, num3);
+            ds.claim_object(obj).unwrap();
+            assert_eq!(num1 + 1, num2);
         }
 
         uzfs.destroy_dataset(dsname);
