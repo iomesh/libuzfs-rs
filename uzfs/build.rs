@@ -1,5 +1,3 @@
-use pkg_config;
-use project_root;
 use std::env;
 
 fn main() {
@@ -10,7 +8,7 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", link.to_string_lossy());
 
     let mut ld_path = env::var("LD_LIBRARY_PATH").unwrap();
-    ld_path.push_str(":");
+    ld_path.push(':');
     ld_path.push_str(&link.to_string_lossy());
     println!("cargo:rustc-env=LD_LIBRARY_PATH={}", ld_path);
 

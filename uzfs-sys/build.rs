@@ -1,5 +1,3 @@
-use pkg_config;
-use project_root;
 use std::{env, process::Command};
 
 fn main() {
@@ -33,9 +31,9 @@ fn main() {
 
     // set LD_LIBRARY_PATH for cargo run and test
     let mut ld_path = env::var("LD_LIBRARY_PATH").unwrap();
-    ld_path.push_str(":");
+    ld_path.push(':');
     ld_path.push_str(&link.to_string_lossy());
     println!("cargo:rustc-env=LD_LIBRARY_PATH={}", ld_path);
 
-    println!("cargo:rerun-if-changed={}", "src/wrapper.h");
+    println!("cargo:rerun-if-changed=src/wrapper.h");
 }

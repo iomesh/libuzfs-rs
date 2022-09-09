@@ -9,16 +9,6 @@ pub struct Uzfs {
     i: PhantomData<()>,
 }
 
-pub struct Dataset {
-    dhp: *mut sys::libuzfs_dataset_handle_t,
-}
-
-impl Dataset {
-    pub fn new(dhp: *mut sys::libuzfs_dataset_handle_t) -> Result<Self> {
-        Ok(Self { dhp })
-    }
-}
-
 impl Uzfs {
     pub fn new() -> Result<Self> {
         unsafe {
@@ -73,7 +63,7 @@ impl Uzfs {
         let dsname = dsname.into_cstr();
         let dhp = unsafe { sys::libuzfs_dataset_open(dsname.as_ref().as_ptr()) };
 
-        if dhp == ptr::null_mut() {
+        if dhp.is_null() {
             Err(io::Error::from(io::ErrorKind::InvalidInput))
         } else {
             Dataset::new(dhp)
@@ -87,9 +77,22 @@ impl Drop for Uzfs {
     }
 }
 
+unsafe impl Send for Uzfs {}
+unsafe impl Sync for Uzfs {}
+
+pub struct Dataset {
+    dhp: *mut sys::libuzfs_dataset_handle_t,
+}
+
+impl Dataset {
+    pub fn new(dhp: *mut sys::libuzfs_dataset_handle_t) -> Result<Self> {
+        Ok(Self { dhp })
+    }
+}
+
 impl Dataset {
     pub fn create_object(&self) -> Result<u64> {
-        let obj = Box::new(0 as u64);
+        let obj = Box::new(0_u64);
         let obj_ptr: *mut u64 = Box::into_raw(obj);
         let err = unsafe { sys::libuzfs_object_create(self.dhp, obj_ptr) };
         let obj = unsafe { Box::from_raw(obj_ptr) };
@@ -183,8 +186,6 @@ impl Drop for Dataset {
 
 unsafe impl Send for Dataset {}
 unsafe impl Sync for Dataset {}
-unsafe impl Send for Uzfs {}
-unsafe impl Sync for Uzfs {}
 
 #[cfg(test)]
 mod tests {
@@ -212,7 +213,7 @@ mod tests {
         uzfs.create_dataset(dsname.clone()).unwrap();
 
         {
-            let mut ds = uzfs.get_dataset(dsname.clone()).unwrap();
+            let ds = uzfs.get_dataset(dsname.clone()).unwrap();
             let num1 = ds.list_object().unwrap();
             let obj = ds.create_object().unwrap();
             let num2 = ds.list_object().unwrap();
