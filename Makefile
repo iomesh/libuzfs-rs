@@ -1,10 +1,13 @@
-all: build
+top_srcdir=`pwd`
+scripts_dir=${top_srcdir}/scripts
+
+all: build_libuzfs_src build
 
 build_libuzfs_src:
-	@bash ./build_libuzfs_src.sh
+	@bash ${scripts_dir}/build_libuzfs_src.sh ${top_srcdir}
 
 clean_libuzfs_src:
-	@bash ./clean_libuzfs_src.sh
+	@bash ${scripts_dir}/clean_libuzfs_src.sh ${top_srcdir}
 
 build_uzfs_sys:
 	cargo build -p uzfs_sys
