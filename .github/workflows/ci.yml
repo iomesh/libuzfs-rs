@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [ main ]
+
+  push:
+    branches: [ main ]
+
+jobs:
+  check:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        rust: [stable]
+
+    steps:
+    - uses: hecrj/setup-rust-action@master
+      with:
+        rust-version: ${{ matrix.rust }}
+    - uses: actions/checkout@master
+    - name: Install rustfmt
+      run: rustup component add rustfmt
+    - uses: Swatinem/rust-cache@v1
+    - run: cargo fmt --all -- --check
+    - uses: actions-rs/clippy-check@v1
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        args: --all-features
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install --yes -qq build-essential autoconf libtool gawk alien fakeroot linux-headers-$(uname -r)
+        sudo apt-get install --yes -qq zlib1g-dev uuid-dev libattr1-dev libblkid-dev libselinux-dev libudev-dev libssl-dev python-dev python-setuptools python-cffi python3 python3-dev python3-setuptools python3-   cffi
+    - name: Check all targets
+      run: make
+    - name: Run tests
+      run: make test
