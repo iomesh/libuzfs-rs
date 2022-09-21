@@ -7,10 +7,11 @@ TOP_SRCDIR=$1
 ZFS_DIR=${TOP_SRCDIR}/zfs
 ZFS_PKG=zfs-uzfs-dev
 ZFS_ZIP=${ZFS_PKG}.zip
-LIBUZFS=${TOP_SRCDIR}/zfs/lib/libuzfs/.libs/libuzfs.so
+INSTALL_DIR=${TOP_SRCDIR}/install
+LIBUZFS=${INSTALL_DIR}/lib/libuzfs.so
 DOWNLOAD_DIR=${TOP_SRCDIR}/download
 DOWNLOAD_URL=https://github.com/iomesh/zfs/archive/refs/heads/uzfs-dev.zip
-LIBUZFS_PC=${TOP_SRCDIR}/zfs/lib/libuzfs/libuzfs.pc
+LIBUZFS_PC=${INSTALL_DIR}/lib/pkgconfig/libuzfs.pc
 
 download_src() {
     file=${DOWNLOAD_DIR}/${ZFS_ZIP}
@@ -34,14 +35,16 @@ unzip_src() {
 
 build_libuzfs_lib() {
     cd ${ZFS_DIR}
-    ./autogen.sh && ./configure && make gitrev
+    ./autogen.sh && ./configure --prefix=${INSTALL_DIR} && make gitrev
     cd lib
-    make -j4
+    make -j4 && make install
+    cd ../include
+    make && make install
     cd ${TOP_SRCDIR}
 }
 
 setup_libuzfs_pc() {
-    sed "s|/usr/local|${ZFS_DIR}|g" ${LIBUZFS_PC} > libuzfs.pc
+    mv ${LIBUZFS_PC} ${TOP_SRCDIR}/libuzfs.pc
 }
 
 

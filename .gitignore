@@ -2,4 +2,5 @@ target
 uzfs-sys/src/bindings.rs
 zfs
 download
+install
 libuzfs.pc
