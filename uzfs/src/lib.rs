@@ -1,6 +1,7 @@
 use cstr_argument::CStrArgument;
 use std::marker::PhantomData;
-use std::{ffi::CString, io, ptr};
+use std::os::raw::c_char;
+use std::{io, ptr};
 use uzfs_sys as sys;
 
 use io::Result;
@@ -138,20 +139,22 @@ impl Dataset {
         }
     }
 
-    pub fn read_object(&self, obj: u64, offset: u64, size: u64) -> Result<CString> {
-        let v = Vec::<u8>::with_capacity(size as usize);
-        let data = CString::new(v).unwrap();
-        let ptr = data.into_raw();
+    pub fn read_object(&self, obj: u64, offset: u64, size: u64) -> Result<Vec<u8>> {
+        let mut data = Vec::<u8>::with_capacity(size as usize);
+        data.resize_with(size as usize, Default::default);
+        let ptr = data.as_mut_ptr() as *mut c_char;
         let err = unsafe { sys::libuzfs_object_read(self.dhp, obj, offset, size, ptr) };
         if err == 0 {
-            Ok(unsafe { CString::from_raw(ptr) })
+            Ok(data)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
     }
 
-    pub fn write_object(&self, obj: u64, offset: u64, size: u64, buf: &CString) -> Result<()> {
-        let err = unsafe { sys::libuzfs_object_write(self.dhp, obj, offset, size, buf.as_ptr()) };
+    pub fn write_object(&self, obj: u64, offset: u64, size: u64, data: &[u8]) -> Result<()> {
+        let err = unsafe {
+            sys::libuzfs_object_write(self.dhp, obj, offset, size, data.as_ptr() as *const c_char)
+        };
         if err == 0 {
             Ok(())
         } else {
@@ -192,7 +195,6 @@ mod tests {
 
     use super::Dataset;
     use super::Uzfs;
-    use std::ffi::CString;
     use std::fs::{self, File};
 
     #[test]
@@ -221,9 +223,11 @@ mod tests {
             let doi = ds.stat_object(obj).unwrap();
             Dataset::dump_object_doi(obj, doi);
 
-            let data: CString = CString::new("Hello uzfs!").unwrap();
-            ds.write_object(obj, 0, 12, &data).unwrap();
-            assert_eq!(ds.read_object(obj, 0, 12).unwrap(), data);
+            let s = String::from("Hello uzfs!");
+            let data = s.as_bytes();
+            let size = s.len() as u64;
+            ds.write_object(obj, 0, size, data).unwrap();
+            assert_eq!(ds.read_object(obj, 0, size).unwrap(), data);
             ds.delete_object(obj).unwrap();
             let num3 = ds.list_object().unwrap();
             assert_eq!(num1, num3);
