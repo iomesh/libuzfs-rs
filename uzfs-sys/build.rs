@@ -1,7 +1,7 @@
-use std::{env, process::Command};
+use std::{env, fs, process::Command};
 
 fn main() {
-    let root = project_root::get_project_root().unwrap();
+    let root = fs::canonicalize("..").unwrap();
     Command::new("make")
         .args(&["-C", root.to_str().unwrap(), "build_libuzfs_src"])
         .status()
