@@ -7,7 +7,6 @@ edition = "2021"
 pkg-config = "0.3"
 build-env = "0.3"
 bindgen = "0.60"
-project-root = "0.2"
 
 [dependencies]
 libc = "0.2"

@@ -7,7 +7,6 @@ links = "uzfs"
 [build-dependencies]
 pkg-config = "0.3"
 build-env = "0.3"
-project-root = "0.2"
 uzfs-sys = { path = "../uzfs-sys", version = "0.1.0" }
 
 [dependencies]

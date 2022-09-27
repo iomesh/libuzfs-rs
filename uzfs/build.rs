@@ -1,7 +1,7 @@
-use std::env;
+use std::{env, fs};
 
 fn main() {
-    let root = project_root::get_project_root().unwrap();
+    let root = fs::canonicalize("..").unwrap();
     env::set_var("PKG_CONFIG_PATH", root);
     let mut lib = pkg_config::probe_library("libuzfs").unwrap();
     let link = lib.link_paths.pop().unwrap();
