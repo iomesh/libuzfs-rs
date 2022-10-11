@@ -1,19 +1,28 @@
 use std::{env, fs, process::Command};
 
 fn main() {
-    let root = fs::canonicalize("..").unwrap();
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src/buildings.rs");
+    println!("cargo:rerun-if-changed=src/wrapper.h");
+    println!("cargo:rerun-if-changed=zfs");
+
+    let root = fs::canonicalize(".").unwrap();
+
     Command::new("make")
         .args(&["-C", root.to_str().unwrap(), "build_libuzfs_src"])
         .status()
         .expect("failed to make libuzfs");
+
     env::set_var("PKG_CONFIG_PATH", root);
-    let mut lib = pkg_config::probe_library("libuzfs").unwrap();
-    let link = lib.link_paths.pop().unwrap();
+    let lib = pkg_config::probe_library("libuzfs").unwrap();
 
-    println!("cargo:rustc-link-search=native={}", link.to_string_lossy());
-    println!("cargo:rustc-link-lib=uzfs");
+    // "include/libzfs"
+    // "include/libspl"
+    for inc in &lib.include_paths {
+        println!("extra_include: {}", inc.display());
+    }
 
-    bindgen::Builder::default()
+    let bindings = bindgen::Builder::default()
         .clang_args(
             lib.include_paths
                 .iter()
@@ -25,15 +34,9 @@ fn main() {
         .allowlist_type("DMU_OT.*")
         .derive_default(true)
         .generate()
-        .expect("Unable to generate bindings")
+        .expect("Unable to generate bindings");
+
+    bindings
         .write_to_file("src/bindings.rs")
         .expect("Couldn't write bindings!");
-
-    // set LD_LIBRARY_PATH for cargo run and test
-    let mut ld_path = env::var("LD_LIBRARY_PATH").unwrap();
-    ld_path.push(':');
-    ld_path.push_str(&link.to_string_lossy());
-    println!("cargo:rustc-env=LD_LIBRARY_PATH={}", ld_path);
-
-    println!("cargo:rerun-if-changed=src/wrapper.h");
 }
