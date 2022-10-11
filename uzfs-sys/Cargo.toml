@@ -4,9 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [build-dependencies]
-pkg-config = "0.3"
-build-env = "0.3"
 bindgen = "0.60"
+pkg-config = "0.3"
 
 [dependencies]
 libc = "0.2"

@@ -4,7 +4,9 @@
 #![allow(clippy::redundant_static_lifetimes)]
 #![allow(deref_nullptr)]
 
-include!("bindings.rs");
+#[rustfmt::skip]
+mod bindings;
+pub use bindings::*;
 
 pub const DMU_OT_NEWTYPE: u32 = 0x80;
 pub const DMU_OT_BYTESWAP_MASK: u32 = 0x1f;

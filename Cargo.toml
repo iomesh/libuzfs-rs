@@ -1,6 +1,17 @@
-[workspace]
+[package]
+name = "uzfs"
+version = "0.1.0"
+edition = "2021"
+links = "uzfs"
 
-members = [
-    "uzfs-sys",
-    "uzfs",
-]
+[workspace]
+members = ["uzfs-sys"]
+
+[build-dependencies]
+bindgen = "0.60"
+pkg-config = "0.3"
+uzfs-sys = { path = "uzfs-sys", version = "0.1.0" }
+
+[dependencies]
+cstr-argument = "0.1"
+uzfs-sys = { path = "uzfs-sys", version = "0.1.0" }
