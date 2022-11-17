@@ -5,12 +5,12 @@ set -e
 TOP_SRCDIR=$1
 
 ZFS_DIR=${TOP_SRCDIR}/zfs
-ZFS_PKG=zfs-uzfs-main
+ZFS_PKG=zfs-uzfs-dev
 ZFS_ZIP=${ZFS_PKG}.zip
 INSTALL_DIR=${TOP_SRCDIR}/install
 LIBUZFS=${INSTALL_DIR}/lib/libuzfs.so
 DOWNLOAD_DIR=${TOP_SRCDIR}/download
-DOWNLOAD_URL=https://github.com/iomesh/zfs/archive/refs/heads/uzfs-main.zip
+DOWNLOAD_URL=https://github.com/iomesh/zfs/archive/refs/heads/uzfs-dev.zip
 LIBUZFS_PC=${INSTALL_DIR}/lib/pkgconfig/libuzfs.pc
 
 download_src() {
