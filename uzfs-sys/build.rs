@@ -9,7 +9,7 @@ fn main() {
     let root = fs::canonicalize(".").unwrap();
 
     Command::new("make")
-        .args(&["-C", root.to_str().unwrap(), "build_libuzfs_src"])
+        .args(["-C", root.to_str().unwrap(), "build_libuzfs_src"])
         .status()
         .expect("failed to make libuzfs");
 
