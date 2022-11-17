@@ -5,3 +5,4 @@ zfs
 download
 install
 libuzfs.pc
+*.vi
