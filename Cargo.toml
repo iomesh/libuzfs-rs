@@ -2,7 +2,9 @@
 name = "uzfs"
 version = "0.1.0"
 edition = "2021"
-links = "uzfs"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
 
 [workspace]
 members = ["uzfs-sys"]
