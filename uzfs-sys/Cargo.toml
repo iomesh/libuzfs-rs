@@ -5,10 +5,10 @@ edition = "2021"
 
 [build-dependencies]
 bindgen = "0.60"
-pkg-config = "0.3"
+pkg-config = "0.3.26"
 
 [dependencies]
 libc = "0.2"
 
 [lib]
-crate-type = ["rlib"]
+crate-type = ["staticlib", "rlib"]

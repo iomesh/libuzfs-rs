@@ -4,7 +4,7 @@ build:
 	cargo build --all
 
 test:
-	cargo test -- --nocapture
+	cargo test --workspace  -- --nocapture
 
 clean:
 	cargo clean

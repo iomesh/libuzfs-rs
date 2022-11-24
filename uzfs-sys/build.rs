@@ -14,13 +14,9 @@ fn main() {
         .expect("failed to make libuzfs");
 
     env::set_var("PKG_CONFIG_PATH", root);
-    let lib = pkg_config::probe_library("libuzfs").unwrap();
 
-    // "include/libzfs"
-    // "include/libspl"
-    for inc in &lib.include_paths {
-        println!("extra_include: {}", inc.display());
-    }
+    // probe_library tells cargo all link info of libuzfs automatically
+    let lib = pkg_config::probe_library("libuzfs").unwrap();
 
     let bindings = bindgen::Builder::default()
         .clang_args(
