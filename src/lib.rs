@@ -11,14 +11,14 @@ pub struct Uzfs {
 }
 
 impl Uzfs {
-    pub fn new() -> Result<Self> {
+    pub fn init() -> Result<Self> {
         unsafe {
             sys::libuzfs_init();
         };
         Ok(Self { i: PhantomData })
     }
 
-    pub fn set_zpool_cache_path<P: CStrArgument>(&self, path: P) {
+    pub fn set_zpool_cache_path<P: CStrArgument>(path: P) {
         unsafe {
             sys::libuzfs_set_zpool_cache_path(path.into_cstr().as_ref().as_ptr());
         }
@@ -46,7 +46,7 @@ impl Uzfs {
         unsafe { sys::libuzfs_zpool_destroy(zpool.into_cstr().as_ref().as_ptr()) };
     }
 
-    pub fn create_dataset<P: CStrArgument>(&mut self, dsname: P) -> Result<()> {
+    pub fn create_dataset<P: CStrArgument>(&self, dsname: P) -> Result<()> {
         let dsname = dsname.into_cstr();
         let err = unsafe { sys::libuzfs_dataset_create(dsname.as_ref().as_ptr()) };
         if err == 0 {
@@ -58,10 +58,6 @@ impl Uzfs {
 
     pub fn destroy_dataset<P: CStrArgument>(&self, zpool: P) {
         unsafe { sys::libuzfs_dataset_destroy(zpool.into_cstr().as_ref().as_ptr()) };
-    }
-
-    pub fn get_dataset<P: CStrArgument>(&mut self, dsname: P) -> Result<Dataset> {
-        Dataset::new(dsname)
     }
 }
 
@@ -84,7 +80,7 @@ pub struct Dataset {
 }
 
 impl Dataset {
-    pub fn new<P: CStrArgument>(dsname: P) -> Result<Self> {
+    pub fn init<P: CStrArgument>(dsname: P) -> Result<Self> {
         let dhp = unsafe { sys::libuzfs_dataset_open(dsname.into_cstr().as_ref().as_ptr()) };
 
         if dhp.is_null() {
@@ -128,7 +124,7 @@ impl Dataset {
         }
     }
 
-    pub fn list_object(&self) -> Result<i32> {
+    pub fn list_object(&self) -> Result<u64> {
         let n = unsafe { sys::libuzfs_object_list(self.dhp) };
         Ok(n)
     }
@@ -367,7 +363,6 @@ unsafe impl Sync for Dataset {}
 
 #[cfg(test)]
 mod tests {
-
     use super::Dataset;
     use super::InodeType;
     use super::Uzfs;
@@ -383,63 +378,77 @@ mod tests {
         ::std::slice::from_raw_parts((p as *const T) as *const u8, ::std::mem::size_of::<T>())
     }
 
-    #[test]
-    fn uzfs_test() {
-        let dev_name = String::from("/tmp/uzfs-test.img");
-        let pool_name = String::from("uzfs-test-pool");
-        let zpool_cache_path = String::from("/tmp/zpool.cache");
-
-        let dev_file = File::create(dev_name.clone()).unwrap();
+    fn setup(devname: &str, poolname: &str, datasetname: &str, cache_path: &str) {
+        let dev_file = File::create(devname.clone()).unwrap();
         dev_file.set_len(100 * 1024 * 1024).unwrap();
 
-        let mut uzfs = Uzfs::new().unwrap();
-        uzfs.set_zpool_cache_path(zpool_cache_path);
-        uzfs.create_zpool(pool_name.clone(), dev_name.clone())
-            .unwrap();
+        Uzfs::set_zpool_cache_path(cache_path);
 
-        let dsname = pool_name.clone() + "/uzfs";
-        uzfs.create_dataset(dsname.clone()).unwrap();
+        let uzfs = Uzfs::init().unwrap();
+        uzfs.create_zpool(poolname.clone(), devname.clone())
+            .unwrap();
+        uzfs.create_dataset(datasetname.clone()).unwrap();
+    }
+
+    fn cleanup(devname: &str, poolname: &str, datasetname: &str, cache_path: &str) {
+        Uzfs::set_zpool_cache_path(cache_path);
+
+        let uzfs = Uzfs::init().unwrap();
+        uzfs.destroy_dataset(datasetname.clone());
+        uzfs.destroy_zpool(poolname.clone());
+
+        fs::remove_file(devname).unwrap();
+    }
+
+    #[test]
+    fn uzfs_test() {
+        let devname = String::from("/tmp/uzfs-test.img");
+        let poolname = String::from("uzfs-test-pool1");
+        let datasetname = poolname.clone() + "/uzfs";
+        let zpool_cache_path = String::from("/tmp/testzpool.cache");
+
+        let rwobj;
+        let s = String::from("Hello uzfs!");
+        let file_ino;
+        let dir_ino;
+        let num = 0u64;
+        let mut opid = 0u64;
+        let mut attr: Attr = Attr { ino: 0, nlink: 0 };
+        let key = String::from("acl");
+        let value = String::from("root,admin");
+        let file_name = String::from("fileA");
+        let dentry_data;
+
+        setup(&devname, &poolname, &datasetname, &zpool_cache_path);
 
         {
-            let mut opid: u64 = 0;
-            let ds = uzfs.get_dataset(dsname.clone()).unwrap();
-            let num1 = ds.list_object().unwrap();
+            Uzfs::set_zpool_cache_path(&zpool_cache_path);
+            let _uzfs = Uzfs::init().unwrap();
+            let ds = Dataset::init(datasetname.clone()).unwrap();
+
+            let num = ds.list_object().unwrap();
             opid += 1;
-            let obj = ds.create_object(opid).unwrap();
+            rwobj = ds.create_object(opid).unwrap();
             ds.wait_synced().unwrap();
 
-            let num2 = ds.list_object().unwrap();
-            assert_eq!(num1 + 1, num2);
+            assert_eq!(ds.list_object().unwrap(), num + 1);
 
-            let doi = ds.stat_object(obj).unwrap();
-            Dataset::dump_object_doi(obj, doi);
+            let doi = ds.stat_object(rwobj).unwrap();
+            Dataset::dump_object_doi(rwobj, doi);
 
-            let s = String::from("Hello uzfs!");
             let data = s.as_bytes();
             let size = s.len() as u64;
-            ds.write_object(obj, 0, size, data).unwrap();
-            assert_eq!(ds.read_object(obj, 0, size).unwrap(), data);
+            ds.write_object(rwobj, 0, size, data).unwrap();
+            assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), data);
 
             opid += 1;
-            ds.delete_object(obj, opid).unwrap();
-            ds.wait_synced().unwrap();
-
-            let num3 = ds.list_object().unwrap();
-            assert_eq!(num2 - 1, num3);
-
-            ds.claim_object(obj).unwrap();
-            ds.wait_synced().unwrap();
-
-            let num4 = ds.list_object().unwrap();
-            assert_eq!(num3 + 1, num4);
-
+            file_ino = ds.create_inode(InodeType::FILE, opid).unwrap();
             opid += 1;
-            let file_ino = ds.create_inode(InodeType::FILE, opid).unwrap();
+            dir_ino = ds.create_inode(InodeType::DIR, opid).unwrap();
             opid += 1;
-            let dir_ino = ds.create_inode(InodeType::DIR, opid).unwrap();
-            opid += 1;
-            let file_name = String::from("fileA");
-            let dentry_data = [file_ino, 1];
+
+            dentry_data = [file_ino, 1];
+
             ds.create_dentry(dir_ino, file_name.as_bytes(), &dentry_data, opid)
                 .unwrap();
             let dentry_data_read = ds
@@ -448,17 +457,10 @@ mod tests {
             assert_eq!(dentry_data.to_vec(), dentry_data_read);
             ds.wait_synced().unwrap();
 
-            let num5 = ds.list_object().unwrap();
-            assert_eq!(num4 + 2, num5);
+            assert_eq!(ds.list_object().unwrap(), num + 3);
 
-            opid += 1;
-            ds.delete_dentry(dir_ino, file_name.as_bytes(), opid)
-                .unwrap();
-
-            let attr: Attr = Attr {
-                ino: file_ino,
-                nlink: 1,
-            };
+            attr.ino = file_ino;
+            attr.nlink = 1;
 
             let attr_bytes = unsafe { any_as_u8_slice(&attr) };
 
@@ -473,12 +475,49 @@ mod tests {
             assert_eq!(attr_got.ino, attr.ino);
             assert_eq!(attr_got.nlink, attr.nlink);
 
-            let key = String::from("acl");
-            let value = String::from("root,admin");
-
             opid += 1;
             ds.set_kvattr(file_ino, key.as_bytes(), value.as_bytes(), opid, 0)
                 .unwrap();
+
+            let value_read = ds
+                .get_kvattr(file_ino, key.as_bytes(), value.len() as u64, 0)
+                .unwrap();
+            assert_eq!(value_read.as_slice(), value.as_bytes());
+
+            assert_eq!(ds.list_object().unwrap(), num + 4);
+            assert_eq!(ds.get_max_synced_opid().unwrap(), opid);
+        }
+
+        {
+            Uzfs::set_zpool_cache_path(&zpool_cache_path);
+            let _uzfs = Uzfs::init().unwrap();
+            let ds = Dataset::init(datasetname.clone()).unwrap();
+
+            assert_eq!(ds.get_max_synced_opid().unwrap(), opid);
+            assert_eq!(ds.list_object().unwrap(), num + 4);
+
+            let data = s.as_bytes();
+            let size = s.len() as u64;
+            assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), data);
+
+            opid += 1;
+            ds.delete_object(rwobj, opid).unwrap();
+            ds.wait_synced().unwrap();
+
+            assert_eq!(ds.list_object().unwrap(), num + 3);
+
+            let dentry_data_read = ds
+                .lookup_dentry(dir_ino, file_name.as_bytes(), dentry_data.len() as u64)
+                .unwrap();
+            assert_eq!(dentry_data.to_vec(), dentry_data_read);
+
+            opid += 1;
+            ds.delete_dentry(dir_ino, file_name.as_bytes(), opid)
+                .unwrap();
+
+            let attr_bytes = unsafe { any_as_u8_slice(&attr) };
+            let attr_new = ds.get_attr(file_ino, attr_bytes.len() as u64).unwrap();
+            assert_eq!(attr_new.as_slice(), attr_bytes);
 
             let value_read = ds
                 .get_kvattr(file_ino, key.as_bytes(), value.len() as u64, 0)
@@ -489,32 +528,21 @@ mod tests {
             ds.remove_kvattr(file_ino, key.as_bytes(), opid).unwrap();
             ds.wait_synced().unwrap();
 
-            let num6 = ds.list_object().unwrap();
-            assert_eq!(num5 + 1, num6);
-
             opid += 1;
             ds.delete_inode(dir_ino, InodeType::DIR, opid).unwrap();
             opid += 1;
             ds.delete_inode(file_ino, InodeType::FILE, opid).unwrap();
             ds.wait_synced().unwrap();
 
-            let num7 = ds.list_object().unwrap();
-            assert_eq!(num6 - 3, num7);
-
+            assert_eq!(ds.list_object().unwrap(), num);
             assert_eq!(ds.get_max_synced_opid().unwrap(), opid);
 
-            ds.claim_inode(file_ino, InodeType::FILE).unwrap();
-            ds.claim_inode(dir_ino, InodeType::DIR).unwrap();
+            ds.claim_object(rwobj).unwrap();
             ds.wait_synced().unwrap();
 
-            let num8 = ds.list_object().unwrap();
-            assert_eq!(num7 + 2, num8);
-
-            assert_eq!(ds.get_max_synced_opid().unwrap(), opid);
+            assert_eq!(ds.list_object().unwrap(), num + 1);
         }
 
-        uzfs.destroy_dataset(dsname);
-        uzfs.destroy_zpool(pool_name.clone());
-        fs::remove_file(dev_name).unwrap();
+        cleanup(&devname, &poolname, &datasetname, &zpool_cache_path);
     }
 }
