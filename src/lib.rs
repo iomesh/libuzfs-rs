@@ -90,6 +90,20 @@ impl Dataset {
         }
     }
 
+    pub fn get_superblock_ino(&self) -> Result<u64> {
+        let obj = Box::new(0_u64);
+        let obj_ptr: *mut u64 = Box::into_raw(obj);
+
+        let err = unsafe { sys::libuzfs_dataset_get_superblock_ino(self.dhp, obj_ptr) };
+        let obj = unsafe { Box::from_raw(obj_ptr) };
+
+        if err == 0 {
+            Ok(*obj)
+        } else {
+            Err(io::Error::from_raw_os_error(err))
+        }
+    }
+
     pub fn create_object(&self, opid: u64) -> Result<u64> {
         let obj = Box::new(0_u64);
         let obj_ptr: *mut u64 = Box::into_raw(obj);
@@ -408,10 +422,14 @@ mod tests {
         let zpool_cache_path = String::from("/tmp/testzpool.cache");
 
         let rwobj;
+        let sb_ino;
+        let sb_file_ino;
+        let sb_file_name = String::from("sb_file");
+        let sb_dentry_data;
         let s = String::from("Hello uzfs!");
         let file_ino;
         let dir_ino;
-        let num = 0u64;
+        let num;
         let mut opid = 0u64;
         let mut attr: Attr = Attr { ino: 0, nlink: 0 };
         let key = String::from("acl");
@@ -426,7 +444,33 @@ mod tests {
             let _uzfs = Uzfs::init().unwrap();
             let ds = Dataset::init(datasetname.clone()).unwrap();
 
-            let num = ds.list_object().unwrap();
+            sb_ino = ds.get_superblock_ino().unwrap();
+
+            opid += 1;
+            ds.set_kvattr(sb_ino, key.as_bytes(), value.as_bytes(), opid, 0)
+                .unwrap();
+
+            let value_read = ds
+                .get_kvattr(sb_ino, key.as_bytes(), value.len() as u64, 0)
+                .unwrap();
+            assert_eq!(value_read.as_slice(), value.as_bytes());
+            ds.wait_synced().unwrap();
+
+            opid += 1;
+            sb_file_ino = ds.create_inode(InodeType::FILE, opid).unwrap();
+
+            sb_dentry_data = [sb_file_ino, 1];
+
+            ds.create_dentry(sb_ino, sb_file_name.as_bytes(), &sb_dentry_data, opid)
+                .unwrap();
+            ds.wait_synced().unwrap();
+
+            let sb_dentry_data_read = ds
+                .lookup_dentry(sb_ino, sb_file_name.as_bytes(), sb_dentry_data.len() as u64)
+                .unwrap();
+            assert_eq!(sb_dentry_data.to_vec(), sb_dentry_data_read);
+
+            num = ds.list_object().unwrap();
             opid += 1;
             rwobj = ds.create_object(opid).unwrap();
             ds.wait_synced().unwrap();
@@ -495,6 +539,18 @@ mod tests {
 
             assert_eq!(ds.get_max_synced_opid().unwrap(), opid);
             assert_eq!(ds.list_object().unwrap(), num + 4);
+
+            assert_eq!(ds.get_superblock_ino().unwrap(), sb_ino);
+
+            let value_read = ds
+                .get_kvattr(sb_ino, key.as_bytes(), value.len() as u64, 0)
+                .unwrap();
+            assert_eq!(value_read.as_slice(), value.as_bytes());
+
+            let sb_dentry_data_read = ds
+                .lookup_dentry(sb_ino, sb_file_name.as_bytes(), sb_dentry_data.len() as u64)
+                .unwrap();
+            assert_eq!(sb_dentry_data.to_vec(), sb_dentry_data_read);
 
             let data = s.as_bytes();
             let size = s.len() as u64;
