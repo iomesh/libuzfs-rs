@@ -91,8 +91,7 @@ impl Dataset {
     }
 
     pub fn get_superblock_ino(&self) -> Result<u64> {
-        let obj = Box::new(0_u64);
-        let obj_ptr: *mut u64 = Box::into_raw(obj);
+        let obj_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
 
         let err = unsafe { sys::libuzfs_dataset_get_superblock_ino(self.dhp, obj_ptr) };
         let obj = unsafe { Box::from_raw(obj_ptr) };
@@ -104,15 +103,16 @@ impl Dataset {
         }
     }
 
-    pub fn create_object(&self, opid: u64) -> Result<u64> {
-        let obj = Box::new(0_u64);
-        let obj_ptr: *mut u64 = Box::into_raw(obj);
+    pub fn create_object(&self) -> Result<(u64, u64)> {
+        let obj_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
+        let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
 
-        let err = unsafe { sys::libuzfs_object_create(self.dhp, obj_ptr, opid) };
+        let err = unsafe { sys::libuzfs_object_create(self.dhp, obj_ptr, txg_ptr) };
         let obj = unsafe { Box::from_raw(obj_ptr) };
+        let txg = unsafe { Box::from_raw(txg_ptr) };
 
         if err == 0 {
-            Ok(*obj)
+            Ok((*obj, *txg))
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
@@ -128,11 +128,14 @@ impl Dataset {
         }
     }
 
-    pub fn delete_object(&self, obj: u64, opid: u64) -> Result<()> {
-        let err = unsafe { sys::libuzfs_object_delete(self.dhp, obj, opid) };
+    pub fn delete_object(&self, obj: u64) -> Result<u64> {
+        let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
+
+        let err = unsafe { sys::libuzfs_object_delete(self.dhp, obj, txg_ptr) };
+        let txg = unsafe { Box::from_raw(txg_ptr) };
 
         if err == 0 {
-            Ok(())
+            Ok(*txg)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
@@ -144,7 +147,7 @@ impl Dataset {
     }
 
     pub fn stat_object(&self, obj: u64) -> Result<sys::dmu_object_info_t> {
-        let doi = Box::new(sys::dmu_object_info::default());
+        let doi = Box::<sys::dmu_object_info>::default();
         let doip = Box::into_raw(doi);
 
         let err = unsafe { sys::libuzfs_object_stat(self.dhp, obj, doip) };
@@ -200,15 +203,17 @@ impl Dataset {
         println!("\tfill_count: {}", doi.doi_fill_count);
     }
 
-    pub fn create_inode(&self, inode_type: InodeType, opid: u64) -> Result<u64> {
-        let ino = Box::new(0_u64);
-        let ino_ptr: *mut u64 = Box::into_raw(ino);
+    pub fn create_inode(&self, inode_type: InodeType) -> Result<(u64, u64)> {
+        let ino_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
+        let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
 
-        let err = unsafe { sys::libuzfs_inode_create(self.dhp, ino_ptr, inode_type as u32, opid) };
+        let err =
+            unsafe { sys::libuzfs_inode_create(self.dhp, ino_ptr, inode_type as u32, txg_ptr) };
         let ino = unsafe { Box::from_raw(ino_ptr) };
+        let txg = unsafe { Box::from_raw(txg_ptr) };
 
         if err == 0 {
-            Ok(*ino)
+            Ok((*ino, *txg))
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
@@ -224,11 +229,14 @@ impl Dataset {
         }
     }
 
-    pub fn delete_inode(&self, ino: u64, inode_type: InodeType, opid: u64) -> Result<()> {
-        let err = unsafe { sys::libuzfs_inode_delete(self.dhp, ino, inode_type as u32, opid) };
+    pub fn delete_inode(&self, ino: u64, inode_type: InodeType) -> Result<u64> {
+        let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
+
+        let err = unsafe { sys::libuzfs_inode_delete(self.dhp, ino, inode_type as u32, txg_ptr) };
+        let txg = unsafe { Box::from_raw(txg_ptr) };
 
         if err == 0 {
-            Ok(())
+            Ok(*txg)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
@@ -248,14 +256,16 @@ impl Dataset {
         }
     }
 
-    pub fn set_attr(&self, ino: u64, attr: &[u8], opid: u64) -> Result<()> {
+    pub fn set_attr(&self, ino: u64, attr: &[u8]) -> Result<u64> {
         let size = attr.len() as u64;
         let attr_ptr = attr.as_ptr() as *mut c_void;
+        let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
 
-        let err = unsafe { sys::libuzfs_inode_setattr(self.dhp, ino, attr_ptr, size, opid) };
+        let err = unsafe { sys::libuzfs_inode_setattr(self.dhp, ino, attr_ptr, size, txg_ptr) };
+        let txg = unsafe { Box::from_raw(txg_ptr) };
 
         if err == 0 {
-            Ok(())
+            Ok(*txg)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
@@ -278,63 +288,65 @@ impl Dataset {
         }
     }
 
-    pub fn set_kvattr(
-        &self,
-        ino: u64,
-        name: &[u8],
-        value: &[u8],
-        opid: u64,
-        flags: i32,
-    ) -> Result<()> {
+    pub fn set_kvattr(&self, ino: u64, name: &[u8], value: &[u8], flags: i32) -> Result<u64> {
         let name_ptr = name.as_ptr() as *mut c_char;
         let value_ptr = value.as_ptr() as *mut c_char;
         let size = value.len() as u64;
+        let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
 
         let err = unsafe {
-            sys::libuzfs_inode_set_kvattr(self.dhp, ino, name_ptr, value_ptr, size, flags, opid)
+            sys::libuzfs_inode_set_kvattr(self.dhp, ino, name_ptr, value_ptr, size, flags, txg_ptr)
         };
+        let txg = unsafe { Box::from_raw(txg_ptr) };
 
         if err == 0 {
-            Ok(())
+            Ok(*txg)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
     }
 
-    pub fn remove_kvattr(&self, ino: u64, name: &[u8], opid: u64) -> Result<()> {
+    pub fn remove_kvattr(&self, ino: u64, name: &[u8]) -> Result<u64> {
         let name_ptr = name.as_ptr() as *mut c_char;
+        let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
 
-        let err = unsafe { sys::libuzfs_inode_remove_kvattr(self.dhp, ino, name_ptr, opid) };
+        let err = unsafe { sys::libuzfs_inode_remove_kvattr(self.dhp, ino, name_ptr, txg_ptr) };
+        let txg = unsafe { Box::from_raw(txg_ptr) };
 
         if err == 0 {
-            Ok(())
+            Ok(*txg)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
     }
 
-    pub fn create_dentry(&self, pino: u64, name: &[u8], value: &[u64], opid: u64) -> Result<()> {
+    pub fn create_dentry(&self, pino: u64, name: &[u8], value: &[u64]) -> Result<u64> {
         let num = value.len() as u64;
         let name_ptr = name.as_ptr() as *mut c_char;
         let value_ptr = value.as_ptr() as *mut u64;
+        let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
 
-        let err =
-            unsafe { sys::libuzfs_dentry_create(self.dhp, pino, name_ptr, value_ptr, num, opid) };
+        let err = unsafe {
+            sys::libuzfs_dentry_create(self.dhp, pino, name_ptr, value_ptr, num, txg_ptr)
+        };
+        let txg = unsafe { Box::from_raw(txg_ptr) };
 
         if err == 0 {
-            Ok(())
+            Ok(*txg)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
     }
 
-    pub fn delete_dentry(&self, pino: u64, name: &[u8], opid: u64) -> Result<()> {
+    pub fn delete_dentry(&self, pino: u64, name: &[u8]) -> Result<u64> {
+        let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
         let err = unsafe {
-            sys::libuzfs_dentry_delete(self.dhp, pino, name.as_ptr() as *mut c_char, opid)
+            sys::libuzfs_dentry_delete(self.dhp, pino, name.as_ptr() as *mut c_char, txg_ptr)
         };
+        let txg = unsafe { Box::from_raw(txg_ptr) };
 
         if err == 0 {
-            Ok(())
+            Ok(*txg)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
@@ -355,9 +367,9 @@ impl Dataset {
         }
     }
 
-    pub fn get_max_synced_opid(&self) -> Result<u64> {
-        let opid = unsafe { sys::libuzfs_get_max_synced_opid(self.dhp) };
-        Ok(opid)
+    pub fn get_last_synced_txg(&self) -> Result<u64> {
+        let txg = unsafe { sys::libuzfs_get_last_synced_txg(self.dhp) };
+        Ok(txg)
     }
 
     pub fn wait_synced(&self) -> Result<()> {
@@ -430,7 +442,7 @@ mod tests {
         let file_ino;
         let dir_ino;
         let num;
-        let mut opid = 0u64;
+        let mut txg;
         let mut attr: Attr = Attr { ino: 0, nlink: 0 };
         let key = String::from("acl");
         let value = String::from("root,admin");
@@ -445,10 +457,12 @@ mod tests {
             let ds = Dataset::init(datasetname.clone()).unwrap();
 
             sb_ino = ds.get_superblock_ino().unwrap();
+            let last_txg = ds.get_last_synced_txg().unwrap();
 
-            opid += 1;
-            ds.set_kvattr(sb_ino, key.as_bytes(), value.as_bytes(), opid, 0)
+            txg = ds
+                .set_kvattr(sb_ino, key.as_bytes(), value.as_bytes(), 0)
                 .unwrap();
+            assert!(txg > last_txg);
 
             let value_read = ds
                 .get_kvattr(sb_ino, key.as_bytes(), value.len() as u64, 0)
@@ -456,14 +470,15 @@ mod tests {
             assert_eq!(value_read.as_slice(), value.as_bytes());
             ds.wait_synced().unwrap();
 
-            opid += 1;
-            sb_file_ino = ds.create_inode(InodeType::FILE, opid).unwrap();
+            (sb_file_ino, _) = ds.create_inode(InodeType::FILE).unwrap();
 
             sb_dentry_data = [sb_file_ino, 1];
 
-            ds.create_dentry(sb_ino, sb_file_name.as_bytes(), &sb_dentry_data, opid)
+            txg = ds
+                .create_dentry(sb_ino, sb_file_name.as_bytes(), &sb_dentry_data)
                 .unwrap();
             ds.wait_synced().unwrap();
+            assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
             let sb_dentry_data_read = ds
                 .lookup_dentry(sb_ino, sb_file_name.as_bytes(), sb_dentry_data.len() as u64)
@@ -471,9 +486,9 @@ mod tests {
             assert_eq!(sb_dentry_data.to_vec(), sb_dentry_data_read);
 
             num = ds.list_object().unwrap();
-            opid += 1;
-            rwobj = ds.create_object(opid).unwrap();
+            (rwobj, txg) = ds.create_object().unwrap();
             ds.wait_synced().unwrap();
+            assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
             assert_eq!(ds.list_object().unwrap(), num + 1);
 
@@ -485,21 +500,20 @@ mod tests {
             ds.write_object(rwobj, 0, size, data).unwrap();
             assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), data);
 
-            opid += 1;
-            file_ino = ds.create_inode(InodeType::FILE, opid).unwrap();
-            opid += 1;
-            dir_ino = ds.create_inode(InodeType::DIR, opid).unwrap();
-            opid += 1;
+            (file_ino, _) = ds.create_inode(InodeType::FILE).unwrap();
+            (dir_ino, _) = ds.create_inode(InodeType::DIR).unwrap();
 
             dentry_data = [file_ino, 1];
 
-            ds.create_dentry(dir_ino, file_name.as_bytes(), &dentry_data, opid)
+            txg = ds
+                .create_dentry(dir_ino, file_name.as_bytes(), &dentry_data)
                 .unwrap();
             let dentry_data_read = ds
                 .lookup_dentry(dir_ino, file_name.as_bytes(), dentry_data.len() as u64)
                 .unwrap();
             assert_eq!(dentry_data.to_vec(), dentry_data_read);
             ds.wait_synced().unwrap();
+            assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
             assert_eq!(ds.list_object().unwrap(), num + 3);
 
@@ -508,8 +522,7 @@ mod tests {
 
             let attr_bytes = unsafe { any_as_u8_slice(&attr) };
 
-            opid += 1;
-            ds.set_attr(file_ino, attr_bytes, opid).unwrap();
+            _ = ds.set_attr(file_ino, attr_bytes).unwrap();
 
             let attr_new = ds.get_attr(file_ino, attr_bytes.len() as u64).unwrap();
             assert_eq!(attr_new.as_slice(), attr_bytes);
@@ -519,8 +532,8 @@ mod tests {
             assert_eq!(attr_got.ino, attr.ino);
             assert_eq!(attr_got.nlink, attr.nlink);
 
-            opid += 1;
-            ds.set_kvattr(file_ino, key.as_bytes(), value.as_bytes(), opid, 0)
+            _ = ds
+                .set_kvattr(file_ino, key.as_bytes(), value.as_bytes(), 0)
                 .unwrap();
 
             let value_read = ds
@@ -529,7 +542,6 @@ mod tests {
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
             assert_eq!(ds.list_object().unwrap(), num + 4);
-            assert_eq!(ds.get_max_synced_opid().unwrap(), opid);
         }
 
         {
@@ -537,7 +549,7 @@ mod tests {
             let _uzfs = Uzfs::init().unwrap();
             let ds = Dataset::init(datasetname.clone()).unwrap();
 
-            assert_eq!(ds.get_max_synced_opid().unwrap(), opid);
+            assert!(ds.get_last_synced_txg().unwrap() >= txg);
             assert_eq!(ds.list_object().unwrap(), num + 4);
 
             assert_eq!(ds.get_superblock_ino().unwrap(), sb_ino);
@@ -556,10 +568,10 @@ mod tests {
             let size = s.len() as u64;
             assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), data);
 
-            opid += 1;
-            ds.delete_object(rwobj, opid).unwrap();
+            txg = ds.delete_object(rwobj).unwrap();
             ds.wait_synced().unwrap();
 
+            assert!(ds.get_last_synced_txg().unwrap() >= txg);
             assert_eq!(ds.list_object().unwrap(), num + 3);
 
             let dentry_data_read = ds
@@ -567,9 +579,7 @@ mod tests {
                 .unwrap();
             assert_eq!(dentry_data.to_vec(), dentry_data_read);
 
-            opid += 1;
-            ds.delete_dentry(dir_ino, file_name.as_bytes(), opid)
-                .unwrap();
+            _ = ds.delete_dentry(dir_ino, file_name.as_bytes()).unwrap();
 
             let attr_bytes = unsafe { any_as_u8_slice(&attr) };
             let attr_new = ds.get_attr(file_ino, attr_bytes.len() as u64).unwrap();
@@ -580,18 +590,16 @@ mod tests {
                 .unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
-            opid += 1;
-            ds.remove_kvattr(file_ino, key.as_bytes(), opid).unwrap();
+            txg = ds.remove_kvattr(file_ino, key.as_bytes()).unwrap();
             ds.wait_synced().unwrap();
+            assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
-            opid += 1;
-            ds.delete_inode(dir_ino, InodeType::DIR, opid).unwrap();
-            opid += 1;
-            ds.delete_inode(file_ino, InodeType::FILE, opid).unwrap();
+            _ = ds.delete_inode(dir_ino, InodeType::DIR).unwrap();
+            txg = ds.delete_inode(file_ino, InodeType::FILE).unwrap();
             ds.wait_synced().unwrap();
+            assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
             assert_eq!(ds.list_object().unwrap(), num);
-            assert_eq!(ds.get_max_synced_opid().unwrap(), opid);
 
             ds.claim_object(rwobj).unwrap();
             ds.wait_synced().unwrap();
