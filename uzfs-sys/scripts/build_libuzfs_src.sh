@@ -35,7 +35,7 @@ unzip_src() {
 
 build_libuzfs_lib() {
     cd ${ZFS_DIR}
-    ./autogen.sh && CFLAGS=-fPIC ./configure --enable-shared=no --prefix=${INSTALL_DIR} && make gitrev
+    ./autogen.sh && CFLAGS=-fPIC ./configure --with-config=user --enable-shared=no --prefix=${INSTALL_DIR} && make gitrev
     cd lib
     make -j4 && make install
     cd ../include
