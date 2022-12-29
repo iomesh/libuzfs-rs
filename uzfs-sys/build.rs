@@ -2,7 +2,6 @@ use std::{env, fs, process::Command};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=src/buildings.rs");
     println!("cargo:rerun-if-changed=src/wrapper.h");
     println!("cargo:rerun-if-changed=zfs");
 
