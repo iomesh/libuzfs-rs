@@ -1,10 +1,13 @@
 use cstr_argument::CStrArgument;
 use std::marker::PhantomData;
-use std::os::raw::{c_char, c_void};
+use std::mem::size_of;
+use std::os::raw::c_char;
 use std::{io, ptr};
 use uzfs_sys as sys;
 
 use io::Result;
+
+const MAX_KVATTR_VALUE_SIZE: usize = 8192;
 
 pub struct Uzfs {
     i: PhantomData<()>,
@@ -243,11 +246,12 @@ impl Dataset {
     }
 
     pub fn get_attr(&self, ino: u64, size: u64) -> Result<Vec<u8>> {
+        assert!(size_of::<sys::uzfs_attr_t>() == size as usize);
         let mut attr = Vec::<u8>::with_capacity(size as usize);
         attr.resize_with(size as usize, Default::default);
-        let attr_ptr = attr.as_mut_ptr() as *mut c_void;
+        let attr_ptr = attr.as_mut_ptr() as *mut sys::uzfs_attr_t;
 
-        let err = unsafe { sys::libuzfs_inode_getattr(self.dhp, ino, attr_ptr, size) };
+        let err = unsafe { sys::libuzfs_inode_getattr(self.dhp, ino, attr_ptr) };
 
         if err == 0 {
             Ok(attr)
@@ -257,11 +261,11 @@ impl Dataset {
     }
 
     pub fn set_attr(&self, ino: u64, attr: &[u8]) -> Result<u64> {
-        let size = attr.len() as u64;
-        let attr_ptr = attr.as_ptr() as *mut c_void;
+        assert!(size_of::<sys::uzfs_attr_t>() == attr.len());
+        let attr_ptr = attr.as_ptr() as *mut sys::uzfs_attr_t;
         let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
 
-        let err = unsafe { sys::libuzfs_inode_setattr(self.dhp, ino, attr_ptr, size, txg_ptr) };
+        let err = unsafe { sys::libuzfs_inode_setattr(self.dhp, ino, attr_ptr, txg_ptr) };
         let txg = unsafe { Box::from_raw(txg_ptr) };
 
         if err == 0 {
@@ -271,20 +275,28 @@ impl Dataset {
         }
     }
 
-    pub fn get_kvattr(&self, ino: u64, name: &[u8], size: u64, flags: i32) -> Result<Vec<u8>> {
-        let mut data = Vec::<u8>::with_capacity(size as usize);
-        data.resize_with(size as usize, Default::default);
+    pub fn get_kvattr(&self, ino: u64, name: &[u8], flags: i32) -> Result<Vec<u8>> {
+        let mut data = Vec::<u8>::with_capacity(MAX_KVATTR_VALUE_SIZE);
+        data.resize_with(MAX_KVATTR_VALUE_SIZE, Default::default);
         let data_ptr = data.as_mut_ptr() as *mut c_char;
         let name_ptr = name.as_ptr() as *mut c_char;
 
-        let err = unsafe {
-            sys::libuzfs_inode_get_kvattr(self.dhp, ino, name_ptr, data_ptr, size, flags)
+        let rc = unsafe {
+            sys::libuzfs_inode_get_kvattr(
+                self.dhp,
+                ino,
+                name_ptr,
+                data_ptr,
+                MAX_KVATTR_VALUE_SIZE as u64,
+                flags,
+            )
         };
 
-        if err == 0 {
+        if rc > 0 {
+            data.resize_with(rc as usize, Default::default);
             Ok(data)
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            Err(io::Error::from_raw_os_error(-rc as i32))
         }
     }
 
@@ -394,11 +406,7 @@ mod tests {
     use super::Uzfs;
     use std::fs::{self, File};
     use std::mem::{size_of, transmute};
-
-    struct Attr {
-        ino: u64,
-        nlink: u64,
-    }
+    use uzfs_sys::uzfs_attr_t as Attr;
 
     unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
         ::std::slice::from_raw_parts((p as *const T) as *const u8, ::std::mem::size_of::<T>())
@@ -443,7 +451,9 @@ mod tests {
         let dir_ino;
         let num;
         let mut txg;
-        let mut attr: Attr = Attr { ino: 0, nlink: 0 };
+        let mut attr: Attr = Attr {
+            ..Default::default()
+        };
         let key = String::from("acl");
         let value = String::from("root,admin");
         let file_name = String::from("fileA");
@@ -464,9 +474,7 @@ mod tests {
                 .unwrap();
             assert!(txg > last_txg);
 
-            let value_read = ds
-                .get_kvattr(sb_ino, key.as_bytes(), value.len() as u64, 0)
-                .unwrap();
+            let value_read = ds.get_kvattr(sb_ino, key.as_bytes(), 0).unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
             ds.wait_synced().unwrap();
 
@@ -517,8 +525,8 @@ mod tests {
 
             assert_eq!(ds.list_object().unwrap(), num + 3);
 
-            attr.ino = file_ino;
             attr.nlink = 1;
+            attr.gen = 101;
 
             let attr_bytes = unsafe { any_as_u8_slice(&attr) };
 
@@ -536,12 +544,10 @@ mod tests {
                 .set_kvattr(file_ino, key.as_bytes(), value.as_bytes(), 0)
                 .unwrap();
 
-            let value_read = ds
-                .get_kvattr(file_ino, key.as_bytes(), value.len() as u64, 0)
-                .unwrap();
+            let value_read = ds.get_kvattr(file_ino, key.as_bytes(), 0).unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
-            assert_eq!(ds.list_object().unwrap(), num + 4);
+            assert_eq!(ds.list_object().unwrap(), num + 3);
         }
 
         {
@@ -550,13 +556,11 @@ mod tests {
             let ds = Dataset::init(datasetname.clone()).unwrap();
 
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
-            assert_eq!(ds.list_object().unwrap(), num + 4);
+            assert_eq!(ds.list_object().unwrap(), num + 3);
 
             assert_eq!(ds.get_superblock_ino().unwrap(), sb_ino);
 
-            let value_read = ds
-                .get_kvattr(sb_ino, key.as_bytes(), value.len() as u64, 0)
-                .unwrap();
+            let value_read = ds.get_kvattr(sb_ino, key.as_bytes(), 0).unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
             let sb_dentry_data_read = ds
@@ -572,7 +576,7 @@ mod tests {
             ds.wait_synced().unwrap();
 
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
-            assert_eq!(ds.list_object().unwrap(), num + 3);
+            assert_eq!(ds.list_object().unwrap(), num + 2);
 
             let dentry_data_read = ds
                 .lookup_dentry(dir_ino, file_name.as_bytes(), dentry_data.len() as u64)
@@ -585,9 +589,7 @@ mod tests {
             let attr_new = ds.get_attr(file_ino, attr_bytes.len() as u64).unwrap();
             assert_eq!(attr_new.as_slice(), attr_bytes);
 
-            let value_read = ds
-                .get_kvattr(file_ino, key.as_bytes(), value.len() as u64, 0)
-                .unwrap();
+            let value_read = ds.get_kvattr(file_ino, key.as_bytes(), 0).unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
             txg = ds.remove_kvattr(file_ino, key.as_bytes()).unwrap();
