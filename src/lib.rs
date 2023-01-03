@@ -106,16 +106,14 @@ impl Dataset {
         }
     }
 
-    pub fn create_object(&self) -> Result<(u64, u64)> {
+    pub fn create_object(&self) -> Result<u64> {
         let obj_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
-        let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
 
-        let err = unsafe { sys::libuzfs_object_create(self.dhp, obj_ptr, txg_ptr) };
+        let err = unsafe { sys::libuzfs_object_create(self.dhp, obj_ptr) };
         let obj = unsafe { Box::from_raw(obj_ptr) };
-        let txg = unsafe { Box::from_raw(txg_ptr) };
 
         if err == 0 {
-            Ok((*obj, *txg))
+            Ok(*obj)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
@@ -131,14 +129,11 @@ impl Dataset {
         }
     }
 
-    pub fn delete_object(&self, obj: u64) -> Result<u64> {
-        let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
-
-        let err = unsafe { sys::libuzfs_object_delete(self.dhp, obj, txg_ptr) };
-        let txg = unsafe { Box::from_raw(txg_ptr) };
+    pub fn delete_object(&self, obj: u64) -> Result<()> {
+        let err = unsafe { sys::libuzfs_object_delete(self.dhp, obj) };
 
         if err == 0 {
-            Ok(*txg)
+            Ok(())
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
@@ -177,10 +172,18 @@ impl Dataset {
         }
     }
 
-    pub fn write_object(&self, obj: u64, offset: u64, size: u64, data: &[u8]) -> Result<()> {
-        let err = unsafe {
-            sys::libuzfs_object_write(self.dhp, obj, offset, size, data.as_ptr() as *const c_char)
-        };
+    // TODO(hping): add unit tests to verify sync write works well in crash scenario
+    pub fn write_object(
+        &self,
+        obj: u64,
+        offset: u64,
+        size: u64,
+        data: &[u8],
+        sync: bool,
+    ) -> Result<()> {
+        let ptr = data.as_ptr() as *const c_char;
+        let sync = sync as u32;
+        let err = unsafe { sys::libuzfs_object_write(self.dhp, obj, offset, size, ptr, sync) };
 
         if err == 0 {
             Ok(())
@@ -494,9 +497,8 @@ mod tests {
             assert_eq!(sb_dentry_data.to_vec(), sb_dentry_data_read);
 
             num = ds.list_object().unwrap();
-            (rwobj, txg) = ds.create_object().unwrap();
+            rwobj = ds.create_object().unwrap();
             ds.wait_synced().unwrap();
-            assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
             assert_eq!(ds.list_object().unwrap(), num + 1);
 
@@ -505,7 +507,7 @@ mod tests {
 
             let data = s.as_bytes();
             let size = s.len() as u64;
-            ds.write_object(rwobj, 0, size, data).unwrap();
+            ds.write_object(rwobj, 0, size, data, true).unwrap();
             assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), data);
 
             (file_ino, _) = ds.create_inode(InodeType::FILE).unwrap();
@@ -572,10 +574,8 @@ mod tests {
             let size = s.len() as u64;
             assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), data);
 
-            txg = ds.delete_object(rwobj).unwrap();
-            ds.wait_synced().unwrap();
+            ds.delete_object(rwobj).unwrap();
 
-            assert!(ds.get_last_synced_txg().unwrap() >= txg);
             assert_eq!(ds.list_object().unwrap(), num + 2);
 
             let dentry_data_read = ds
