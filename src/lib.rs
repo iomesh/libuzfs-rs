@@ -206,6 +206,21 @@ impl Dataset {
         }
     }
 
+    // TODO(hping): add ut
+    pub fn sync_object(&self, obj: u64) {
+        unsafe { sys::libuzfs_object_sync(self.dhp, obj) };
+    }
+
+    pub fn truncate_object(&self, obj: u64, offset: u64, size: u64) -> Result<()> {
+        let err = unsafe { sys::libuzfs_object_truncate(self.dhp, obj, offset, size) };
+
+        if err == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(err))
+        }
+    }
+
     pub fn dump_object_doi(obj: u64, doi: sys::dmu_object_info_t) {
         println!("object: {}", obj);
         println!("\tdata_block_size: {}", doi.doi_data_block_size);
@@ -465,6 +480,7 @@ mod tests {
         let sb_file_name = String::from("sb_file");
         let sb_dentry_data;
         let s = String::from("Hello uzfs!");
+        let t = vec!['H' as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let file_ino;
         let dir_ino;
         let num;
@@ -513,7 +529,6 @@ mod tests {
 
             num = ds.list_object().unwrap();
             (rwobj, gen) = ds.create_object().unwrap();
-            ds.wait_synced().unwrap();
 
             assert_eq!(ds.get_object_gen(rwobj).unwrap(), gen);
             assert_eq!(ds.list_object().unwrap(), num + 1);
@@ -525,6 +540,9 @@ mod tests {
             let size = s.len() as u64;
             ds.write_object(rwobj, 0, size, true, data).unwrap();
             assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), data);
+
+            ds.truncate_object(rwobj, 1, size - 1).unwrap();
+            assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), t);
 
             (file_ino, _) = ds.create_inode(InodeType::FILE).unwrap();
             (dir_ino, _) = ds.create_inode(InodeType::DIR).unwrap();
@@ -588,9 +606,8 @@ mod tests {
 
             assert_eq!(ds.get_object_gen(rwobj).unwrap(), gen);
 
-            let data = s.as_bytes();
             let size = s.len() as u64;
-            assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), data);
+            assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), t);
 
             ds.delete_object(rwobj).unwrap();
 
