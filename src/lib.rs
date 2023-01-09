@@ -106,14 +106,16 @@ impl Dataset {
         }
     }
 
-    pub fn create_object(&self) -> Result<u64> {
+    pub fn create_object(&self) -> Result<(u64, u64)> {
         let obj_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
+        let gen_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
 
-        let err = unsafe { sys::libuzfs_object_create(self.dhp, obj_ptr) };
+        let err = unsafe { sys::libuzfs_object_create(self.dhp, obj_ptr, gen_ptr) };
         let obj = unsafe { Box::from_raw(obj_ptr) };
+        let gen = unsafe { Box::from_raw(gen_ptr) };
 
         if err == 0 {
-            Ok(*obj)
+            Ok((*obj, *gen))
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
@@ -134,6 +136,18 @@ impl Dataset {
 
         if err == 0 {
             Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(err))
+        }
+    }
+
+    pub fn get_object_gen(&self, obj: u64) -> Result<u64> {
+        let gen_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
+        let err = unsafe { sys::libuzfs_object_get_gen(self.dhp, obj, gen_ptr) };
+        let gen = unsafe { Box::from_raw(gen_ptr) };
+
+        if err == 0 {
+            Ok(*gen)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
@@ -178,8 +192,8 @@ impl Dataset {
         obj: u64,
         offset: u64,
         size: u64,
-        data: &[u8],
         sync: bool,
+        data: &[u8],
     ) -> Result<()> {
         let ptr = data.as_ptr() as *const c_char;
         let sync = sync as u32;
@@ -445,6 +459,7 @@ mod tests {
         let zpool_cache_path = String::from("/tmp/testzpool.cache");
 
         let rwobj;
+        let gen;
         let sb_ino;
         let sb_file_ino;
         let sb_file_name = String::from("sb_file");
@@ -497,9 +512,10 @@ mod tests {
             assert_eq!(sb_dentry_data.to_vec(), sb_dentry_data_read);
 
             num = ds.list_object().unwrap();
-            rwobj = ds.create_object().unwrap();
+            (rwobj, gen) = ds.create_object().unwrap();
             ds.wait_synced().unwrap();
 
+            assert_eq!(ds.get_object_gen(rwobj).unwrap(), gen);
             assert_eq!(ds.list_object().unwrap(), num + 1);
 
             let doi = ds.stat_object(rwobj).unwrap();
@@ -507,7 +523,7 @@ mod tests {
 
             let data = s.as_bytes();
             let size = s.len() as u64;
-            ds.write_object(rwobj, 0, size, data, true).unwrap();
+            ds.write_object(rwobj, 0, size, true, data).unwrap();
             assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), data);
 
             (file_ino, _) = ds.create_inode(InodeType::FILE).unwrap();
@@ -569,6 +585,8 @@ mod tests {
                 .lookup_dentry(sb_ino, sb_file_name.as_bytes(), sb_dentry_data.len() as u64)
                 .unwrap();
             assert_eq!(sb_dentry_data.to_vec(), sb_dentry_data_read);
+
+            assert_eq!(ds.get_object_gen(rwobj).unwrap(), gen);
 
             let data = s.as_bytes();
             let size = s.len() as u64;
