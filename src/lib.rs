@@ -187,14 +187,8 @@ impl Dataset {
     }
 
     // TODO(hping): add unit tests to verify sync write works well in crash scenario
-    pub fn write_object(
-        &self,
-        obj: u64,
-        offset: u64,
-        size: u64,
-        sync: bool,
-        data: &[u8],
-    ) -> Result<()> {
+    pub fn write_object(&self, obj: u64, offset: u64, sync: bool, data: &[u8]) -> Result<()> {
+        let size = data.len() as u64;
         let ptr = data.as_ptr() as *const c_char;
         let sync = sync as u32;
         let err = unsafe { sys::libuzfs_object_write(self.dhp, obj, offset, size, ptr, sync) };
@@ -538,7 +532,7 @@ mod tests {
 
             let data = s.as_bytes();
             let size = s.len() as u64;
-            ds.write_object(rwobj, 0, size, true, data).unwrap();
+            ds.write_object(rwobj, 0, true, data).unwrap();
             assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), data);
 
             ds.truncate_object(rwobj, 1, size - 1).unwrap();
