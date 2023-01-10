@@ -17,3 +17,4 @@ uzfs-sys = { path = "uzfs-sys", version = "0.1.0" }
 [dependencies]
 cstr-argument = "0.1"
 uzfs-sys = { path = "uzfs-sys", version = "0.1.0" }
+tempfile = "3.3.0"
