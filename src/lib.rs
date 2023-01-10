@@ -3,6 +3,7 @@ use std::marker::PhantomData;
 use std::mem::size_of;
 use std::os::raw::c_char;
 use std::{io, ptr};
+use tempfile::NamedTempFile;
 use uzfs_sys as sys;
 
 use io::Result;
@@ -425,48 +426,67 @@ impl Drop for Dataset {
 unsafe impl Send for Dataset {}
 unsafe impl Sync for Dataset {}
 
+pub struct UzfsTestEnv {
+    #[allow(dead_code)]
+    dev_file: NamedTempFile,
+    poolname: String,
+    dsname: String,
+    cache_path: String,
+}
+
+impl UzfsTestEnv {
+    /// Create an env for uzfs test.
+    ///
+    /// This will create a temp file as block device, the size of device is `dev_size` bytes.
+    /// A zpool and dataset then are created upon the block device, the name is specified by `dsname`.
+    /// `cache_path` specifies the path of zpool.cache, used by uzfs to find zpool.
+    ///
+    /// All of the resources (temp file, zpool, dataset) will be deleted automatically when the env
+    /// goes out of scope
+    pub fn new(dsname: String, cache_path: String, dev_size: u64) -> Self {
+        let mut dev_file = NamedTempFile::new().unwrap();
+        dev_file.as_file_mut().set_len(dev_size).unwrap();
+        let devname = dev_file.path().to_str().unwrap();
+        let (poolname, _) = dsname.split_once('/').unwrap();
+
+        Uzfs::set_zpool_cache_path(&cache_path);
+        let uzfs = Uzfs::init().unwrap();
+        uzfs.create_zpool(poolname, devname).unwrap();
+        uzfs.create_dataset(&dsname).unwrap();
+
+        UzfsTestEnv {
+            dev_file,
+            poolname: poolname.to_owned(),
+            dsname,
+            cache_path,
+        }
+    }
+}
+
+impl Drop for UzfsTestEnv {
+    fn drop(&mut self) {
+        Uzfs::set_zpool_cache_path(&self.cache_path);
+        let uzfs = Uzfs::init().unwrap();
+        uzfs.destroy_dataset(&self.dsname);
+        uzfs.destroy_zpool(&self.poolname);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Dataset;
     use super::InodeType;
-    use super::Uzfs;
-    use std::fs::{self, File};
+    use super::{Uzfs, UzfsTestEnv};
     use std::mem::{size_of, transmute};
+    use tempfile::NamedTempFile;
     use uzfs_sys::uzfs_attr_t as Attr;
 
     unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
         ::std::slice::from_raw_parts((p as *const T) as *const u8, ::std::mem::size_of::<T>())
     }
 
-    fn setup(devname: &str, poolname: &str, datasetname: &str, cache_path: &str) {
-        let dev_file = File::create(devname.clone()).unwrap();
-        dev_file.set_len(100 * 1024 * 1024).unwrap();
-
-        Uzfs::set_zpool_cache_path(cache_path);
-
-        let uzfs = Uzfs::init().unwrap();
-        uzfs.create_zpool(poolname.clone(), devname.clone())
-            .unwrap();
-        uzfs.create_dataset(datasetname.clone()).unwrap();
-    }
-
-    fn cleanup(devname: &str, poolname: &str, datasetname: &str, cache_path: &str) {
-        Uzfs::set_zpool_cache_path(cache_path);
-
-        let uzfs = Uzfs::init().unwrap();
-        uzfs.destroy_dataset(datasetname.clone());
-        uzfs.destroy_zpool(poolname.clone());
-
-        fs::remove_file(devname).unwrap();
-    }
-
     #[test]
     fn uzfs_test() {
-        let devname = String::from("/tmp/uzfs-test.img");
-        let poolname = String::from("uzfs-test-pool1");
-        let datasetname = poolname.clone() + "/uzfs";
-        let zpool_cache_path = String::from("/tmp/testzpool.cache");
-
         let rwobj;
         let gen;
         let sb_ino;
@@ -487,12 +507,16 @@ mod tests {
         let file_name = String::from("fileA");
         let dentry_data;
 
-        setup(&devname, &poolname, &datasetname, &zpool_cache_path);
+        let dsname = "uzfs-test-pool/ds";
+        let cache_file = NamedTempFile::new().unwrap();
+        let cache_path = cache_file.path().to_str().unwrap();
+        let _uzfs_test_env =
+            UzfsTestEnv::new(dsname.to_owned(), cache_path.to_owned(), 100 * 1024 * 1024);
 
         {
-            Uzfs::set_zpool_cache_path(&zpool_cache_path);
+            Uzfs::set_zpool_cache_path(cache_path);
             let _uzfs = Uzfs::init().unwrap();
-            let ds = Dataset::init(datasetname.clone()).unwrap();
+            let ds = Dataset::init(dsname).unwrap();
 
             sb_ino = ds.get_superblock_ino().unwrap();
             let last_txg = ds.get_last_synced_txg().unwrap();
@@ -581,9 +605,9 @@ mod tests {
         }
 
         {
-            Uzfs::set_zpool_cache_path(&zpool_cache_path);
+            Uzfs::set_zpool_cache_path(cache_path);
             let _uzfs = Uzfs::init().unwrap();
-            let ds = Dataset::init(datasetname.clone()).unwrap();
+            let ds = Dataset::init(dsname).unwrap();
 
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
             assert_eq!(ds.list_object().unwrap(), num + 3);
@@ -637,7 +661,5 @@ mod tests {
 
             assert_eq!(ds.list_object().unwrap(), num + 1);
         }
-
-        cleanup(&devname, &poolname, &datasetname, &zpool_cache_path);
     }
 }
