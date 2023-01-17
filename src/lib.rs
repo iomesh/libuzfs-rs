@@ -47,7 +47,8 @@ impl Uzfs {
     }
 
     pub fn destroy_zpool<P: CStrArgument>(&self, zpool: P) {
-        unsafe { sys::libuzfs_zpool_destroy(zpool.into_cstr().as_ref().as_ptr()) };
+        let zpool = zpool.into_cstr();
+        unsafe { sys::libuzfs_zpool_destroy(zpool.as_ref().as_ptr()) };
     }
 
     pub fn create_dataset<P: CStrArgument>(&self, dsname: P) -> Result<()> {
@@ -60,8 +61,9 @@ impl Uzfs {
         }
     }
 
-    pub fn destroy_dataset<P: CStrArgument>(&self, zpool: P) {
-        unsafe { sys::libuzfs_dataset_destroy(zpool.into_cstr().as_ref().as_ptr()) };
+    pub fn destroy_dataset<P: CStrArgument>(&self, dsname: P) {
+        let dsname = dsname.into_cstr();
+        unsafe { sys::libuzfs_dataset_destroy(dsname.as_ref().as_ptr()) };
     }
 }
 
@@ -302,11 +304,12 @@ impl Dataset {
         }
     }
 
-    pub fn get_kvattr(&self, ino: u64, name: &[u8], flags: i32) -> Result<Vec<u8>> {
+    pub fn get_kvattr<P: CStrArgument>(&self, ino: u64, name: P, flags: i32) -> Result<Vec<u8>> {
         let mut data = Vec::<u8>::with_capacity(MAX_KVATTR_VALUE_SIZE);
         data.resize_with(MAX_KVATTR_VALUE_SIZE, Default::default);
         let data_ptr = data.as_mut_ptr() as *mut c_char;
-        let name_ptr = name.as_ptr() as *mut c_char;
+        let cname = name.into_cstr();
+        let name_ptr = cname.as_ref().as_ptr() as *const c_char;
 
         let rc = unsafe {
             sys::libuzfs_inode_get_kvattr(
@@ -327,9 +330,16 @@ impl Dataset {
         }
     }
 
-    pub fn set_kvattr(&self, ino: u64, name: &[u8], value: &[u8], flags: i32) -> Result<u64> {
-        let name_ptr = name.as_ptr() as *mut c_char;
-        let value_ptr = value.as_ptr() as *mut c_char;
+    pub fn set_kvattr<P: CStrArgument>(
+        &self,
+        ino: u64,
+        name: P,
+        value: &[u8],
+        flags: i32,
+    ) -> Result<u64> {
+        let cname = name.into_cstr();
+        let name_ptr = cname.as_ref().as_ptr() as *const c_char;
+        let value_ptr = value.as_ptr() as *const c_char;
         let size = value.len() as u64;
         let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
 
@@ -345,8 +355,9 @@ impl Dataset {
         }
     }
 
-    pub fn remove_kvattr(&self, ino: u64, name: &[u8]) -> Result<u64> {
-        let name_ptr = name.as_ptr() as *mut c_char;
+    pub fn remove_kvattr<P: CStrArgument>(&self, ino: u64, name: P) -> Result<u64> {
+        let cname = name.into_cstr();
+        let name_ptr = cname.as_ref().as_ptr() as *const c_char;
         let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
 
         let err = unsafe { sys::libuzfs_inode_remove_kvattr(self.dhp, ino, name_ptr, txg_ptr) };
@@ -359,9 +370,10 @@ impl Dataset {
         }
     }
 
-    pub fn create_dentry(&self, pino: u64, name: &[u8], value: &[u64]) -> Result<u64> {
+    pub fn create_dentry<P: CStrArgument>(&self, pino: u64, name: P, value: &[u64]) -> Result<u64> {
         let num = value.len() as u64;
-        let name_ptr = name.as_ptr() as *mut c_char;
+        let cname = name.into_cstr();
+        let name_ptr = cname.as_ref().as_ptr() as *const c_char;
         let value_ptr = value.as_ptr() as *mut u64;
         let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
 
@@ -377,11 +389,11 @@ impl Dataset {
         }
     }
 
-    pub fn delete_dentry(&self, pino: u64, name: &[u8]) -> Result<u64> {
+    pub fn delete_dentry<P: CStrArgument>(&self, pino: u64, name: P) -> Result<u64> {
         let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
-        let err = unsafe {
-            sys::libuzfs_dentry_delete(self.dhp, pino, name.as_ptr() as *mut c_char, txg_ptr)
-        };
+        let cname = name.into_cstr();
+        let name_ptr = cname.as_ref().as_ptr() as *const c_char;
+        let err = unsafe { sys::libuzfs_dentry_delete(self.dhp, pino, name_ptr, txg_ptr) };
         let txg = unsafe { Box::from_raw(txg_ptr) };
 
         if err == 0 {
@@ -391,11 +403,17 @@ impl Dataset {
         }
     }
 
-    pub fn lookup_dentry(&self, pino: u64, name: &[u8], size: u64) -> Result<Vec<u64>> {
+    pub fn lookup_dentry<P: CStrArgument>(
+        &self,
+        pino: u64,
+        name: P,
+        size: u64,
+    ) -> Result<Vec<u64>> {
         let mut value = Vec::<u64>::with_capacity(size as usize);
         value.resize_with(size as usize, Default::default);
         let value_ptr = value.as_mut_ptr() as *mut u64;
-        let name_ptr = name.as_ptr() as *mut c_char;
+        let cname = name.into_cstr();
+        let name_ptr = cname.as_ref().as_ptr() as *const c_char;
 
         let err = unsafe { sys::libuzfs_dentry_lookup(self.dhp, pino, name_ptr, value_ptr, size) };
 
@@ -491,7 +509,7 @@ mod tests {
         let gen;
         let sb_ino;
         let sb_file_ino;
-        let sb_file_name = String::from("sb_file");
+        let sb_file_name = "sb_file";
         let sb_dentry_data;
         let s = String::from("Hello uzfs!");
         let t = vec!['H' as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
@@ -502,9 +520,9 @@ mod tests {
         let mut attr: Attr = Attr {
             ..Default::default()
         };
-        let key = String::from("acl");
-        let value = String::from("root,admin");
-        let file_name = String::from("fileA");
+        let key = "acl";
+        let value = "root,admin";
+        let file_name = "fileA";
         let dentry_data;
 
         let dsname = "uzfs-test-pool/ds";
@@ -521,12 +539,10 @@ mod tests {
             sb_ino = ds.get_superblock_ino().unwrap();
             let last_txg = ds.get_last_synced_txg().unwrap();
 
-            txg = ds
-                .set_kvattr(sb_ino, key.as_bytes(), value.as_bytes(), 0)
-                .unwrap();
+            txg = ds.set_kvattr(sb_ino, key, value.as_bytes(), 0).unwrap();
             assert!(txg > last_txg);
 
-            let value_read = ds.get_kvattr(sb_ino, key.as_bytes(), 0).unwrap();
+            let value_read = ds.get_kvattr(sb_ino, key, 0).unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
             ds.wait_synced().unwrap();
 
@@ -535,13 +551,13 @@ mod tests {
             sb_dentry_data = [sb_file_ino, 1];
 
             txg = ds
-                .create_dentry(sb_ino, sb_file_name.as_bytes(), &sb_dentry_data)
+                .create_dentry(sb_ino, sb_file_name, &sb_dentry_data)
                 .unwrap();
             ds.wait_synced().unwrap();
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
             let sb_dentry_data_read = ds
-                .lookup_dentry(sb_ino, sb_file_name.as_bytes(), sb_dentry_data.len() as u64)
+                .lookup_dentry(sb_ino, sb_file_name, sb_dentry_data.len() as u64)
                 .unwrap();
             assert_eq!(sb_dentry_data.to_vec(), sb_dentry_data_read);
 
@@ -567,11 +583,9 @@ mod tests {
 
             dentry_data = [file_ino, 1];
 
-            txg = ds
-                .create_dentry(dir_ino, file_name.as_bytes(), &dentry_data)
-                .unwrap();
+            txg = ds.create_dentry(dir_ino, file_name, &dentry_data).unwrap();
             let dentry_data_read = ds
-                .lookup_dentry(dir_ino, file_name.as_bytes(), dentry_data.len() as u64)
+                .lookup_dentry(dir_ino, file_name, dentry_data.len() as u64)
                 .unwrap();
             assert_eq!(dentry_data.to_vec(), dentry_data_read);
             ds.wait_synced().unwrap();
@@ -594,11 +608,9 @@ mod tests {
             assert_eq!(attr_got.ino, attr.ino);
             assert_eq!(attr_got.nlink, attr.nlink);
 
-            _ = ds
-                .set_kvattr(file_ino, key.as_bytes(), value.as_bytes(), 0)
-                .unwrap();
+            _ = ds.set_kvattr(file_ino, key, value.as_bytes(), 0).unwrap();
 
-            let value_read = ds.get_kvattr(file_ino, key.as_bytes(), 0).unwrap();
+            let value_read = ds.get_kvattr(file_ino, key, 0).unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
             assert_eq!(ds.list_object().unwrap(), num + 3);
@@ -614,11 +626,11 @@ mod tests {
 
             assert_eq!(ds.get_superblock_ino().unwrap(), sb_ino);
 
-            let value_read = ds.get_kvattr(sb_ino, key.as_bytes(), 0).unwrap();
+            let value_read = ds.get_kvattr(sb_ino, key, 0).unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
             let sb_dentry_data_read = ds
-                .lookup_dentry(sb_ino, sb_file_name.as_bytes(), sb_dentry_data.len() as u64)
+                .lookup_dentry(sb_ino, sb_file_name, sb_dentry_data.len() as u64)
                 .unwrap();
             assert_eq!(sb_dentry_data.to_vec(), sb_dentry_data_read);
 
@@ -632,20 +644,20 @@ mod tests {
             assert_eq!(ds.list_object().unwrap(), num + 2);
 
             let dentry_data_read = ds
-                .lookup_dentry(dir_ino, file_name.as_bytes(), dentry_data.len() as u64)
+                .lookup_dentry(dir_ino, file_name, dentry_data.len() as u64)
                 .unwrap();
             assert_eq!(dentry_data.to_vec(), dentry_data_read);
 
-            _ = ds.delete_dentry(dir_ino, file_name.as_bytes()).unwrap();
+            _ = ds.delete_dentry(dir_ino, file_name).unwrap();
 
             let attr_bytes = unsafe { any_as_u8_slice(&attr) };
             let attr_new = ds.get_attr(file_ino, attr_bytes.len() as u64).unwrap();
             assert_eq!(attr_new.as_slice(), attr_bytes);
 
-            let value_read = ds.get_kvattr(file_ino, key.as_bytes(), 0).unwrap();
+            let value_read = ds.get_kvattr(file_ino, key, 0).unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
-            txg = ds.remove_kvattr(file_ino, key.as_bytes()).unwrap();
+            txg = ds.remove_kvattr(file_ino, key).unwrap();
             ds.wait_synced().unwrap();
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
