@@ -321,7 +321,12 @@ impl Dataset {
         }
     }
 
-    pub fn get_kvattr<P: CStrArgument>(&self, ino: u64, name: P, flags: i32) -> Result<Vec<u8>> {
+    pub fn get_kvattr<P: CStrArgument>(
+        &self,
+        ino: u64,
+        name: P,
+        flags: i32,
+    ) -> Result<Option<Vec<u8>>> {
         let mut data = Vec::<u8>::with_capacity(MAX_KVATTR_VALUE_SIZE);
         data.resize_with(MAX_KVATTR_VALUE_SIZE, Default::default);
         let data_ptr = data.as_mut_ptr() as *mut c_char;
@@ -341,9 +346,14 @@ impl Dataset {
 
         if rc > 0 {
             data.resize_with(rc as usize, Default::default);
-            Ok(data)
+            Ok(Some(data))
         } else {
-            Err(io::Error::from_raw_os_error(-rc as i32))
+            let err = io::Error::from_raw_os_error(-rc as i32);
+            if err.kind() == io::ErrorKind::NotFound {
+                Ok(None)
+            } else {
+                Err(err)
+            }
         }
     }
 
@@ -425,19 +435,24 @@ impl Dataset {
         pino: u64,
         name: P,
         size: u64,
-    ) -> Result<Vec<u64>> {
+    ) -> Result<Option<Vec<u64>>> {
         let mut value = Vec::<u64>::with_capacity(size as usize);
         value.resize_with(size as usize, Default::default);
         let value_ptr = value.as_mut_ptr() as *mut u64;
         let cname = name.into_cstr();
         let name_ptr = cname.as_ref().as_ptr() as *const c_char;
 
-        let err = unsafe { sys::libuzfs_dentry_lookup(self.dhp, pino, name_ptr, value_ptr, size) };
+        let rc = unsafe { sys::libuzfs_dentry_lookup(self.dhp, pino, name_ptr, value_ptr, size) };
 
-        if err == 0 {
-            Ok(value)
+        if rc == 0 {
+            Ok(Some(value))
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            let err = io::Error::from_raw_os_error(-rc as i32);
+            if err.kind() == io::ErrorKind::NotFound {
+                Ok(None)
+            } else {
+                Err(err)
+            }
         }
     }
 
@@ -560,7 +575,7 @@ mod tests {
             txg = ds.set_kvattr(sb_ino, key, value.as_bytes(), 0).unwrap();
             assert!(txg > last_txg);
 
-            let value_read = ds.get_kvattr(sb_ino, key, 0).unwrap();
+            let value_read = ds.get_kvattr(sb_ino, key, 0).unwrap().unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
             ds.wait_synced().unwrap();
 
@@ -576,6 +591,7 @@ mod tests {
 
             let sb_dentry_data_read = ds
                 .lookup_dentry(sb_ino, sb_file_name, sb_dentry_data.len() as u64)
+                .unwrap()
                 .unwrap();
             assert_eq!(sb_dentry_data.to_vec(), sb_dentry_data_read);
 
@@ -604,6 +620,7 @@ mod tests {
             txg = ds.create_dentry(dir_ino, file_name, &dentry_data).unwrap();
             let dentry_data_read = ds
                 .lookup_dentry(dir_ino, file_name, dentry_data.len() as u64)
+                .unwrap()
                 .unwrap();
             assert_eq!(dentry_data.to_vec(), dentry_data_read);
             ds.wait_synced().unwrap();
@@ -628,7 +645,7 @@ mod tests {
 
             _ = ds.set_kvattr(file_ino, key, value.as_bytes(), 0).unwrap();
 
-            let value_read = ds.get_kvattr(file_ino, key, 0).unwrap();
+            let value_read = ds.get_kvattr(file_ino, key, 0).unwrap().unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
             assert_eq!(ds.list_object().unwrap(), num + 3);
@@ -644,11 +661,12 @@ mod tests {
 
             assert_eq!(ds.get_superblock_ino().unwrap(), sb_ino);
 
-            let value_read = ds.get_kvattr(sb_ino, key, 0).unwrap();
+            let value_read = ds.get_kvattr(sb_ino, key, 0).unwrap().unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
             let sb_dentry_data_read = ds
                 .lookup_dentry(sb_ino, sb_file_name, sb_dentry_data.len() as u64)
+                .unwrap()
                 .unwrap();
             assert_eq!(sb_dentry_data.to_vec(), sb_dentry_data_read);
 
@@ -663,6 +681,7 @@ mod tests {
 
             let dentry_data_read = ds
                 .lookup_dentry(dir_ino, file_name, dentry_data.len() as u64)
+                .unwrap()
                 .unwrap();
             assert_eq!(dentry_data.to_vec(), dentry_data_read);
 
@@ -672,7 +691,7 @@ mod tests {
             let attr_new = ds.get_attr(file_ino, attr_bytes.len() as u64).unwrap();
             assert_eq!(attr_new.as_slice(), attr_bytes);
 
-            let value_read = ds.get_kvattr(file_ino, key, 0).unwrap();
+            let value_read = ds.get_kvattr(file_ino, key, 0).unwrap().unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
             txg = ds.remove_kvattr(file_ino, key).unwrap();
