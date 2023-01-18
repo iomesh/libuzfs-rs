@@ -1,4 +1,5 @@
 use cstr_argument::CStrArgument;
+use std::ffi::{CStr, CString};
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::os::raw::c_char;
@@ -83,16 +84,32 @@ pub enum InodeType {
 
 pub struct Dataset {
     dhp: *mut sys::libuzfs_dataset_handle_t,
+    zhp: *mut sys::libuzfs_zpool_handle_t,
 }
 
 impl Dataset {
-    pub fn init<P: CStrArgument>(dsname: P) -> Result<Self> {
-        let dhp = unsafe { sys::libuzfs_dataset_open(dsname.into_cstr().as_ref().as_ptr()) };
+    fn dsname_to_poolname<P: AsRef<CStr>>(dsname: P) -> Result<CString> {
+        let s = dsname.as_ref().to_string_lossy().into_owned();
+        let v: Vec<&str> = s.split('/').collect();
+        if v.len() != 2 {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        Ok(CString::new(v[0]).unwrap())
+    }
 
+    pub fn init<P: CStrArgument>(dsname: P) -> Result<Self> {
+        let dsname = dsname.into_cstr();
+        let poolname = Self::dsname_to_poolname(&dsname)?;
+        let zhp = unsafe { sys::libuzfs_zpool_open(poolname.as_c_str().as_ptr()) };
+        if zhp.is_null() {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+
+        let dhp = unsafe { sys::libuzfs_dataset_open(dsname.as_ref().as_ptr()) };
         if dhp.is_null() {
             Err(io::Error::from(io::ErrorKind::InvalidInput))
         } else {
-            Ok(Self { dhp })
+            Ok(Self { dhp, zhp })
         }
     }
 
@@ -438,6 +455,7 @@ impl Dataset {
 impl Drop for Dataset {
     fn drop(&mut self) {
         unsafe { sys::libuzfs_dataset_close(self.dhp) };
+        unsafe { sys::libuzfs_zpool_close(self.zhp) };
     }
 }
 
