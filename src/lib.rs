@@ -611,6 +611,7 @@ mod tests {
 
             assert_eq!(ds.list_object().unwrap(), num + 3);
 
+            attr.ino = file_ino;
             attr.nlink = 1;
             attr.gen = 101;
 
