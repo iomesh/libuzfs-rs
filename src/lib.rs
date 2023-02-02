@@ -387,16 +387,12 @@ impl Dataset {
         }
     }
 
-    pub fn create_dentry<P: CStrArgument>(&self, pino: u64, name: P, value: &[u64]) -> Result<u64> {
-        let num = value.len() as u64;
+    pub fn create_dentry<P: CStrArgument>(&self, pino: u64, name: P, value: u64) -> Result<u64> {
         let cname = name.into_cstr();
         let name_ptr = cname.as_ref().as_ptr() as *const c_char;
-        let value_ptr = value.as_ptr() as *mut u64;
         let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
 
-        let err = unsafe {
-            sys::libuzfs_dentry_create(self.dhp, pino, name_ptr, value_ptr, num, txg_ptr)
-        };
+        let err = unsafe { sys::libuzfs_dentry_create(self.dhp, pino, name_ptr, value, txg_ptr) };
         let txg = unsafe { Box::from_raw(txg_ptr) };
 
         if err == 0 {
@@ -420,22 +416,16 @@ impl Dataset {
         }
     }
 
-    pub fn lookup_dentry<P: CStrArgument>(
-        &self,
-        pino: u64,
-        name: P,
-        size: u64,
-    ) -> Result<Vec<u64>> {
-        let mut value = Vec::<u64>::with_capacity(size as usize);
-        value.resize_with(size as usize, Default::default);
-        let value_ptr = value.as_mut_ptr() as *mut u64;
+    pub fn lookup_dentry<P: CStrArgument>(&self, pino: u64, name: P) -> Result<u64> {
+        let value_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
         let cname = name.into_cstr();
         let name_ptr = cname.as_ref().as_ptr() as *const c_char;
+        let value = unsafe { Box::from_raw(value_ptr) };
 
-        let err = unsafe { sys::libuzfs_dentry_lookup(self.dhp, pino, name_ptr, value_ptr, size) };
+        let err = unsafe { sys::libuzfs_dentry_lookup(self.dhp, pino, name_ptr, value_ptr) };
 
         if err == 0 {
-            Ok(value)
+            Ok(*value)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
@@ -531,7 +521,12 @@ mod tests {
     use super::InodeType;
     use super::{Uzfs, UzfsTestEnv};
     use std::mem::{size_of, transmute};
-    use uzfs_sys::uzfs_attr_t as Attr;
+    use uzfs_sys::{self as sys, uzfs_attr_t as Attr};
+
+    enum FileType {
+        FILE = sys::FileType_TYPE_FILE as isize,
+        DIR = sys::FileType_TYPE_DIR as isize,
+    }
 
     unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
         ::std::slice::from_raw_parts((p as *const T) as *const u8, ::std::mem::size_of::<T>())
@@ -542,9 +537,9 @@ mod tests {
         let rwobj;
         let gen;
         let sb_ino;
-        let sb_file_ino;
-        let sb_file_name = "sb_file";
-        let sb_dentry_data;
+        let tmp_ino;
+        let tmp_name = "tmp_dir";
+        let tmp_dentry_data;
         let s = String::from("Hello uzfs!");
         let t = vec!['H' as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let file_ino;
@@ -577,20 +572,16 @@ mod tests {
             assert_eq!(value_read.as_slice(), value.as_bytes());
             ds.wait_synced().unwrap();
 
-            (sb_file_ino, _) = ds.create_inode(InodeType::FILE).unwrap();
+            (tmp_ino, _) = ds.create_inode(InodeType::DIR).unwrap();
 
-            sb_dentry_data = [sb_file_ino, 1];
+            tmp_dentry_data = (FileType::DIR as u64) << 60 | tmp_ino;
 
-            txg = ds
-                .create_dentry(sb_ino, sb_file_name, &sb_dentry_data)
-                .unwrap();
+            txg = ds.create_dentry(sb_ino, tmp_name, tmp_dentry_data).unwrap();
             ds.wait_synced().unwrap();
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
-            let sb_dentry_data_read = ds
-                .lookup_dentry(sb_ino, sb_file_name, sb_dentry_data.len() as u64)
-                .unwrap();
-            assert_eq!(sb_dentry_data.to_vec(), sb_dentry_data_read);
+            let tmp_dentry_data_read = ds.lookup_dentry(sb_ino, tmp_name).unwrap();
+            assert_eq!(tmp_dentry_data, tmp_dentry_data_read);
 
             num = ds.list_object().unwrap();
             (rwobj, gen) = ds.create_object().unwrap();
@@ -612,13 +603,11 @@ mod tests {
             (file_ino, _) = ds.create_inode(InodeType::FILE).unwrap();
             (dir_ino, _) = ds.create_inode(InodeType::DIR).unwrap();
 
-            dentry_data = [file_ino, 1];
+            dentry_data = (FileType::FILE as u64) << 60 | file_ino;
 
-            txg = ds.create_dentry(dir_ino, file_name, &dentry_data).unwrap();
-            let dentry_data_read = ds
-                .lookup_dentry(dir_ino, file_name, dentry_data.len() as u64)
-                .unwrap();
-            assert_eq!(dentry_data.to_vec(), dentry_data_read);
+            txg = ds.create_dentry(dir_ino, file_name, dentry_data).unwrap();
+            let dentry_data_read = ds.lookup_dentry(dir_ino, file_name).unwrap();
+            assert_eq!(dentry_data, dentry_data_read);
             ds.wait_synced().unwrap();
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
@@ -661,10 +650,8 @@ mod tests {
             let value_read = ds.get_kvattr(sb_ino, key, 0).unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
-            let sb_dentry_data_read = ds
-                .lookup_dentry(sb_ino, sb_file_name, sb_dentry_data.len() as u64)
-                .unwrap();
-            assert_eq!(sb_dentry_data.to_vec(), sb_dentry_data_read);
+            let tmp_dentry_data_read = ds.lookup_dentry(sb_ino, tmp_name).unwrap();
+            assert_eq!(tmp_dentry_data, tmp_dentry_data_read);
 
             assert_eq!(ds.get_object_gen(rwobj).unwrap(), gen);
 
@@ -675,10 +662,8 @@ mod tests {
 
             assert_eq!(ds.list_object().unwrap(), num + 2);
 
-            let dentry_data_read = ds
-                .lookup_dentry(dir_ino, file_name, dentry_data.len() as u64)
-                .unwrap();
-            assert_eq!(dentry_data.to_vec(), dentry_data_read);
+            let dentry_data_read = ds.lookup_dentry(dir_ino, file_name).unwrap();
+            assert_eq!(dentry_data, dentry_data_read);
 
             _ = ds.delete_dentry(dir_ino, file_name).unwrap();
 
