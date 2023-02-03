@@ -433,6 +433,23 @@ impl Dataset {
         }
     }
 
+    pub fn iterate_dentry(&self, pino: u64, whence: u64, size: u32) -> Result<(Vec<u8>, u32)> {
+        let mut data = Vec::<u8>::with_capacity(size as usize);
+        data.resize_with(size as usize, Default::default);
+        let data_ptr = data.as_mut_ptr() as *mut c_char;
+        let mut num: u32 = 0;
+        let num_ptr: *mut u32 = &mut num;
+
+        let err =
+            unsafe { sys::libuzfs_dentry_iterate(self.dhp, pino, whence, size, data_ptr, num_ptr) };
+
+        if err == 0 {
+            Ok((data, num))
+        } else {
+            Err(io::Error::from_raw_os_error(err))
+        }
+    }
+
     pub fn get_last_synced_txg(&self) -> Result<u64> {
         let txg = unsafe { sys::libuzfs_get_last_synced_txg(self.dhp) };
         Ok(txg)
@@ -613,6 +630,11 @@ mod tests {
             ds.wait_synced().unwrap();
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
+            let (_, dentry_num) = ds.iterate_dentry(dir_ino, 0, 4096).unwrap();
+
+            // TODO(hping): verify dentry content
+            assert_eq!(dentry_num, 1);
+
             assert_eq!(ds.list_object().unwrap(), num + 3);
 
             attr.ino = file_ino;
@@ -667,7 +689,13 @@ mod tests {
             let dentry_data_read = ds.lookup_dentry(dir_ino, file_name).unwrap();
             assert_eq!(dentry_data, dentry_data_read);
 
+            let (_, dentry_num) = ds.iterate_dentry(dir_ino, 0, 4096).unwrap();
+            assert_eq!(dentry_num, 1);
+
             _ = ds.delete_dentry(dir_ino, file_name).unwrap();
+
+            let (_, dentry_num) = ds.iterate_dentry(dir_ino, 0, 4096).unwrap();
+            assert_eq!(dentry_num, 0);
 
             let attr_bytes = unsafe { any_as_u8_slice(&attr) };
             let attr_new = ds.get_attr(file_ino, attr_bytes.len() as u64).unwrap();
