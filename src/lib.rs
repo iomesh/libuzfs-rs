@@ -114,28 +114,28 @@ impl Dataset {
     }
 
     pub fn get_superblock_ino(&self) -> Result<u64> {
-        let obj_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
+        let mut obj: u64 = 0;
+        let obj_ptr: *mut u64 = &mut obj;
 
         let err = unsafe { sys::libuzfs_dataset_get_superblock_ino(self.dhp, obj_ptr) };
-        let obj = unsafe { Box::from_raw(obj_ptr) };
 
         if err == 0 {
-            Ok(*obj)
+            Ok(obj)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
     }
 
     pub fn create_object(&self) -> Result<(u64, u64)> {
-        let obj_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
-        let gen_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
+        let mut obj: u64 = 0;
+        let mut gen: u64 = 0;
+        let obj_ptr: *mut u64 = &mut obj;
+        let gen_ptr: *mut u64 = &mut gen;
 
         let err = unsafe { sys::libuzfs_object_create(self.dhp, obj_ptr, gen_ptr) };
-        let obj = unsafe { Box::from_raw(obj_ptr) };
-        let gen = unsafe { Box::from_raw(gen_ptr) };
 
         if err == 0 {
-            Ok((*obj, *gen))
+            Ok((obj, gen))
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
@@ -162,12 +162,13 @@ impl Dataset {
     }
 
     pub fn get_object_gen(&self, obj: u64) -> Result<u64> {
-        let gen_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
+        let mut gen: u64 = 0;
+        let gen_ptr: *mut u64 = &mut gen;
+
         let err = unsafe { sys::libuzfs_object_get_gen(self.dhp, obj, gen_ptr) };
-        let gen = unsafe { Box::from_raw(gen_ptr) };
 
         if err == 0 {
-            Ok(*gen)
+            Ok(gen)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
@@ -253,16 +254,16 @@ impl Dataset {
     }
 
     pub fn create_inode(&self, inode_type: InodeType) -> Result<(u64, u64)> {
-        let ino_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
-        let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
+        let mut ino: u64 = 0;
+        let mut txg: u64 = 0;
+        let ino_ptr: *mut u64 = &mut ino;
+        let txg_ptr: *mut u64 = &mut txg;
 
         let err =
             unsafe { sys::libuzfs_inode_create(self.dhp, ino_ptr, inode_type as u32, txg_ptr) };
-        let ino = unsafe { Box::from_raw(ino_ptr) };
-        let txg = unsafe { Box::from_raw(txg_ptr) };
 
         if err == 0 {
-            Ok((*ino, *txg))
+            Ok((ino, txg))
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
@@ -279,13 +280,13 @@ impl Dataset {
     }
 
     pub fn delete_inode(&self, ino: u64, inode_type: InodeType) -> Result<u64> {
-        let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
+        let mut txg: u64 = 0;
+        let txg_ptr: *mut u64 = &mut txg;
 
         let err = unsafe { sys::libuzfs_inode_delete(self.dhp, ino, inode_type as u32, txg_ptr) };
-        let txg = unsafe { Box::from_raw(txg_ptr) };
 
         if err == 0 {
-            Ok(*txg)
+            Ok(txg)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
@@ -309,13 +310,13 @@ impl Dataset {
     pub fn set_attr(&self, ino: u64, attr: &[u8]) -> Result<u64> {
         assert!(size_of::<sys::uzfs_attr_t>() == attr.len());
         let attr_ptr = attr.as_ptr() as *mut sys::uzfs_attr_t;
-        let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
+        let mut txg: u64 = 0;
+        let txg_ptr: *mut u64 = &mut txg;
 
         let err = unsafe { sys::libuzfs_inode_setattr(self.dhp, ino, attr_ptr, txg_ptr) };
-        let txg = unsafe { Box::from_raw(txg_ptr) };
 
         if err == 0 {
-            Ok(*txg)
+            Ok(txg)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
@@ -354,78 +355,79 @@ impl Dataset {
         value: &[u8],
         flags: i32,
     ) -> Result<u64> {
+        let mut txg: u64 = 0;
+        let txg_ptr: *mut u64 = &mut txg;
         let cname = name.into_cstr();
         let name_ptr = cname.as_ref().as_ptr() as *const c_char;
         let value_ptr = value.as_ptr() as *const c_char;
         let size = value.len() as u64;
-        let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
 
         let err = unsafe {
             sys::libuzfs_inode_set_kvattr(self.dhp, ino, name_ptr, value_ptr, size, flags, txg_ptr)
         };
-        let txg = unsafe { Box::from_raw(txg_ptr) };
 
         if err == 0 {
-            Ok(*txg)
+            Ok(txg)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
     }
 
     pub fn remove_kvattr<P: CStrArgument>(&self, ino: u64, name: P) -> Result<u64> {
+        let mut txg: u64 = 0;
+        let txg_ptr: *mut u64 = &mut txg;
         let cname = name.into_cstr();
         let name_ptr = cname.as_ref().as_ptr() as *const c_char;
-        let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
 
         let err = unsafe { sys::libuzfs_inode_remove_kvattr(self.dhp, ino, name_ptr, txg_ptr) };
-        let txg = unsafe { Box::from_raw(txg_ptr) };
 
         if err == 0 {
-            Ok(*txg)
+            Ok(txg)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
     }
 
     pub fn create_dentry<P: CStrArgument>(&self, pino: u64, name: P, value: u64) -> Result<u64> {
+        let mut txg: u64 = 0;
+        let txg_ptr: *mut u64 = &mut txg;
         let cname = name.into_cstr();
         let name_ptr = cname.as_ref().as_ptr() as *const c_char;
-        let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
 
         let err = unsafe { sys::libuzfs_dentry_create(self.dhp, pino, name_ptr, value, txg_ptr) };
-        let txg = unsafe { Box::from_raw(txg_ptr) };
 
         if err == 0 {
-            Ok(*txg)
+            Ok(txg)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
     }
 
     pub fn delete_dentry<P: CStrArgument>(&self, pino: u64, name: P) -> Result<u64> {
-        let txg_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
+        let mut txg: u64 = 0;
+        let txg_ptr: *mut u64 = &mut txg;
         let cname = name.into_cstr();
         let name_ptr = cname.as_ref().as_ptr() as *const c_char;
+
         let err = unsafe { sys::libuzfs_dentry_delete(self.dhp, pino, name_ptr, txg_ptr) };
-        let txg = unsafe { Box::from_raw(txg_ptr) };
 
         if err == 0 {
-            Ok(*txg)
+            Ok(txg)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
     }
 
     pub fn lookup_dentry<P: CStrArgument>(&self, pino: u64, name: P) -> Result<u64> {
-        let value_ptr: *mut u64 = Box::into_raw(Box::new(0_u64));
+        let mut value: u64 = 0;
+        let value_ptr: *mut u64 = &mut value;
         let cname = name.into_cstr();
         let name_ptr = cname.as_ref().as_ptr() as *const c_char;
-        let value = unsafe { Box::from_raw(value_ptr) };
 
         let err = unsafe { sys::libuzfs_dentry_lookup(self.dhp, pino, name_ptr, value_ptr) };
 
         if err == 0 {
-            Ok(*value)
+            Ok(value)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
