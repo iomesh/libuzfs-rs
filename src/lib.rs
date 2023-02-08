@@ -1,8 +1,10 @@
 use cstr_argument::CStrArgument;
 use std::ffi::{CStr, CString};
+use std::io::ErrorKind;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::os::raw::c_char;
+use std::sync::Arc;
 use std::{io, ptr};
 use tempfile::NamedTempFile;
 use uzfs_sys as sys;
@@ -10,6 +12,7 @@ use uzfs_sys as sys;
 use io::Result;
 
 const MAX_KVATTR_VALUE_SIZE: usize = 8192;
+const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
 
 pub struct Uzfs {
     i: PhantomData<()>,
@@ -17,6 +20,7 @@ pub struct Uzfs {
 
 impl Uzfs {
     pub fn init() -> Result<Self> {
+        let _ = std::fs::remove_file(DEFAULT_CACHE_FILE);
         unsafe {
             sys::libuzfs_init();
         };
@@ -85,6 +89,8 @@ pub enum InodeType {
 pub struct Dataset {
     dhp: *mut sys::libuzfs_dataset_handle_t,
     zhp: *mut sys::libuzfs_zpool_handle_t,
+    poolname: CString,
+    _uzfs: Arc<Uzfs>,
 }
 
 impl Dataset {
@@ -97,9 +103,47 @@ impl Dataset {
         Ok(CString::new(v[0]).unwrap())
     }
 
-    pub fn init<P: CStrArgument>(dsname: P) -> Result<Self> {
+    pub fn init<P: CStrArgument>(dsname: P, dev_path: P, uzfs: Arc<Uzfs>) -> Result<Self> {
+        let dev_path = dev_path.into_cstr();
         let dsname = dsname.into_cstr();
         let poolname = Self::dsname_to_poolname(&dsname)?;
+
+        let poolname_string = poolname.clone().into_string().unwrap();
+        let mut stored_pool_name = vec![0; poolname_string.len()];
+
+        let errno = unsafe {
+            sys::libuzfs_zpool_import(
+                dev_path.as_ref().as_ptr(),
+                stored_pool_name.as_mut_ptr() as *mut c_char,
+                poolname_string.len() as i32,
+            )
+        };
+
+        if errno != 0 {
+            let err = io::Error::from_raw_os_error(errno);
+            match err.kind() {
+                ErrorKind::NotFound => {
+                    uzfs.create_zpool(poolname.clone().into_cstr().as_ref(), dev_path.as_ref())
+                        .unwrap();
+                    uzfs.create_dataset(dsname.as_ref()).unwrap();
+                }
+                ErrorKind::AlreadyExists => {
+                    return Err(err);
+                }
+                _ => {
+                    panic!(
+                        "unexpected error while importing zpool, dev_path: {}, dsname: {}, error: {:?}",
+                        dev_path.as_ref().to_str().unwrap(),
+                        dsname.as_ref().to_str().unwrap(),
+                        err
+                    );
+                }
+            }
+        } else {
+            let stored_pool_name = std::str::from_utf8(&stored_pool_name).unwrap();
+            assert_eq!(stored_pool_name, poolname_string);
+        }
+
         let zhp = unsafe { sys::libuzfs_zpool_open(poolname.as_c_str().as_ptr()) };
         if zhp.is_null() {
             return Err(io::Error::from(io::ErrorKind::InvalidInput));
@@ -109,7 +153,12 @@ impl Dataset {
         if dhp.is_null() {
             Err(io::Error::from(io::ErrorKind::InvalidInput))
         } else {
-            Ok(Self { dhp, zhp })
+            Ok(Self {
+                dhp,
+                zhp,
+                poolname,
+                _uzfs: uzfs,
+            })
         }
     }
 
@@ -465,6 +514,8 @@ impl Drop for Dataset {
     fn drop(&mut self) {
         unsafe { sys::libuzfs_dataset_close(self.dhp) };
         unsafe { sys::libuzfs_zpool_close(self.zhp) };
+        let err = unsafe { sys::libuzfs_zpool_export(self.poolname.as_ref().as_ptr()) };
+        assert_eq!(err, 0);
     }
 }
 
@@ -475,45 +526,33 @@ pub struct UzfsTestEnv {
     #[allow(dead_code)]
     dev_file: NamedTempFile,
     cache_file: NamedTempFile,
-    poolname: String,
-    dsname: String,
 }
 
 impl UzfsTestEnv {
     /// Create an env for uzfs test.
     ///
-    /// If dsname is not empty, this function will create a temp file as block device, the size of device
-    /// is `dev_size` bytes.
+    /// If dev_size is not zero, this function will create a temp file as block device,
+    /// the size of device is `dev_size` bytes.
     ///
-    /// A zpool and dataset then are created upon the block device, the name is specified by `dsname`.
-    ///
-    /// If dsname is empty, no block device and pool/dataset is created
+    /// If dev_size is zero, no block device and pool/dataset is created
     ///
     /// A temp cache file is always automacally created, used by uzfs to find zpool.
     ///
-    /// All of the resources (temp file, zpool, dataset) will be deleted automatically when the env
+    /// All of the resources (temp file, dev_file) will be deleted automatically when the env
     /// goes out of scope
-    pub fn new(dsname: String, dev_size: u64) -> Self {
-        let poolname = "";
+    pub fn new(dev_size: u64) -> Self {
         let mut dev_file = NamedTempFile::new().unwrap();
         let cache_file = NamedTempFile::new().unwrap();
         let cache_path = cache_file.path().to_str().unwrap();
         Uzfs::set_zpool_cache_path(cache_path);
 
-        if !dsname.is_empty() {
+        if dev_size > 0 {
             dev_file.as_file_mut().set_len(dev_size).unwrap();
-            let devname = dev_file.path().to_str().unwrap();
-            let (poolname, _) = dsname.split_once('/').unwrap();
-            let uzfs = Uzfs::init().unwrap();
-            uzfs.create_zpool(poolname, devname).unwrap();
-            uzfs.create_dataset(&dsname).unwrap();
         }
 
         UzfsTestEnv {
             dev_file,
             cache_file,
-            poolname: poolname.to_owned(),
-            dsname,
         }
     }
 
@@ -521,16 +560,10 @@ impl UzfsTestEnv {
         let cache_path = self.cache_file.path().to_str().unwrap();
         Ok(cache_path.to_owned())
     }
-}
 
-impl Drop for UzfsTestEnv {
-    fn drop(&mut self) {
-        if !self.dsname.is_empty() {
-            Uzfs::set_zpool_cache_path(self.get_cache_path().unwrap());
-            let uzfs = Uzfs::init().unwrap();
-            uzfs.destroy_dataset(&self.dsname);
-            uzfs.destroy_zpool(&self.poolname);
-        }
+    pub fn get_dev_path(&self) -> Result<String> {
+        let dev_path = self.dev_file.path().to_str().unwrap();
+        Ok(dev_path.to_owned())
     }
 }
 
@@ -539,7 +572,9 @@ mod tests {
     use super::Dataset;
     use super::InodeType;
     use super::{Uzfs, UzfsTestEnv};
+    use cstr_argument::CStrArgument;
     use std::mem::{size_of, transmute};
+    use std::sync::Arc;
     use uzfs_sys::{self as sys, uzfs_attr_t as Attr};
 
     enum FileType {
@@ -574,12 +609,31 @@ mod tests {
         let dentry_data;
 
         let dsname = "uzfs-test-pool/ds";
-        let uzfs_test_env = UzfsTestEnv::new(dsname.to_owned(), 100 * 1024 * 1024);
+        let poolname = "uzfs-test-pool";
+        let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
 
         {
             Uzfs::set_zpool_cache_path(uzfs_test_env.get_cache_path().unwrap());
-            let _uzfs = Uzfs::init().unwrap();
-            let ds = Dataset::init(dsname).unwrap();
+            let uzfs = Arc::new(Uzfs::init().unwrap());
+
+            let hdl = unsafe { sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr()) };
+            assert!(hdl.is_null());
+            let hdl = unsafe { sys::libuzfs_zpool_open(poolname.into_cstr().as_ptr()) };
+            assert!(hdl.is_null());
+
+            let ds = Dataset::init(
+                dsname,
+                uzfs_test_env.get_dev_path().unwrap().as_str(),
+                uzfs.clone(),
+            )
+            .unwrap();
+
+            let second_init = Dataset::init(
+                dsname,
+                uzfs_test_env.get_dev_path().unwrap().as_str(),
+                uzfs.clone(),
+            );
+            assert!(second_init.is_err());
 
             sb_ino = ds.get_superblock_ino().unwrap();
             let last_txg = ds.get_last_synced_txg().unwrap();
@@ -663,8 +717,19 @@ mod tests {
 
         {
             Uzfs::set_zpool_cache_path(uzfs_test_env.get_cache_path().unwrap());
-            let _uzfs = Uzfs::init().unwrap();
-            let ds = Dataset::init(dsname).unwrap();
+            let uzfs = Arc::new(Uzfs::init().unwrap());
+
+            let hdl = unsafe { sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr()) };
+            assert!(hdl.is_null());
+            let hdl = unsafe { sys::libuzfs_zpool_open(poolname.into_cstr().as_ptr()) };
+            assert!(hdl.is_null());
+
+            let ds = Dataset::init(
+                dsname,
+                uzfs_test_env.get_dev_path().unwrap().as_str(),
+                uzfs.clone(),
+            )
+            .unwrap();
 
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
             assert_eq!(ds.list_object().unwrap(), num + 3);
