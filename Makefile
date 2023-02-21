@@ -8,3 +8,6 @@ test:
 
 clean:
 	cargo clean
+
+bench:
+	cargo bench --all
