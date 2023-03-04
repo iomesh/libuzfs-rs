@@ -12,8 +12,10 @@ struct UzfsBenchEnv {
 }
 
 impl UzfsBenchEnv {
-    pub fn new(dev_size: u64) -> Self {
-        let env = UzfsTestEnv::new(dev_size);
+    pub fn new() -> Self {
+        const BENCH_DEV_SIZE: u64 = 500 * 1024 * 1024;
+
+        let env = UzfsTestEnv::new(BENCH_DEV_SIZE);
         let uzfs = Arc::new(Uzfs::init().unwrap());
         let ds = Rc::new(
             Dataset::init("test_pool/ds", env.get_dev_path().unwrap().as_str(), uzfs).unwrap(),
@@ -32,7 +34,7 @@ impl UzfsBenchEnv {
 
 pub fn bench_inode_ops(c: &mut Criterion) {
     let mut objs: Vec<u64> = vec![];
-    let env = UzfsBenchEnv::new(100 * 1024 * 1024);
+    let env = UzfsBenchEnv::new();
     c.bench_function("uzfs::create_inode", |b| {
         b.iter(|| {
             let (obj, _) = env.get_ds().create_inode(InodeType::FILE).unwrap();
@@ -56,7 +58,7 @@ pub fn bench_inode_ops(c: &mut Criterion) {
 }
 
 pub fn bench_inode_attr(c: &mut Criterion) {
-    let env = UzfsBenchEnv::new(100 * 1024 * 1024);
+    let env = UzfsBenchEnv::new();
     let (obj, _) = env.get_ds().create_inode(InodeType::FILE).unwrap();
     let attr_size = size_of::<sys::uzfs_attr_t>();
     c.bench_function("uzfs::get_attr", |b| {
@@ -75,7 +77,7 @@ pub fn bench_inode_attr(c: &mut Criterion) {
 }
 
 pub fn bench_inode_kvattr(c: &mut Criterion) {
-    let env = UzfsBenchEnv::new(100 * 1024 * 1024);
+    let env = UzfsBenchEnv::new();
     let basic_value_size: usize = 128;
     for i in [1, 8, 32, 64].iter() {
         let value_size = i * basic_value_size;
@@ -116,7 +118,7 @@ pub fn bench_inode_kvattr(c: &mut Criterion) {
 }
 
 pub fn bench_dir_ops(c: &mut Criterion) {
-    let env = UzfsBenchEnv::new(100 * 1024 * 1024);
+    let env = UzfsBenchEnv::new();
     let (pino, _) = env.get_ds().create_inode(InodeType::DIR).unwrap();
 
     let mut total_entries = 0;
@@ -157,9 +159,9 @@ pub fn bench_dir_ops(c: &mut Criterion) {
 }
 
 pub fn bench_object_read_write(c: &mut Criterion) {
-    let env = UzfsBenchEnv::new(100 * 1024 * 1024);
+    let env = UzfsBenchEnv::new();
     let (obj, _) = env.get_ds().create_object().unwrap();
-    for size in [1024, 2048, 4096].iter() {
+    for size in [4 * 1024, 16 * 1024, 32 * 1024].iter() {
         let mut buf = Vec::<u8>::with_capacity(size.to_owned());
         buf.resize(size.to_owned(), 0);
         let mut i: usize = 0;
