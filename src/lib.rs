@@ -334,10 +334,15 @@ impl Dataset {
 
         let err = unsafe { sys::libuzfs_inode_delete(self.dhp, ino, inode_type as u32, txg_ptr) };
 
-        if err == 0 {
-            Ok(txg)
-        } else {
-            Err(io::Error::from_raw_os_error(err))
+        match err {
+            0 => Ok(txg),
+            _ => {
+                let error = io::Error::from_raw_os_error(err);
+                match error.kind() {
+                    ErrorKind::NotFound => Ok(txg),
+                    _ => Err(error),
+                }
+            }
         }
     }
 
@@ -364,10 +369,15 @@ impl Dataset {
 
         let err = unsafe { sys::libuzfs_inode_setattr(self.dhp, ino, attr_ptr, txg_ptr) };
 
-        if err == 0 {
-            Ok(txg)
-        } else {
-            Err(io::Error::from_raw_os_error(err))
+        match err {
+            0 => Ok(txg),
+            _ => {
+                let error = io::Error::from_raw_os_error(err);
+                match error.kind() {
+                    ErrorKind::NotFound => Ok(txg),
+                    _ => Err(error),
+                }
+            }
         }
     }
 
@@ -415,10 +425,15 @@ impl Dataset {
             sys::libuzfs_inode_set_kvattr(self.dhp, ino, name_ptr, value_ptr, size, flags, txg_ptr)
         };
 
-        if err == 0 {
-            Ok(txg)
-        } else {
-            Err(io::Error::from_raw_os_error(err))
+        match err {
+            0 => Ok(txg),
+            _ => {
+                let error = io::Error::from_raw_os_error(err);
+                match error.kind() {
+                    ErrorKind::NotFound => Ok(txg),
+                    _ => Err(error),
+                }
+            }
         }
     }
 
@@ -430,10 +445,15 @@ impl Dataset {
 
         let err = unsafe { sys::libuzfs_inode_remove_kvattr(self.dhp, ino, name_ptr, txg_ptr) };
 
-        if err == 0 {
-            Ok(txg)
-        } else {
-            Err(io::Error::from_raw_os_error(err))
+        match err {
+            0 => Ok(txg),
+            _ => {
+                let error = io::Error::from_raw_os_error(err);
+                match error.kind() {
+                    ErrorKind::NotFound => Ok(txg),
+                    _ => Err(error),
+                }
+            }
         }
     }
 
@@ -445,10 +465,16 @@ impl Dataset {
 
         let err = unsafe { sys::libuzfs_dentry_create(self.dhp, pino, name_ptr, value, txg_ptr) };
 
-        if err == 0 {
-            Ok(txg)
-        } else {
-            Err(io::Error::from_raw_os_error(err))
+        match err {
+            0 => Ok(txg),
+            _ => {
+                let error = io::Error::from_raw_os_error(err);
+                match error.kind() {
+                    ErrorKind::NotFound => Ok(txg),
+                    ErrorKind::AlreadyExists => Ok(txg),
+                    _ => Err(error),
+                }
+            }
         }
     }
 
@@ -460,10 +486,15 @@ impl Dataset {
 
         let err = unsafe { sys::libuzfs_dentry_delete(self.dhp, pino, name_ptr, txg_ptr) };
 
-        if err == 0 {
-            Ok(txg)
-        } else {
-            Err(io::Error::from_raw_os_error(err))
+        match err {
+            0 => Ok(txg),
+            _ => {
+                let error = io::Error::from_raw_os_error(err);
+                match error.kind() {
+                    ErrorKind::NotFound => Ok(txg),
+                    _ => Err(error),
+                }
+            }
         }
     }
 
