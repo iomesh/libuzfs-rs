@@ -12,6 +12,7 @@ use uzfs_sys as sys;
 use io::Result;
 
 const MAX_KVATTR_VALUE_SIZE: usize = 8192;
+const MAX_KVATTR_KEY_SIZE: usize = 256;
 const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
 
 pub struct Uzfs {
@@ -437,6 +438,39 @@ impl Dataset {
         }
     }
 
+    pub fn list_kvattrs(&self, ino: u64) -> Result<Vec<String>> {
+        let mut err: i32 = 0;
+        let iter = unsafe { sys::libuzfs_new_kvattr_iterator(self.dhp, ino, &mut err as *mut i32) };
+        if iter.is_null() {
+            assert_ne!(err, 0);
+            return Err(io::Error::from_raw_os_error(err));
+        }
+
+        let mut res: Vec<String> = vec![];
+        loop {
+            let mut buf = Vec::<u8>::with_capacity(MAX_KVATTR_KEY_SIZE);
+            buf.resize_with(MAX_KVATTR_KEY_SIZE, Default::default);
+            let rc = unsafe {
+                sys::libuzfs_next_kvattr_name(
+                    iter,
+                    buf.as_mut_ptr() as *mut c_char,
+                    MAX_KVATTR_KEY_SIZE as i32,
+                )
+            };
+            assert!(rc >= 0);
+            if rc == 0 {
+                break;
+            }
+            buf.resize_with(rc as usize, Default::default);
+            let key = String::from_utf8(buf).unwrap();
+            res.push(key);
+        }
+
+        unsafe { sys::libuzfs_kvattr_iterator_fini(iter) };
+
+        Ok(res)
+    }
+
     pub fn create_dentry<P: CStrArgument>(&self, pino: u64, name: P, value: u64) -> Result<u64> {
         let mut txg: u64 = 0;
         let txg_ptr: *mut u64 = &mut txg;
@@ -784,6 +818,45 @@ mod tests {
             ds.wait_synced().unwrap();
 
             assert_eq!(ds.list_object().unwrap(), num + 1);
+        }
+
+        {
+            Uzfs::set_zpool_cache_path(uzfs_test_env.get_cache_path().unwrap());
+            let uzfs = Arc::new(Uzfs::init().unwrap());
+            let ds = Dataset::init(
+                dsname,
+                uzfs_test_env.get_dev_path().unwrap().as_str(),
+                uzfs.clone(),
+            )
+            .unwrap();
+
+            let ino = ds.create_inode(InodeType::FILE).unwrap().0;
+            let keys = ds.list_kvattrs(ino).unwrap();
+            assert!(keys.is_empty());
+
+            let total_kvs: usize = 4096;
+            for i in 0..total_kvs {
+                let key = i.to_string();
+                let mut value: Vec<u8> = vec![];
+                let value_size: usize = 256;
+                value.resize_with(value_size, Default::default);
+
+                ds.set_kvattr(ino, key.as_str(), &value, 0).unwrap();
+            }
+
+            let keys = ds.list_kvattrs(ino).unwrap();
+            assert_eq!(keys.len(), total_kvs);
+
+            let mut numbers: Vec<usize> = Vec::<usize>::with_capacity(total_kvs);
+            for key in keys {
+                numbers.push(key.parse::<usize>().unwrap());
+            }
+            numbers.sort();
+
+            let expect_vec: Vec<usize> = (0..total_kvs).collect();
+            assert_eq!(numbers, expect_vec);
+
+            ds.delete_inode(ino, InodeType::FILE).unwrap();
         }
     }
 }

@@ -6,3 +6,4 @@ download
 install
 libuzfs.pc
 *.vi
+.vscode/
