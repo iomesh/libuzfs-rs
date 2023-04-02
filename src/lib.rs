@@ -191,16 +191,6 @@ impl Dataset {
         }
     }
 
-    pub fn claim_object(&self, obj: u64) -> Result<()> {
-        let err = unsafe { sys::libuzfs_object_claim(self.dhp, obj) };
-
-        if err == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::from_raw_os_error(err))
-        }
-    }
-
     pub fn delete_object(&self, obj: u64) -> Result<()> {
         let err = unsafe { sys::libuzfs_object_delete(self.dhp, obj) };
 
@@ -816,11 +806,6 @@ mod tests {
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
             assert_eq!(ds.list_object().unwrap(), num);
-
-            ds.claim_object(rwobj).unwrap();
-            ds.wait_synced().unwrap();
-
-            assert_eq!(ds.list_object().unwrap(), num + 1);
         }
 
         {
