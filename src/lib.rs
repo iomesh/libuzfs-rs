@@ -607,8 +607,10 @@ mod tests {
     use super::InodeType;
     use super::{Uzfs, UzfsTestEnv};
     use cstr_argument::CStrArgument;
+    use serial_test::serial;
     use std::mem::{size_of, transmute};
     use std::sync::Arc;
+    use test_log::test;
     use uzfs_sys::{self as sys, uzfs_attr_t as Attr};
 
     enum FileType {
@@ -620,6 +622,7 @@ mod tests {
         ::std::slice::from_raw_parts((p as *const T) as *const u8, ::std::mem::size_of::<T>())
     }
 
+    #[serial]
     #[test]
     fn uzfs_test() {
         let rwobj;
@@ -857,6 +860,51 @@ mod tests {
             assert_eq!(numbers, expect_vec);
 
             ds.delete_inode(ino, InodeType::FILE).unwrap();
+        }
+    }
+
+    #[serial]
+    #[test]
+    fn uzfs_claim_test() {
+        let ino;
+        let dsname = "uzfs-test-pool/ds";
+        let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+
+        {
+            Uzfs::set_zpool_cache_path(uzfs_test_env.get_cache_path().unwrap());
+            let uzfs = Arc::new(Uzfs::init().unwrap());
+
+            let ds = Dataset::init(
+                dsname,
+                uzfs_test_env.get_dev_path().unwrap().as_str(),
+                uzfs.clone(),
+            )
+            .unwrap();
+
+            (ino, _) = ds.create_inode(InodeType::DIR).unwrap();
+
+            ds.wait_synced().unwrap();
+        }
+
+        {
+            Uzfs::set_zpool_cache_path(uzfs_test_env.get_cache_path().unwrap());
+            let uzfs = Arc::new(Uzfs::init().unwrap());
+
+            let ds = Dataset::init(
+                dsname,
+                uzfs_test_env.get_dev_path().unwrap().as_str(),
+                uzfs.clone(),
+            )
+            .unwrap();
+
+            // test claim when inode exists
+            ds.claim_inode(ino, InodeType::DIR).unwrap();
+
+            ds.delete_inode(ino, InodeType::DIR).unwrap();
+            ds.wait_synced().unwrap();
+
+            // test claim when inode doesn't exist
+            ds.claim_inode(ino, InodeType::DIR).unwrap();
         }
     }
 }
