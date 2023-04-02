@@ -8,6 +8,7 @@ test:
 
 clean:
 	cargo clean
+	make -C uzfs-sys clean
 
 bench:
 	cargo bench --all
