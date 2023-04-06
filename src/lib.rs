@@ -214,6 +214,19 @@ impl Dataset {
         }
     }
 
+    pub fn get_object_size(&self, obj: u64) -> Result<u64> {
+        let mut size: u64 = 0;
+        let size_ptr: *mut u64 = &mut size;
+
+        let err = unsafe { sys::libuzfs_object_get_size(self.dhp, obj, size_ptr) };
+
+        if err == 0 {
+            Ok(size)
+        } else {
+            Err(io::Error::from_raw_os_error(err))
+        }
+    }
+
     pub fn list_object(&self) -> Result<u64> {
         let n = unsafe { sys::libuzfs_object_list(self.dhp) };
         Ok(n)
@@ -686,6 +699,7 @@ mod tests {
             num = ds.list_object().unwrap();
             (rwobj, gen) = ds.create_object().unwrap();
 
+            assert_eq!(ds.get_object_size(rwobj).unwrap(), 0);
             assert_eq!(ds.get_object_gen(rwobj).unwrap(), gen);
             assert_eq!(ds.list_object().unwrap(), num + 1);
 
@@ -695,9 +709,18 @@ mod tests {
             let data = s.as_bytes();
             let size = s.len() as u64;
             ds.write_object(rwobj, 0, true, data).unwrap();
+            assert_eq!(ds.get_object_size(rwobj).unwrap(), size);
             assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), data);
 
-            ds.truncate_object(rwobj, 1, size - 1).unwrap();
+            // offset must be 0 for truncate
+            assert!(ds.truncate_object(rwobj, 1, size - 1).is_err());
+            ds.truncate_object(rwobj, 0, 1).unwrap();
+            assert_eq!(ds.get_object_size(rwobj).unwrap(), 1);
+            assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), t);
+
+            // extend size via truncate
+            ds.truncate_object(rwobj, 0, size).unwrap();
+            assert_eq!(ds.get_object_size(rwobj).unwrap(), size);
             assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), t);
 
             (file_ino, _) = ds.create_inode(InodeType::FILE).unwrap();
@@ -772,6 +795,7 @@ mod tests {
             assert_eq!(ds.get_object_gen(rwobj).unwrap(), gen);
 
             let size = s.len() as u64;
+            assert_eq!(ds.get_object_size(rwobj).unwrap(), size);
             assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), t);
 
             ds.delete_object(rwobj).unwrap();
