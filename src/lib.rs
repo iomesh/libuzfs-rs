@@ -251,12 +251,16 @@ impl Dataset {
         data.resize_with(size as usize, Default::default);
         let ptr = data.as_mut_ptr() as *mut c_char;
 
-        let err = unsafe { sys::libuzfs_object_read(self.dhp, obj, offset, size, ptr) };
+        let res = unsafe { sys::libuzfs_object_read(self.dhp, obj, offset, size, ptr) };
 
-        if err == 0 {
+        if res >= 0 {
+            assert!(res as u64 <= size);
+            if (res as u64) < size {
+                data.truncate(res as usize);
+            }
             Ok(data)
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            Err(io::Error::from_raw_os_error(-res))
         }
     }
 
@@ -711,12 +715,14 @@ mod tests {
             ds.write_object(rwobj, 0, true, data).unwrap();
             assert_eq!(ds.get_object_size(rwobj).unwrap(), size);
             assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), data);
+            assert_eq!(ds.read_object(rwobj, 0, size + 10).unwrap(), data);
+            assert!(ds.read_object(rwobj, size, size).unwrap().is_empty());
 
             // offset must be 0 for truncate
             assert!(ds.truncate_object(rwobj, 1, size - 1).is_err());
             ds.truncate_object(rwobj, 0, 1).unwrap();
             assert_eq!(ds.get_object_size(rwobj).unwrap(), 1);
-            assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), t);
+            assert_eq!(ds.read_object(rwobj, 0, size).unwrap().len(), 1);
 
             // extend size via truncate
             ds.truncate_object(rwobj, 0, size).unwrap();
@@ -797,6 +803,8 @@ mod tests {
             let size = s.len() as u64;
             assert_eq!(ds.get_object_size(rwobj).unwrap(), size);
             assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), t);
+            assert_eq!(ds.read_object(rwobj, 0, size + 10).unwrap(), t);
+            assert!(ds.read_object(rwobj, size, size).unwrap().is_empty());
 
             ds.delete_object(rwobj).unwrap();
 
