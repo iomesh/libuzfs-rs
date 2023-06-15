@@ -15,6 +15,8 @@ const MAX_KVATTR_VALUE_SIZE: usize = 8192;
 const MAX_KVATTR_KEY_SIZE: usize = 256;
 const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
 
+pub type ZapIterator = sys::libuzfs_zap_iterator_t;
+
 pub struct Uzfs {
     i: PhantomData<()>,
 }
@@ -171,6 +173,137 @@ impl Dataset {
 
         if err == 0 {
             Ok(obj)
+        } else {
+            Err(io::Error::from_raw_os_error(err))
+        }
+    }
+
+    pub fn zap_create(&self) -> Result<u64> {
+        let mut obj: u64 = 0;
+        let mut txg: u64 = 0;
+        let err = unsafe { sys::libuzfs_zap_create(self.dhp, &mut obj, &mut txg) };
+
+        if err == 0 {
+            Ok(obj)
+        } else {
+            Err(io::Error::from_raw_os_error(err))
+        }
+    }
+
+    pub fn new_zap_iterator(&self, obj: u64) -> Result<*mut ZapIterator> {
+        let mut errno: i32 = 0;
+        let iter = unsafe { sys::libuzfs_new_zap_iterator(self.dhp, obj, &mut errno as *mut i32) };
+
+        if iter.is_null() {
+            let err = io::Error::from_raw_os_error(errno);
+            if err.kind() != ErrorKind::NotFound {
+                return Err(err);
+            }
+        }
+
+        Ok(iter)
+    }
+
+    #[allow(clippy::missing_safety_doc)]
+    pub unsafe fn zap_iterator_fini(&self, iter: *mut ZapIterator) {
+        unsafe { sys::libuzfs_zap_iterator_fini(iter) };
+    }
+
+    #[allow(clippy::missing_safety_doc)]
+    pub unsafe fn zap_iterator_advance(&self, iter: *mut ZapIterator) -> Result<bool> {
+        let errno = unsafe { sys::libuzfs_zap_iterator_advance(iter) };
+        if errno == 0 {
+            Ok(true)
+        } else {
+            let err = io::Error::from_raw_os_error(errno);
+            if err.kind() == ErrorKind::NotFound {
+                Ok(false)
+            } else {
+                Err(err)
+            }
+        }
+    }
+
+    #[allow(clippy::missing_safety_doc)]
+    pub unsafe fn zap_iterator_name(&self, iter: *mut ZapIterator) -> String {
+        let mut buf = vec![0; MAX_KVATTR_KEY_SIZE];
+
+        let rc = unsafe {
+            sys::libuzfs_zap_iterator_name(
+                iter,
+                buf.as_mut_ptr() as *mut c_char,
+                MAX_KVATTR_KEY_SIZE as u64,
+            )
+        };
+
+        assert!(rc > 0);
+        buf.resize_with(rc as usize, Default::default);
+
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[allow(clippy::missing_safety_doc)]
+    pub unsafe fn zap_iterator_value_size(&self, iter: *mut ZapIterator) -> u64 {
+        unsafe { sys::libuzfs_zap_iterator_value_size(iter) }
+    }
+
+    pub fn zap_lookup<P: CStrArgument>(&self, obj: u64, name: P, size: usize) -> Result<Vec<u8>> {
+        let mut value = vec![0; size];
+        let cname = name.into_cstr();
+        let err = unsafe {
+            sys::libuzfs_zap_lookup(
+                self.dhp,
+                obj,
+                cname.as_ref().as_ptr() as *const c_char,
+                1,
+                size as u64,
+                value.as_mut_ptr() as *mut std::os::raw::c_void,
+            )
+        };
+
+        if err == 0 {
+            Ok(value)
+        } else {
+            Err(io::Error::from_raw_os_error(err))
+        }
+    }
+
+    pub fn zap_add<P: CStrArgument>(&self, obj: u64, name: P, value: &[u8]) -> Result<()> {
+        let cname = name.into_cstr();
+        let mut txg: u64 = 0;
+        let err = unsafe {
+            sys::libuzfs_zap_add(
+                self.dhp,
+                obj,
+                cname.as_ref().as_ptr() as *const c_char,
+                1,
+                value.len() as u64,
+                value.as_ptr() as *mut std::os::raw::c_void,
+                &mut txg as *mut u64,
+            )
+        };
+
+        if err == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(err))
+        }
+    }
+
+    pub fn zap_remove<P: CStrArgument>(&self, obj: u64, name: P) -> Result<()> {
+        let cname = name.into_cstr();
+        let mut txg: u64 = 0;
+        let err = unsafe {
+            sys::libuzfs_zap_remove(
+                self.dhp,
+                obj,
+                cname.as_ref().as_ptr() as *const c_char,
+                &mut txg as *mut u64,
+            )
+        };
+
+        if err == 0 {
+            Ok(())
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
@@ -923,5 +1056,71 @@ mod tests {
             // test claim when inode doesn't exist
             ds.claim_inode(ino, InodeType::DIR).unwrap();
         }
+    }
+
+    #[serial]
+    #[test]
+    fn uzfs_zap_iterator_test() {
+        let dsname = "uzfs-test-pool/ds";
+        let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+
+        Uzfs::set_zpool_cache_path(uzfs_test_env.get_cache_path().unwrap());
+        let uzfs = Arc::new(Uzfs::init().unwrap());
+
+        let ds = Arc::new(
+            Dataset::init(
+                dsname,
+                uzfs_test_env.get_dev_path().unwrap().as_str(),
+                uzfs.clone(),
+            )
+            .unwrap(),
+        );
+
+        let zap_obj = ds.zap_create().unwrap();
+        let num_adders = 10;
+        let num_ops_per_adder = 20000;
+
+        let ds_remover = ds.clone();
+        let remover_handle = std::thread::spawn(move || {
+            let mut total_ops = num_adders * num_ops_per_adder;
+            while total_ops > 0 {
+                let zap_iter = ds_remover.new_zap_iterator(zap_obj);
+                if !zap_iter.is_err() {
+                    let zap_iter = zap_iter.unwrap();
+                    let mut valid = !zap_iter.is_null();
+                    while valid {
+                        let name = unsafe { ds_remover.zap_iterator_name(zap_iter) };
+                        let value_size = unsafe { ds_remover.zap_iterator_value_size(zap_iter) };
+                        let value = ds_remover
+                            .zap_lookup(zap_obj, &name, value_size as usize)
+                            .unwrap();
+                        assert_eq!(name.as_bytes(), value.as_slice());
+                        total_ops -= 1;
+                        valid = unsafe { ds_remover.zap_iterator_advance(zap_iter).unwrap() };
+                    }
+                    unsafe { ds_remover.zap_iterator_fini(zap_iter) };
+                }
+            }
+            println!("remover exited");
+        });
+
+        let mut adder_handles = vec![];
+        for i in 0..num_adders {
+            let adder_idx = i;
+            let ds_adder = ds.clone();
+            adder_handles.push(std::thread::spawn(move || {
+                for j in 0..num_ops_per_adder {
+                    let name = format!("{}_{}fghkjsghj", adder_idx, j);
+                    ds_adder.zap_add(zap_obj, &name, name.as_bytes()).unwrap();
+                }
+                println!("adder exited");
+            }));
+        }
+
+        for adder_handle in adder_handles {
+            adder_handle.join().unwrap();
+        }
+
+        remover_handle.join().unwrap();
     }
 }
