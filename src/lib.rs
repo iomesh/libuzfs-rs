@@ -1,4 +1,5 @@
 use cstr_argument::CStrArgument;
+use dashmap::DashMap;
 use std::ffi::{CStr, CString};
 use std::io::ErrorKind;
 use std::marker::PhantomData;
@@ -87,7 +88,27 @@ pub enum InodeType {
     DIR = sys::libuzfs_inode_type_t_INODE_DIR as isize,
 }
 
+#[derive(Clone)]
+struct Inode {
+    up: *mut sys::libuzfs_node_t,
+}
+
+impl Inode {
+    pub fn new(up: *mut sys::libuzfs_node_t) -> Self {
+        Inode { up }
+    }
+}
+
+impl Drop for Inode {
+    fn drop(&mut self) {
+        if !self.up.is_null() {
+            unsafe { sys::libuzfs_free_node(self.up) };
+        }
+    }
+}
+
 pub struct Dataset {
+    inode_cache: DashMap<u64, Arc<Inode>>,
     dhp: *mut sys::libuzfs_dataset_handle_t,
     zhp: *mut sys::libuzfs_zpool_handle_t,
     poolname: CString,
@@ -155,6 +176,7 @@ impl Dataset {
             Err(io::Error::from(io::ErrorKind::InvalidInput))
         } else {
             Ok(Self {
+                inode_cache: DashMap::new(),
                 dhp,
                 zhp,
                 poolname,
@@ -316,23 +338,43 @@ impl Dataset {
         let ino_ptr: *mut u64 = &mut ino;
         let txg_ptr: *mut u64 = &mut txg;
 
-        let err =
+        let up =
             unsafe { sys::libuzfs_inode_create(self.dhp, ino_ptr, inode_type as u32, txg_ptr) };
 
-        if err == 0 {
-            Ok((ino, txg))
+        if up.is_null() {
+            Err(io::Error::from_raw_os_error(3))
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            self.inode_cache.insert(ino, Arc::new(Inode::new(up)));
+            Ok((ino, txg))
         }
     }
 
     pub fn claim_inode(&self, ino: u64, inode_type: InodeType) -> Result<()> {
-        let err = unsafe { sys::libuzfs_inode_claim(self.dhp, ino, inode_type as u32) };
+        let up = unsafe { sys::libuzfs_inode_claim(self.dhp, ino, inode_type as u32) };
 
-        if err == 0 {
-            Ok(())
+        if up.is_null() {
+            Err(io::Error::from_raw_os_error(3))
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            self.inode_cache.insert(ino, Arc::new(Inode::new(up)));
+            Ok(())
+        }
+    }
+
+    fn get_inode(&self, ino: u64) -> Result<Arc<Inode>> {
+        let inode = match self.inode_cache.get(&ino) {
+            Some(inode) => inode.to_owned(),
+            None => {
+                let up = unsafe { sys::libuzfs_new_node(self.dhp, ino) };
+                let inode = Arc::new(Inode::new(up));
+                self.inode_cache.insert(ino, inode.clone());
+                inode
+            }
+        };
+
+        if inode.up.is_null() {
+            Err(io::Error::from_raw_os_error(3))
+        } else {
+            Ok(inode)
         }
     }
 
@@ -340,7 +382,8 @@ impl Dataset {
         let mut txg: u64 = 0;
         let txg_ptr: *mut u64 = &mut txg;
 
-        let err = unsafe { sys::libuzfs_inode_delete(self.dhp, ino, inode_type as u32, txg_ptr) };
+        let inode = self.get_inode(ino)?;
+        let err = unsafe { sys::libuzfs_inode_delete(inode.up, inode_type as u32, txg_ptr) };
 
         if err == 0 {
             Ok(txg)
@@ -350,12 +393,13 @@ impl Dataset {
     }
 
     pub fn get_attr(&self, ino: u64, size: u64) -> Result<Vec<u8>> {
+        let inode = self.get_inode(ino)?;
         assert!(size_of::<sys::uzfs_attr_t>() == size as usize);
         let mut attr = Vec::<u8>::with_capacity(size as usize);
         attr.resize_with(size as usize, Default::default);
         let attr_ptr = attr.as_mut_ptr() as *mut sys::uzfs_attr_t;
 
-        let err = unsafe { sys::libuzfs_inode_getattr(self.dhp, ino, attr_ptr) };
+        let err = unsafe { sys::libuzfs_inode_getattr(inode.up, attr_ptr) };
 
         if err == 0 {
             Ok(attr)
@@ -370,7 +414,8 @@ impl Dataset {
         let mut txg: u64 = 0;
         let txg_ptr: *mut u64 = &mut txg;
 
-        let err = unsafe { sys::libuzfs_inode_setattr(self.dhp, ino, attr_ptr, txg_ptr) };
+        let inode = self.get_inode(ino)?;
+        let err = unsafe { sys::libuzfs_inode_setattr(inode.up, attr_ptr, txg_ptr) };
 
         if err == 0 {
             Ok(txg)
@@ -386,10 +431,10 @@ impl Dataset {
         let cname = name.into_cstr();
         let name_ptr = cname.as_ref().as_ptr() as *const c_char;
 
+        let inode = self.get_inode(ino)?;
         let rc = unsafe {
             sys::libuzfs_inode_get_kvattr(
-                self.dhp,
-                ino,
+                inode.up,
                 name_ptr,
                 data_ptr,
                 MAX_KVATTR_VALUE_SIZE as u64,
@@ -419,8 +464,9 @@ impl Dataset {
         let value_ptr = value.as_ptr() as *const c_char;
         let size = value.len() as u64;
 
+        let inode = self.get_inode(ino)?;
         let err = unsafe {
-            sys::libuzfs_inode_set_kvattr(self.dhp, ino, name_ptr, value_ptr, size, flags, txg_ptr)
+            sys::libuzfs_inode_set_kvattr(inode.up, name_ptr, value_ptr, size, flags, txg_ptr)
         };
 
         if err == 0 {
@@ -436,7 +482,8 @@ impl Dataset {
         let cname = name.into_cstr();
         let name_ptr = cname.as_ref().as_ptr() as *const c_char;
 
-        let err = unsafe { sys::libuzfs_inode_remove_kvattr(self.dhp, ino, name_ptr, txg_ptr) };
+        let inode = self.get_inode(ino)?;
+        let err = unsafe { sys::libuzfs_inode_remove_kvattr(inode.up, name_ptr, txg_ptr) };
 
         if err == 0 {
             Ok(txg)
