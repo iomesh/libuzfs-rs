@@ -14,6 +14,7 @@ use io::Result;
 const MAX_KVATTR_VALUE_SIZE: usize = 8192;
 const MAX_KVATTR_KEY_SIZE: usize = 256;
 const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
+const MAX_POOL_NAME_SIZE: usize = 32;
 
 pub type ZapIterator = sys::libuzfs_zap_iterator_t;
 
@@ -112,13 +113,13 @@ impl Dataset {
         let poolname = Self::dsname_to_poolname(&dsname)?;
 
         let poolname_string = poolname.clone().into_string().unwrap();
-        let mut stored_pool_name = vec![0; poolname_string.len()];
+        let mut stored_pool_name = vec![0; MAX_POOL_NAME_SIZE];
 
         let errno = unsafe {
             sys::libuzfs_zpool_import(
                 dev_path.as_ref().as_ptr(),
                 stored_pool_name.as_mut_ptr() as *mut c_char,
-                poolname_string.len() as i32,
+                MAX_POOL_NAME_SIZE as i32,
             )
         };
 
@@ -143,8 +144,9 @@ impl Dataset {
                 }
             }
         } else {
+            stored_pool_name.retain(|c| *c != 0);
             let stored_pool_name = std::str::from_utf8(&stored_pool_name).unwrap();
-            assert_eq!(stored_pool_name, poolname_string);
+            assert_eq!(poolname_string, stored_pool_name);
         }
 
         let zhp = unsafe { sys::libuzfs_zpool_open(poolname.as_c_str().as_ptr()) };
@@ -178,13 +180,13 @@ impl Dataset {
         }
     }
 
-    pub fn zap_create(&self) -> Result<u64> {
+    pub fn zap_create(&self) -> Result<(u64, u64)> {
         let mut obj: u64 = 0;
         let mut txg: u64 = 0;
         let err = unsafe { sys::libuzfs_zap_create(self.dhp, &mut obj, &mut txg) };
 
         if err == 0 {
-            Ok(obj)
+            Ok((obj, txg))
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
@@ -268,7 +270,7 @@ impl Dataset {
         }
     }
 
-    pub fn zap_add<P: CStrArgument>(&self, obj: u64, name: P, value: &[u8]) -> Result<()> {
+    pub fn zap_add<P: CStrArgument>(&self, obj: u64, name: P, value: &[u8]) -> Result<u64> {
         let cname = name.into_cstr();
         let mut txg: u64 = 0;
         let err = unsafe {
@@ -284,13 +286,13 @@ impl Dataset {
         };
 
         if err == 0 {
-            Ok(())
+            Ok(txg)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
     }
 
-    pub fn zap_remove<P: CStrArgument>(&self, obj: u64, name: P) -> Result<()> {
+    pub fn zap_remove<P: CStrArgument>(&self, obj: u64, name: P) -> Result<u64> {
         let cname = name.into_cstr();
         let mut txg: u64 = 0;
         let err = unsafe {
@@ -303,7 +305,7 @@ impl Dataset {
         };
 
         if err == 0 {
-            Ok(())
+            Ok(txg)
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
@@ -798,19 +800,21 @@ mod tests {
             let hdl = unsafe { sys::libuzfs_zpool_open(poolname.into_cstr().as_ptr()) };
             assert!(hdl.is_null());
 
+            for _ in 0..100 {
+                Dataset::init(
+                    dsname,
+                    uzfs_test_env.get_dev_path().unwrap().as_str(),
+                    uzfs.clone(),
+                )
+                .unwrap();
+            }
+
             let ds = Dataset::init(
                 dsname,
                 uzfs_test_env.get_dev_path().unwrap().as_str(),
                 uzfs.clone(),
             )
             .unwrap();
-
-            let second_init = Dataset::init(
-                dsname,
-                uzfs_test_env.get_dev_path().unwrap().as_str(),
-                uzfs.clone(),
-            );
-            assert!(second_init.is_err());
 
             sb_ino = ds.get_superblock_ino().unwrap();
             let last_txg = ds.get_last_synced_txg().unwrap();
@@ -1076,7 +1080,7 @@ mod tests {
             .unwrap(),
         );
 
-        let zap_obj = ds.zap_create().unwrap();
+        let (zap_obj, _) = ds.zap_create().unwrap();
         let num_adders = 10;
         let num_ops_per_adder = 20000;
 
