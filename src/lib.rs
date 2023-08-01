@@ -16,7 +16,7 @@ const MAX_KVATTR_KEY_SIZE: usize = 256;
 const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
 const MAX_POOL_NAME_SIZE: usize = 32;
 
-pub type ZapIterator = sys::libuzfs_zap_iterator_t;
+type ZapIterator = sys::libuzfs_zap_iterator_t;
 
 pub struct Uzfs {
     i: PhantomData<()>,
@@ -88,6 +88,18 @@ unsafe impl Sync for Uzfs {}
 pub enum InodeType {
     FILE = sys::libuzfs_inode_type_t_INODE_FILE as isize,
     DIR = sys::libuzfs_inode_type_t_INODE_DIR as isize,
+}
+
+struct RAIIZapIterator {
+    pub iter: *mut ZapIterator,
+}
+
+impl Drop for RAIIZapIterator {
+    fn drop(&mut self) {
+        if !self.iter.is_null() {
+            unsafe { sys::libuzfs_zap_iterator_fini(self.iter) };
+        }
+    }
 }
 
 pub struct Dataset {
@@ -192,7 +204,29 @@ impl Dataset {
         }
     }
 
-    pub fn new_zap_iterator(&self, obj: u64) -> Result<*mut ZapIterator> {
+    pub fn zap_list(&self, zap_obj: u64) -> Result<Vec<(String, Vec<u8>)>> {
+        let mut kvs = vec![];
+        let raii_iter = RAIIZapIterator {
+            iter: self.new_zap_iterator(zap_obj)?,
+        };
+
+        if !raii_iter.iter.is_null() {
+            loop {
+                let key = unsafe { self.zap_iterator_name(raii_iter.iter) };
+                let value_size = unsafe { sys::libuzfs_zap_iterator_value_size(raii_iter.iter) };
+                let value = self.zap_lookup(zap_obj, &key, value_size as usize)?;
+                kvs.push((key, value));
+
+                if !unsafe { self.zap_iterator_advance(raii_iter.iter)? } {
+                    break;
+                }
+            }
+        }
+
+        Ok(kvs)
+    }
+
+    fn new_zap_iterator(&self, obj: u64) -> Result<*mut ZapIterator> {
         let mut errno: i32 = 0;
         let iter = unsafe { sys::libuzfs_new_zap_iterator(self.dhp, obj, &mut errno as *mut i32) };
 
@@ -207,12 +241,7 @@ impl Dataset {
     }
 
     #[allow(clippy::missing_safety_doc)]
-    pub unsafe fn zap_iterator_fini(&self, iter: *mut ZapIterator) {
-        unsafe { sys::libuzfs_zap_iterator_fini(iter) };
-    }
-
-    #[allow(clippy::missing_safety_doc)]
-    pub unsafe fn zap_iterator_advance(&self, iter: *mut ZapIterator) -> Result<bool> {
+    unsafe fn zap_iterator_advance(&self, iter: *mut ZapIterator) -> Result<bool> {
         let errno = unsafe { sys::libuzfs_zap_iterator_advance(iter) };
         if errno == 0 {
             Ok(true)
@@ -227,7 +256,7 @@ impl Dataset {
     }
 
     #[allow(clippy::missing_safety_doc)]
-    pub unsafe fn zap_iterator_name(&self, iter: *mut ZapIterator) -> String {
+    unsafe fn zap_iterator_name(&self, iter: *mut ZapIterator) -> String {
         let mut buf = vec![0; MAX_KVATTR_KEY_SIZE];
 
         let rc = unsafe {
@@ -241,12 +270,7 @@ impl Dataset {
         assert!(rc > 0);
         buf.resize_with(rc as usize, Default::default);
 
-        String::from_utf8(buf).unwrap()
-    }
-
-    #[allow(clippy::missing_safety_doc)]
-    pub unsafe fn zap_iterator_value_size(&self, iter: *mut ZapIterator) -> u64 {
-        unsafe { sys::libuzfs_zap_iterator_value_size(iter) }
+        String::from_utf8(buf).expect("invalid buf")
     }
 
     pub fn zap_lookup<P: CStrArgument>(&self, obj: u64, name: P, size: usize) -> Result<Vec<u8>> {
@@ -1088,21 +1112,9 @@ mod tests {
         let remover_handle = std::thread::spawn(move || {
             let mut total_ops = num_adders * num_ops_per_adder;
             while total_ops > 0 {
-                let zap_iter = ds_remover.new_zap_iterator(zap_obj);
-                if !zap_iter.is_err() {
-                    let zap_iter = zap_iter.unwrap();
-                    let mut valid = !zap_iter.is_null();
-                    while valid {
-                        let name = unsafe { ds_remover.zap_iterator_name(zap_iter) };
-                        let value_size = unsafe { ds_remover.zap_iterator_value_size(zap_iter) };
-                        let value = ds_remover
-                            .zap_lookup(zap_obj, &name, value_size as usize)
-                            .unwrap();
-                        assert_eq!(name.as_bytes(), value.as_slice());
-                        total_ops -= 1;
-                        valid = unsafe { ds_remover.zap_iterator_advance(zap_iter).unwrap() };
-                    }
-                    unsafe { ds_remover.zap_iterator_fini(zap_iter) };
+                for (key, value) in ds_remover.zap_list(zap_obj).unwrap() {
+                    assert_eq!(key.as_bytes(), value.as_slice());
+                    total_ops -= 1;
                 }
             }
             println!("remover exited");
