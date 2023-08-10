@@ -708,6 +708,10 @@ impl Dataset {
         unsafe { sys::libuzfs_wait_synced(self.dhp) };
         Ok(())
     }
+
+    pub fn get_used_bytes(&self) -> u64 {
+        unsafe { sys::libuzfs_dataset_used_bytes(self.dhp) }
+    }
 }
 
 impl Drop for Dataset {
