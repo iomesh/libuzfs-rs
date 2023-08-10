@@ -773,9 +773,16 @@ mod tests {
     use super::InodeType;
     use super::{Uzfs, UzfsTestEnv};
     use cstr_argument::CStrArgument;
+    use dashmap::DashMap;
+    use petgraph::algo::is_cyclic_directed;
+    use petgraph::prelude::DiGraph;
+    use rand::Rng;
     use serial_test::serial;
+    use std::collections::HashMap;
     use std::mem::{size_of, transmute};
+    use std::sync::atomic::AtomicU16;
     use std::sync::Arc;
+    use std::thread::JoinHandle;
     use test_log::test;
     use uzfs_sys::{self as sys, uzfs_attr_t as Attr};
 
@@ -1138,5 +1145,114 @@ mod tests {
         }
 
         remover_handle.join().unwrap();
+    }
+
+    #[serial]
+    #[test]
+    fn uzfs_ranglock_test() {
+        let dsname = "uzfs-test-pool/ds";
+        let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+        Uzfs::set_zpool_cache_path(uzfs_test_env.get_cache_path().unwrap());
+        let uzfs = Arc::new(Uzfs::init().unwrap());
+
+        let ds = Arc::new(
+            Dataset::init(dsname, uzfs_test_env.get_dev_path().unwrap().as_str(), uzfs).unwrap(),
+        );
+
+        let obj = ds.create_object().unwrap().0;
+
+        let num_writers = 10;
+        let max_file_size = 1 << 24;
+        let write_size = 1 << 12;
+        let num_writes_per_writer = 1 << 12;
+        let version = Arc::new(AtomicU16::new(1));
+        let num_readers = 5;
+
+        let write_offsets = Arc::new(DashMap::new());
+
+        let mut handles = Vec::<JoinHandle<()>>::with_capacity(num_readers + num_writers);
+
+        for _ in 0..num_writers {
+            let ds_clone = ds.clone();
+            let version_clone = version.clone();
+            let write_offsets_clone = write_offsets.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut rng = rand::thread_rng();
+                for _ in 0..num_writes_per_writer {
+                    let offset = rng.gen_range(0..(max_file_size - write_size));
+                    let my_version =
+                        version_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    write_offsets_clone.insert(my_version, offset);
+
+                    let mut buf_u16 = Vec::<u16>::with_capacity(write_size);
+                    buf_u16.resize(write_size, my_version);
+                    let buf_u8 = unsafe { buf_u16.align_to::<u8>().1 };
+                    ds_clone
+                        .write_object(obj, offset as u64 * 2, false, buf_u8)
+                        .unwrap();
+                }
+            }));
+        }
+
+        let read_size = 1 << 12;
+        let num_reads_per_reader = 1 << 14;
+        for _ in 0..num_readers {
+            let ds_clone = ds.clone();
+            let write_offsets_clone = write_offsets.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut rng = rand::thread_rng();
+
+                for _ in 0..num_reads_per_reader {
+                    let offset = rng.gen_range(0..(max_file_size - read_size));
+                    let data_u8 = ds_clone
+                        .read_object(obj, offset as u64 * 2, read_size as u64)
+                        .unwrap();
+                    let data_u16 = unsafe { data_u8.align_to::<u16>().1 };
+
+                    // thread 1 a writes [l1, r1] with 1, thread 2 writes [l2, r2] with 2,
+                    // if the two intervals have common elements and some element is 1, thread 1 must writes before thread2,
+                    // so we can draw an edge from 1 to 2 in the dependency graph, no circle in this graph means writes are atomic
+                    let mut version_node_map = HashMap::new();
+                    let mut graph = DiGraph::new();
+                    for version in data_u16 {
+                        if *version == 0 {
+                            continue;
+                        }
+
+                        let off = *write_offsets_clone.get(version).unwrap();
+                        if !version_node_map.contains_key(version) {
+                            version_node_map.insert(*version, (graph.add_node(()), off));
+                        }
+                    }
+
+                    // add edges to dependency_graph
+                    let size = data_u16.len();
+                    for idx in 0..size {
+                        let version = data_u16[idx];
+                        if version == 0 {
+                            continue;
+                        }
+
+                        let node = version_node_map.get(&version).unwrap().0;
+                        for (other_node, off) in version_node_map.values() {
+                            if *other_node == node {
+                                continue;
+                            }
+
+                            // current node written after other node, add an edge
+                            if *off <= idx + offset && idx + offset < write_size + *off {
+                                graph.update_edge(node, *other_node, ());
+                            }
+                        }
+                    }
+
+                    assert!(!is_cyclic_directed(&graph));
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
     }
 }
