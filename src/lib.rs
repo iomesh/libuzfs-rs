@@ -335,16 +335,19 @@ impl Dataset {
         }
     }
 
-    pub fn create_object(&self) -> Result<(u64, u64)> {
-        let mut obj: u64 = 0;
+    pub fn create_objects(&self, num_objs: usize) -> Result<(Vec<u64>, u64)> {
+        let mut objs = Vec::<u64>::with_capacity(num_objs);
+        objs.resize(num_objs, 0);
+
+        let objs_ptr: *mut u64 = objs.as_mut_ptr();
         let mut gen: u64 = 0;
-        let obj_ptr: *mut u64 = &mut obj;
         let gen_ptr: *mut u64 = &mut gen;
 
-        let err = unsafe { sys::libuzfs_object_create(self.dhp, obj_ptr, gen_ptr) };
+        let err =
+            unsafe { sys::libuzfs_objects_create(self.dhp, objs_ptr, num_objs as i32, gen_ptr) };
 
         if err == 0 {
-            Ok((obj, gen))
+            Ok((objs, gen))
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
@@ -873,7 +876,10 @@ mod tests {
             assert_eq!(tmp_dentry_data, tmp_dentry_data_read);
 
             num = ds.list_object().unwrap();
-            (rwobj, gen) = ds.create_object().unwrap();
+            let objs;
+            (objs, gen) = ds.create_objects(1).unwrap();
+
+            rwobj = objs[0];
 
             assert_eq!(ds.get_object_size(rwobj).unwrap(), 0);
             assert_eq!(ds.get_object_gen(rwobj).unwrap(), gen);
@@ -1163,7 +1169,7 @@ mod tests {
             Dataset::init(dsname, uzfs_test_env.get_dev_path().unwrap().as_str(), uzfs).unwrap(),
         );
 
-        let obj = ds.create_object().unwrap().0;
+        let obj = ds.create_objects(1).unwrap().0[0];
 
         let num_writers = 10;
         let max_file_size = 1 << 24;
