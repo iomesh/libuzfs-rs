@@ -452,6 +452,21 @@ impl Dataset {
         }
     }
 
+    pub fn get_used_bytes(&self) -> u64 {
+        unsafe { sys::libuzfs_dataset_used_bytes(self.dhp) }
+    }
+
+    pub fn object_has_hole_in_range(&self, obj: u64, offset: u64, size: u64) -> Result<bool> {
+        let mut hole_offset: u64 = offset;
+        let err =
+            unsafe { sys::libuzfs_object_next_hole(self.dhp, obj, &mut hole_offset as *mut u64) };
+
+        match err {
+            0 => Ok(hole_offset < offset + size),
+            other => Err(io::Error::from_raw_os_error(other)),
+        }
+    }
+
     pub fn dump_object_doi(obj: u64, doi: sys::dmu_object_info_t) {
         println!("object: {obj}");
         println!("\tdata_block_size: {}", doi.doi_data_block_size);
@@ -847,6 +862,8 @@ mod tests {
             )
             .unwrap();
 
+            println!("used bytes: {}", ds.get_used_bytes());
+
             sb_ino = ds.get_superblock_ino().unwrap();
             let last_txg = ds.get_last_synced_txg().unwrap();
 
@@ -937,6 +954,21 @@ mod tests {
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
             assert_eq!(ds.list_object().unwrap(), num + 3);
+            println!("used bytes: {}", ds.get_used_bytes());
+
+            let obj = ds.create_object().unwrap().0;
+            let size = 1 << 18;
+            let mut data = Vec::<u8>::with_capacity(size);
+            data.resize(size, 1);
+            ds.write_object(obj, 0, false, &data).unwrap();
+            ds.write_object(obj, (size * 2) as u64, false, &data)
+                .unwrap();
+            ds.wait_synced().unwrap();
+            assert!(!ds.object_has_hole_in_range(obj, 0, size as u64).unwrap());
+            assert!(ds
+                .object_has_hole_in_range(obj, size as u64, size as u64 * 2)
+                .unwrap());
+            ds.delete_object(obj).unwrap();
         }
 
         {
@@ -1210,7 +1242,7 @@ mod tests {
                     let data_u16 = unsafe { data_u8.align_to::<u16>().1 };
 
                     // thread 1 a writes [l1, r1] with 1, thread 2 writes [l2, r2] with 2,
-                    // if the two intervals have common elements and some element is 1, thread 1 must writes before thread2,
+                    // if the two intervals have common elements and some element is 1, thread 1 must writes after thread2,
                     // so we can draw an edge from 1 to 2 in the dependency graph, no circle in this graph means writes are atomic
                     let mut version_node_map = HashMap::new();
                     let mut graph = DiGraph::new();
