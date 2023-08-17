@@ -335,21 +335,28 @@ impl Dataset {
         }
     }
 
-    pub fn create_object(&self) -> Result<(u64, u64)> {
-        let mut obj: u64 = 0;
+    pub fn create_objects(&self, num_objs: usize) -> Result<(Vec<u64>, u64)> {
+        let mut objs = vec![0; num_objs];
         let mut gen: u64 = 0;
-        let obj_ptr: *mut u64 = &mut obj;
-        let gen_ptr: *mut u64 = &mut gen;
 
-        let err = unsafe { sys::libuzfs_object_create(self.dhp, obj_ptr, gen_ptr) };
+        let err = unsafe {
+            sys::libuzfs_objects_create(
+                self.dhp,
+                objs.as_mut_ptr(),
+                num_objs as i32,
+                &mut gen as *mut u64,
+            )
+        };
 
         if err == 0 {
-            Ok((obj, gen))
+            self.wait_log_commit();
+            Ok((objs, gen))
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
     }
 
+    // delete_object won't wait until synced, wait_log_commit is needed if you want wait sync
     pub fn delete_object(&self, obj: u64) -> Result<()> {
         let err = unsafe { sys::libuzfs_object_delete(self.dhp, obj) };
 
@@ -358,6 +365,10 @@ impl Dataset {
         } else {
             Err(io::Error::from_raw_os_error(err))
         }
+    }
+
+    pub fn wait_log_commit(&self) {
+        unsafe { sys::libuzfs_wait_log_commit(self.dhp) };
     }
 
     pub fn get_object_gen(&self, obj: u64) -> Result<u64> {
@@ -886,8 +897,10 @@ mod tests {
             assert_eq!(tmp_dentry_data, tmp_dentry_data_read);
 
             num = ds.list_object().unwrap();
-            (rwobj, gen) = ds.create_object().unwrap();
+            let objs;
+            (objs, gen) = ds.create_objects(1).unwrap();
 
+            rwobj = objs[0];
             assert_eq!(ds.get_object_size(rwobj).unwrap(), 0);
             assert_eq!(ds.get_object_gen(rwobj).unwrap(), gen);
             assert_eq!(ds.list_object().unwrap(), num + 1);
@@ -956,7 +969,7 @@ mod tests {
             assert_eq!(ds.list_object().unwrap(), num + 3);
             println!("used bytes: {}", ds.get_used_bytes());
 
-            let obj = ds.create_object().unwrap().0;
+            let obj = ds.create_objects(1).unwrap().0[0];
             let size = 1 << 18;
             let mut data = Vec::<u8>::with_capacity(size);
             data.resize(size, 1);
@@ -1191,7 +1204,7 @@ mod tests {
             Dataset::init(dsname, uzfs_test_env.get_dev_path().unwrap().as_str(), uzfs).unwrap(),
         );
 
-        let obj = ds.create_object().unwrap().0;
+        let obj = ds.create_objects(1).unwrap().0[0];
 
         let num_writers = 10;
         let max_file_size = 1 << 24;
