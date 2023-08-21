@@ -316,6 +316,30 @@ impl Dataset {
         }
     }
 
+    // if name exists, zap_update will overwrite original value,
+    // if not exists, zap_update will add a new (name, value) like zap_add
+    pub fn zap_update<P: CStrArgument>(&self, obj: u64, name: P, value: &[u8]) -> Result<u64> {
+        let cname = name.into_cstr();
+        let mut txg: u64 = 0;
+        let err = unsafe {
+            sys::libuzfs_zap_update(
+                self.dhp,
+                obj,
+                cname.as_ref().as_ptr() as *const c_char,
+                1,
+                value.len() as u64,
+                value.as_ptr() as *mut std::os::raw::c_void,
+                &mut txg as *mut u64,
+            )
+        };
+
+        if err == 0 {
+            Ok(txg)
+        } else {
+            Err(io::Error::from_raw_os_error(err))
+        }
+    }
+
     pub fn zap_remove<P: CStrArgument>(&self, obj: u64, name: P) -> Result<u64> {
         let cname = name.into_cstr();
         let mut txg: u64 = 0;
