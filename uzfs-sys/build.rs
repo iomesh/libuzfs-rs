@@ -7,7 +7,14 @@ fn main() {
 
     let root = fs::canonicalize(".").unwrap();
 
+    let enable_debug = if env::var("PROFILE").unwrap() == *"release" {
+        "no"
+    } else {
+        "yes"
+    };
+
     Command::new("make")
+        .env("ENABLE_DEBUG", enable_debug)
         .args(["-C", root.to_str().unwrap(), "build_libuzfs_src"])
         .status()
         .expect("failed to make libuzfs");
@@ -23,6 +30,12 @@ fn main() {
                 .iter()
                 .map(|path| format!("-I{}", path.to_string_lossy())),
         )
+        .clang_args(
+            lib.link_paths
+                .iter()
+                .map(|path| format!("-L{}", path.to_string_lossy())),
+        )
+        .clang_args(lib.libs.iter().map(|lib| format!("-l{lib}")))
         .header("src/wrapper.h")
         .allowlist_function("libuzfs_.*")
         .allowlist_var("dmu_ot.*")
