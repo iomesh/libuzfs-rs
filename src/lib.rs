@@ -179,6 +179,15 @@ impl Dataset {
         }
     }
 
+    pub fn expand(&self) -> Result<()> {
+        let err = unsafe { sys::libuzfs_dataset_expand(self.dhp) };
+        if err == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(err))
+        }
+    }
+
     pub fn get_superblock_ino(&self) -> Result<u64> {
         let mut obj: u64 = 0;
         let obj_ptr: *mut u64 = &mut obj;
@@ -815,6 +824,10 @@ impl UzfsTestEnv {
         let dev_path = self.dev_file.path().to_str().unwrap();
         Ok(dev_path.to_owned())
     }
+
+    pub fn set_dev_size(&mut self, new_size: u64) {
+        self.dev_file.as_file_mut().set_len(new_size).unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -833,6 +846,7 @@ mod tests {
     use std::sync::atomic::AtomicU16;
     use std::sync::Arc;
     use std::thread::JoinHandle;
+    use std::time::Duration;
     use test_log::test;
     use uzfs_sys::{self as sys, uzfs_attr_t as Attr};
 
@@ -1214,6 +1228,58 @@ mod tests {
         }
 
         remover_handle.join().unwrap();
+    }
+
+    #[serial]
+    #[test]
+    fn uzfs_expand_test() {
+        let dsname = "uzfs-test-pool/ds";
+        let mut uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+        Uzfs::set_zpool_cache_path(uzfs_test_env.get_cache_path().unwrap());
+        let uzfs = Arc::new(Uzfs::init().unwrap());
+
+        let dev_path = uzfs_test_env.get_dev_path().unwrap();
+        let ds = Arc::new(Dataset::init(dsname, &dev_path, uzfs).unwrap());
+
+        let io_workers = 10;
+        let size = 20 << 20;
+        let block_size = 1 << 18;
+        let mut workers = Vec::new();
+        for _ in 0..io_workers {
+            let ds_clone = ds.clone();
+            workers.push(std::thread::spawn(move || {
+                let buf = vec![123 as u8; block_size];
+                let mut offset = 0;
+                let obj = ds_clone.create_objects(1).unwrap().0[0];
+                while offset < size {
+                    while let Err(err) = ds_clone.write_object(obj, offset, false, &buf) {
+                        println!("write error: ({offset}, {block_size}), {err}");
+                        std::thread::sleep(Duration::from_secs(1));
+                    }
+                    offset += block_size as u64;
+                }
+            }));
+        }
+
+        let expander = std::thread::spawn(move || {
+            let mut cur_size = 100 << 20;
+            let target_size = 400 << 20;
+            let incr_size = 20 << 20;
+            while cur_size < target_size {
+                std::thread::sleep(Duration::from_secs(2));
+                cur_size += incr_size;
+                uzfs_test_env.set_dev_size(cur_size);
+                println!("new size: {cur_size}");
+                ds.expand().unwrap();
+            }
+            uzfs_test_env
+        });
+
+        _ = expander.join().unwrap();
+
+        for worker in workers {
+            worker.join().unwrap();
+        }
     }
 
     #[serial]
