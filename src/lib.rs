@@ -837,12 +837,25 @@ mod tests {
     use super::{Uzfs, UzfsTestEnv};
     use cstr_argument::CStrArgument;
     use dashmap::DashMap;
+    use nix::errno::Errno;
+    use nix::libc::fork;
+    use nix::libc::kill;
+    use nix::libc::pid_t;
+    use nix::libc::waitpid;
+    use nix::libc::SIGKILL;
+    use nix::unistd::close;
+    use nix::unistd::read;
+    use nix::unistd::write;
     use petgraph::algo::is_cyclic_directed;
     use petgraph::prelude::DiGraph;
     use rand::Rng;
     use serial_test::serial;
     use std::collections::HashMap;
+    use std::fs::File;
+    use std::io::Result;
     use std::mem::{size_of, transmute};
+    use std::os::fd::RawFd;
+    use std::process::exit;
     use std::sync::atomic::AtomicU16;
     use std::sync::Arc;
     use std::thread::JoinHandle;
@@ -857,6 +870,126 @@ mod tests {
 
     unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
         ::std::slice::from_raw_parts((p as *const T) as *const u8, ::std::mem::size_of::<T>())
+    }
+
+    struct IoWorker {
+        execute: fn(Vec<u8>, &Dataset) -> Vec<u8>,
+        parent_read: RawFd,
+        child_write: RawFd,
+        child_read: RawFd,
+        parent_write: RawFd,
+        dev_path: String,
+        child_pid: pid_t,
+    }
+
+    impl IoWorker {
+        pub fn new(
+            execute: fn(Vec<u8>, &Dataset) -> Vec<u8>,
+            dev_size: u64,
+            dev_path: String,
+        ) -> Self {
+            File::create(&dev_path).unwrap().set_len(dev_size).unwrap();
+            IoWorker {
+                execute,
+                parent_read: 0,
+                child_write: 0,
+                child_read: 0,
+                parent_write: 0,
+                dev_path,
+                child_pid: 0,
+            }
+        }
+
+        fn send_msg(req: Vec<u8>, write_pipe: RawFd) -> Result<()> {
+            let nwrite = write(write_pipe, unsafe { any_as_u8_slice(&req.len()) })?;
+            assert_eq!(nwrite, 8);
+            let mut offset = 0;
+            while offset < req.len() {
+                offset = match write(write_pipe, &req[offset..]) {
+                    Ok(nwrite) => offset + nwrite,
+                    Err(Errno::EINTR) => offset,
+                    Err(other) => return Err(other.into()),
+                }
+            }
+            Ok(())
+        }
+
+        fn receive_msg(read_pipe: RawFd) -> Result<Vec<u8>> {
+            let mut size = [0; 8];
+            // TODO(sundengyu): check EINTR
+            assert_eq!(read(read_pipe, &mut size)?, 8);
+            let size = usize::from_ne_bytes(size);
+            let mut data_in = vec![0; size];
+
+            let mut offset = 0;
+            while offset < data_in.len() {
+                offset = match read(read_pipe, &mut data_in[offset..]) {
+                    Ok(nread) => offset + nread,
+                    Err(Errno::EINTR) => offset,
+                    Err(other) => return Err(other.into()),
+                }
+            }
+            Ok(data_in)
+        }
+
+        fn do_io_work(&self) {
+            let uzfs = Arc::new(Uzfs::init().unwrap());
+            let ds = Dataset::init("testzp/ds", &self.dev_path, uzfs).unwrap();
+
+            loop {
+                let msg_in = IoWorker::receive_msg(self.child_read).unwrap();
+                let msg_out = (self.execute)(msg_in, &ds);
+                IoWorker::send_msg(msg_out, self.child_write).unwrap();
+            }
+        }
+
+        pub fn create_worker(&mut self) {
+            assert_eq!(self.child_pid, 0);
+
+            (self.child_read, self.parent_write) = nix::unistd::pipe().unwrap();
+            (self.parent_read, self.child_write) = nix::unistd::pipe().unwrap();
+
+            self.child_pid = unsafe { fork() };
+            assert!(self.child_pid >= 0);
+
+            // child process, read from pipe, execute and write
+            if self.child_pid == 0 {
+                self.do_io_work();
+                exit(-1);
+            }
+        }
+
+        pub fn send_command_and_wait(&self, cmd: Vec<u8>) -> Vec<u8> {
+            assert_ne!(self.child_pid, 0);
+            IoWorker::send_msg(cmd, self.parent_write).unwrap();
+            IoWorker::receive_msg(self.parent_read).unwrap()
+        }
+
+        pub fn destroy_worker(&mut self) {
+            assert_ne!(self.child_pid, 0);
+            unsafe {
+                kill(self.child_pid, SIGKILL);
+                let ret = waitpid(self.child_pid, std::ptr::null_mut(), 0);
+                assert_eq!(ret, self.child_pid);
+            }
+
+            close(self.child_read).unwrap();
+            close(self.child_write).unwrap();
+            close(self.parent_read).unwrap();
+            close(self.parent_write).unwrap();
+
+            self.child_pid = 0;
+        }
+    }
+
+    impl Drop for IoWorker {
+        fn drop(&mut self) {
+            if self.child_pid != 0 {
+                self.destroy_worker();
+            }
+
+            std::fs::remove_file(&self.dev_path).unwrap();
+        }
     }
 
     #[serial]

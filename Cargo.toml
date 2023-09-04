@@ -26,3 +26,4 @@ serial_test = { version = "1.0.0" }
 petgraph = "0.6.3"
 dashmap = "5.5.0"
 rand = "0.8.5"
+nix = "0.27.1"
