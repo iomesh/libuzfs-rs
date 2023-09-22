@@ -496,8 +496,21 @@ impl Dataset {
         }
     }
 
-    pub fn get_used_bytes(&self) -> u64 {
-        unsafe { sys::libuzfs_dataset_used_bytes(self.dhp) }
+    pub fn space(&self) -> (u64, u64, u64, u64) {
+        let mut refdbytes: u64 = 0;
+        let mut availbytes: u64 = 0;
+        let mut usedobjs: u64 = 0;
+        let mut availobjs: u64 = 0;
+        unsafe {
+            sys::libuzfs_dataset_space(
+                self.dhp,
+                &mut refdbytes,
+                &mut availbytes,
+                &mut usedobjs,
+                &mut availobjs,
+            )
+        };
+        (refdbytes, availbytes, usedobjs, availobjs)
     }
 
     pub fn object_has_hole_in_range(&self, obj: u64, offset: u64, size: u64) -> Result<bool> {
@@ -911,7 +924,7 @@ mod tests {
             )
             .unwrap();
 
-            println!("used bytes: {}", ds.get_used_bytes());
+            println!("dataset space: {:?}", ds.space());
 
             sb_ino = ds.get_superblock_ino().unwrap();
             let last_txg = ds.get_last_synced_txg().unwrap();
@@ -1005,7 +1018,7 @@ mod tests {
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
             assert_eq!(ds.list_object().unwrap(), num + 3);
-            println!("used bytes: {}", ds.get_used_bytes());
+            println!("dataset space: {:?}", ds.space());
 
             let obj = ds.create_objects(1).unwrap().0[0];
             let size = 1 << 18;
