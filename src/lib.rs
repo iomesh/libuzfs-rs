@@ -1,112 +1,57 @@
 use cstr_argument::CStrArgument;
-use std::ffi::{CStr, CString};
-use std::io::ErrorKind;
-use std::marker::PhantomData;
-use std::mem::size_of;
-use std::os::raw::c_char;
-use std::sync::Arc;
-use std::{io, ptr};
-use tempfile::NamedTempFile;
-use uzfs_sys as sys;
-
 use io::Result;
+use once_cell::sync::OnceCell;
+use std::ffi::{CStr, CString};
+use std::io;
+use std::mem::size_of;
+use std::os::raw::{c_char, c_void};
+use tempfile::NamedTempFile;
+use tokio::sync::Mutex;
+use uzfs_sys::async_sys::*;
+use uzfs_sys::bindings as sys;
+use uzfs_sys::coroutine::UzfsCoroutineFuture;
 
-const MAX_KVATTR_VALUE_SIZE: usize = 8192;
-const MAX_KVATTR_KEY_SIZE: usize = 256;
-const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
-const MAX_POOL_NAME_SIZE: usize = 32;
+pub const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
 
-type ZapIterator = sys::libuzfs_zap_iterator_t;
+static UZFS_INIT_REF: OnceCell<Mutex<u32>> = OnceCell::new();
 
-pub struct Uzfs {
-    i: PhantomData<()>,
+#[inline]
+pub async fn uzfs_env_init() {
+    let _ = std::fs::remove_file(DEFAULT_CACHE_FILE);
+    let mut guard = UZFS_INIT_REF.get_or_init(|| Mutex::new(0)).lock().await;
+
+    if *guard == 0 {
+        UzfsCoroutineFuture::new(libuzfs_init_c, 0, 0).await;
+    }
+
+    *guard += 1;
 }
 
-impl Uzfs {
-    pub fn init() -> Result<Self> {
-        let _ = std::fs::remove_file(DEFAULT_CACHE_FILE);
-        unsafe {
-            sys::libuzfs_init();
-        };
-        Ok(Self { i: PhantomData })
-    }
-
-    pub fn set_zpool_cache_path<P: CStrArgument>(path: P) {
-        unsafe {
-            sys::libuzfs_set_zpool_cache_path(path.into_cstr().as_ref().as_ptr());
-        }
-    }
-
-    pub fn create_zpool<P: CStrArgument>(&self, zpool: P, dev_path: P) -> Result<()> {
-        let zpool = zpool.into_cstr();
-        let dev_path = dev_path.into_cstr();
-        let err = unsafe {
-            sys::libuzfs_zpool_create(
-                zpool.as_ref().as_ptr(),
-                dev_path.as_ref().as_ptr(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            )
-        };
-        if err == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::from_raw_os_error(err))
-        }
-    }
-
-    pub fn destroy_zpool<P: CStrArgument>(&self, zpool: P) {
-        let zpool = zpool.into_cstr();
-        unsafe { sys::libuzfs_zpool_destroy(zpool.as_ref().as_ptr()) };
-    }
-
-    pub fn create_dataset<P: CStrArgument>(&self, dsname: P) -> Result<()> {
-        let dsname = dsname.into_cstr();
-        let err = unsafe { sys::libuzfs_dataset_create(dsname.as_ref().as_ptr()) };
-        if err == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::from_raw_os_error(err))
-        }
-    }
-
-    pub fn destroy_dataset<P: CStrArgument>(&self, dsname: P) {
-        let dsname = dsname.into_cstr();
-        unsafe { sys::libuzfs_dataset_destroy(dsname.as_ref().as_ptr()) };
+#[inline]
+pub fn uzfs_set_zpool_cache_path<P: CStrArgument>(path: P) {
+    unsafe {
+        sys::libuzfs_set_zpool_cache_path(path.into_cstr().as_ref().as_ptr());
     }
 }
 
-impl Drop for Uzfs {
-    fn drop(&mut self) {
-        unsafe { sys::libuzfs_fini() }
+#[inline]
+pub async fn uzfs_env_fini() {
+    let mut guard = UZFS_INIT_REF.get().unwrap().lock().await;
+    if *guard == 1 {
+        UzfsCoroutineFuture::new(libuzfs_fini_c, 0, 0).await;
     }
+    *guard -= 1;
 }
-
-unsafe impl Send for Uzfs {}
-unsafe impl Sync for Uzfs {}
 
 pub enum InodeType {
     FILE = sys::libuzfs_inode_type_t_INODE_FILE as isize,
     DIR = sys::libuzfs_inode_type_t_INODE_DIR as isize,
 }
 
-struct RAIIZapIterator {
-    pub iter: *mut ZapIterator,
-}
-
-impl Drop for RAIIZapIterator {
-    fn drop(&mut self) {
-        if !self.iter.is_null() {
-            unsafe { sys::libuzfs_zap_iterator_fini(self.iter) };
-        }
-    }
-}
-
 pub struct Dataset {
     dhp: *mut sys::libuzfs_dataset_handle_t,
     zhp: *mut sys::libuzfs_zpool_handle_t,
     poolname: CString,
-    _uzfs: Arc<Uzfs>,
 }
 
 impl Dataset {
@@ -119,75 +64,56 @@ impl Dataset {
         Ok(CString::new(v[0]).unwrap())
     }
 
-    pub fn init<P: CStrArgument>(dsname: P, dev_path: P, uzfs: Arc<Uzfs>) -> Result<Self> {
-        let dev_path = dev_path.into_cstr();
+    pub async fn init<P: CStrArgument>(dsname: P, dev_path: P) -> Result<Self> {
         let dsname = dsname.into_cstr();
         let poolname = Self::dsname_to_poolname(&dsname)?;
+        let dev_path_c = dev_path.into_cstr();
 
-        let poolname_string = poolname.clone().into_string().unwrap();
-        let mut stored_pool_name = vec![0; MAX_POOL_NAME_SIZE];
+        let mut arg = LibuzfsDatasetInitArg {
+            dsname: dsname.as_ref().as_ptr(),
+            dev_path: dev_path_c.as_ref().as_ptr(),
+            pool_name: poolname.as_ptr() as *const c_char,
 
-        let errno = unsafe {
-            sys::libuzfs_zpool_import(
-                dev_path.as_ref().as_ptr(),
-                stored_pool_name.as_mut_ptr() as *mut c_char,
-                MAX_POOL_NAME_SIZE as i32,
-            )
+            ret: 0,
+            dhp: std::ptr::null_mut(),
+            zhp: std::ptr::null_mut(),
         };
 
-        if errno != 0 {
-            let err = io::Error::from_raw_os_error(errno);
-            match err.kind() {
-                ErrorKind::NotFound => {
-                    uzfs.create_zpool(poolname.clone().into_cstr().as_ref(), dev_path.as_ref())
-                        .unwrap();
-                    uzfs.create_dataset(dsname.as_ref()).unwrap();
-                }
-                ErrorKind::AlreadyExists => {
-                    return Err(err);
-                }
-                _ => {
-                    panic!(
-                        "unexpected error while importing zpool, dev_path: {}, dsname: {}, error: {:?}",
-                        dev_path.as_ref().to_str().unwrap(),
-                        dsname.as_ref().to_str().unwrap(),
-                        err
-                    );
-                }
-            }
-        } else {
-            stored_pool_name.retain(|c| *c != 0);
-            let stored_pool_name = std::str::from_utf8(&stored_pool_name).unwrap();
-            assert_eq!(poolname_string, stored_pool_name);
-        }
+        let arg_u64 = &mut arg as *mut LibuzfsDatasetInitArg as u64;
 
-        let zhp = unsafe { sys::libuzfs_zpool_open(poolname.as_c_str().as_ptr()) };
-        if zhp.is_null() {
-            return Err(io::Error::from(io::ErrorKind::InvalidInput));
-        }
+        UzfsCoroutineFuture::new(libuzfs_dataset_init_c, arg_u64, 0).await;
 
-        let dhp = unsafe { sys::libuzfs_dataset_open(dsname.as_ref().as_ptr()) };
-        if dhp.is_null() {
+        if arg.ret != 0 {
+            Err(io::Error::from_raw_os_error(arg.ret))
+        } else if arg.dhp.is_null() || arg.zhp.is_null() {
             Err(io::Error::from(io::ErrorKind::InvalidInput))
         } else {
             Ok(Self {
-                dhp,
-                zhp,
+                dhp: arg.dhp,
+                zhp: arg.zhp,
                 poolname,
-                _uzfs: uzfs,
             })
         }
     }
 
-    pub fn expand(&self) -> Result<()> {
-        let err = unsafe { sys::libuzfs_dataset_expand(self.dhp) };
-        if err == 0 {
+    pub async fn expand(&self) -> Result<()> {
+        let mut arg = LibuzfsDatasetExpandArg {
+            dhp: self.dhp,
+            ret: 0,
+        };
+
+        let arg_u64 = &mut arg as *mut LibuzfsDatasetExpandArg as u64;
+
+        UzfsCoroutineFuture::new(libuzfs_dataset_expand_c, arg_u64, 0).await;
+
+        if arg.ret == 0 {
             Ok(())
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            Err(io::Error::from_raw_os_error(arg.ret))
         }
     }
 
+    // this function should never block
     pub fn get_superblock_ino(&self) -> Result<u64> {
         let mut obj: u64 = 0;
         let obj_ptr: *mut u64 = &mut obj;
@@ -201,325 +127,342 @@ impl Dataset {
         }
     }
 
-    pub fn zap_create(&self) -> Result<(u64, u64)> {
-        let mut obj: u64 = 0;
-        let mut txg: u64 = 0;
-        let err = unsafe { sys::libuzfs_zap_create(self.dhp, &mut obj, &mut txg) };
-
-        if err == 0 {
-            Ok((obj, txg))
-        } else {
-            Err(io::Error::from_raw_os_error(err))
-        }
-    }
-
-    pub fn zap_list(&self, zap_obj: u64) -> Result<Vec<(String, Vec<u8>)>> {
-        let mut kvs = vec![];
-        let raii_iter = RAIIZapIterator {
-            iter: self.new_zap_iterator(zap_obj)?,
+    pub async fn zap_create(&self) -> Result<(u64, u64)> {
+        let mut arg = LibuzfsZapCreateArg {
+            dhp: self.dhp,
+            obj: 0,
+            txg: 0,
+            err: 0,
         };
 
-        if !raii_iter.iter.is_null() {
-            loop {
-                let key = unsafe { self.zap_iterator_name(raii_iter.iter) };
-                let value_size = unsafe { sys::libuzfs_zap_iterator_value_size(raii_iter.iter) };
-                let value = self.zap_lookup(zap_obj, &key, value_size as usize)?;
-                kvs.push((key, value));
+        let arg_u64 = &mut arg as *mut LibuzfsZapCreateArg as u64;
 
-                if !unsafe { self.zap_iterator_advance(raii_iter.iter)? } {
-                    break;
-                }
-            }
-        }
+        UzfsCoroutineFuture::new(libuzfs_zap_create_c, arg_u64, 0).await;
 
-        Ok(kvs)
-    }
-
-    fn new_zap_iterator(&self, obj: u64) -> Result<*mut ZapIterator> {
-        let mut errno: i32 = 0;
-        let iter = unsafe { sys::libuzfs_new_zap_iterator(self.dhp, obj, &mut errno as *mut i32) };
-
-        if iter.is_null() {
-            let err = io::Error::from_raw_os_error(errno);
-            if err.kind() != ErrorKind::NotFound {
-                return Err(err);
-            }
-        }
-
-        Ok(iter)
-    }
-
-    #[allow(clippy::missing_safety_doc)]
-    unsafe fn zap_iterator_advance(&self, iter: *mut ZapIterator) -> Result<bool> {
-        let errno = unsafe { sys::libuzfs_zap_iterator_advance(iter) };
-        if errno == 0 {
-            Ok(true)
+        if arg.err == 0 {
+            Ok((arg.obj, arg.txg))
         } else {
-            let err = io::Error::from_raw_os_error(errno);
-            if err.kind() == ErrorKind::NotFound {
-                Ok(false)
-            } else {
-                Err(err)
-            }
+            Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
-    #[allow(clippy::missing_safety_doc)]
-    unsafe fn zap_iterator_name(&self, iter: *mut ZapIterator) -> String {
-        let mut buf = vec![0; MAX_KVATTR_KEY_SIZE];
-
-        let rc = unsafe {
-            sys::libuzfs_zap_iterator_name(
-                iter,
-                buf.as_mut_ptr() as *mut c_char,
-                MAX_KVATTR_KEY_SIZE as u64,
-            )
+    pub async fn zap_list(&self, zap_obj: u64) -> Result<Vec<(String, Vec<u8>)>> {
+        let mut arg = LibuzfsZapListArg {
+            dhp: self.dhp,
+            obj: zap_obj,
+            err: 0,
+            list: Vec::new(),
         };
 
-        assert!(rc > 0);
-        buf.resize_with(rc as usize, Default::default);
+        let arg_u64 = &mut arg as *mut LibuzfsZapListArg as u64;
 
-        String::from_utf8(buf).expect("invalid buf")
+        UzfsCoroutineFuture::new(libuzfs_zap_list_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
+            Ok(arg.list)
+        } else {
+            Err(io::Error::from_raw_os_error(arg.err))
+        }
     }
 
-    pub fn zap_lookup<P: CStrArgument>(&self, obj: u64, name: P, size: usize) -> Result<Vec<u8>> {
-        let mut value = vec![0; size];
+    pub async fn zap_add<P: CStrArgument>(&self, obj: u64, name: P, value: &[u8]) -> Result<u64> {
         let cname = name.into_cstr();
-        let err = unsafe {
-            sys::libuzfs_zap_lookup(
-                self.dhp,
-                obj,
-                cname.as_ref().as_ptr() as *const c_char,
-                1,
-                size as u64,
-                value.as_mut_ptr() as *mut std::os::raw::c_void,
-            )
+        let mut arg = LibuzfsZapUpdateArg {
+            dhp: self.dhp,
+            obj,
+            key: cname.as_ref().as_ptr(),
+            num_integers: value.len() as u64,
+            val: value.as_ptr() as *const c_void,
+            only_add: true,
+            txg: 0,
+            err: 0,
         };
 
-        if err == 0 {
-            Ok(value)
-        } else {
-            Err(io::Error::from_raw_os_error(err))
-        }
-    }
+        let arg_u64 = &mut arg as *mut LibuzfsZapUpdateArg as u64;
 
-    pub fn zap_add<P: CStrArgument>(&self, obj: u64, name: P, value: &[u8]) -> Result<u64> {
-        let cname = name.into_cstr();
-        let mut txg: u64 = 0;
-        let err = unsafe {
-            sys::libuzfs_zap_add(
-                self.dhp,
-                obj,
-                cname.as_ref().as_ptr() as *const c_char,
-                1,
-                value.len() as u64,
-                value.as_ptr() as *mut std::os::raw::c_void,
-                &mut txg as *mut u64,
-            )
-        };
+        UzfsCoroutineFuture::new(libuzfs_zap_update_c, arg_u64, 0).await;
 
-        if err == 0 {
-            Ok(txg)
+        if arg.err == 0 {
+            Ok(arg.txg)
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
     // if name exists, zap_update will overwrite original value,
     // if not exists, zap_update will add a new (name, value) like zap_add
-    pub fn zap_update<P: CStrArgument>(&self, obj: u64, name: P, value: &[u8]) -> Result<u64> {
+    pub async fn zap_update<P: CStrArgument>(
+        &self,
+        obj: u64,
+        name: P,
+        value: &[u8],
+    ) -> Result<u64> {
         let cname = name.into_cstr();
-        let mut txg: u64 = 0;
-        let err = unsafe {
-            sys::libuzfs_zap_update(
-                self.dhp,
-                obj,
-                cname.as_ref().as_ptr() as *const c_char,
-                1,
-                value.len() as u64,
-                value.as_ptr() as *mut std::os::raw::c_void,
-                &mut txg as *mut u64,
-            )
+        let mut arg = LibuzfsZapUpdateArg {
+            dhp: self.dhp,
+            obj,
+            key: cname.as_ref().as_ptr(),
+            num_integers: value.len() as u64,
+            val: value.as_ptr() as *const c_void,
+            only_add: false,
+            txg: 0,
+            err: 0,
         };
 
-        if err == 0 {
-            Ok(txg)
+        let arg_u64 = &mut arg as *mut LibuzfsZapUpdateArg as *mut c_void as u64;
+
+        UzfsCoroutineFuture::new(libuzfs_zap_update_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
+            Ok(arg.txg)
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
-    pub fn zap_remove<P: CStrArgument>(&self, obj: u64, name: P) -> Result<u64> {
+    pub async fn zap_remove<P: CStrArgument>(&self, obj: u64, name: P) -> Result<u64> {
         let cname = name.into_cstr();
-        let mut txg: u64 = 0;
-        let err = unsafe {
-            sys::libuzfs_zap_remove(
-                self.dhp,
-                obj,
-                cname.as_ref().as_ptr() as *const c_char,
-                &mut txg as *mut u64,
-            )
+        let mut arg = LibuzfsZapRemoveArg {
+            dhp: self.dhp,
+            key: cname.as_ref().as_ptr(),
+            obj,
+            err: 0,
+            txg: 0,
         };
 
-        if err == 0 {
-            Ok(txg)
+        let arg_u64 = &mut arg as *mut LibuzfsZapRemoveArg as u64;
+
+        UzfsCoroutineFuture::new(libuzfs_zap_remove_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
+            Ok(arg.txg)
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
-    pub fn create_objects(&self, num_objs: usize) -> Result<(Vec<u64>, u64)> {
-        let mut objs = vec![0; num_objs];
-        let mut gen: u64 = 0;
-
-        let err = unsafe {
-            sys::libuzfs_objects_create(
-                self.dhp,
-                objs.as_mut_ptr(),
-                num_objs as i32,
-                &mut gen as *mut u64,
-            )
+    pub async fn create_objects(&self, num_objs: usize) -> Result<(Vec<u64>, u64)> {
+        let mut arg = LibuzfsCreateObjectsArg {
+            dhp: self.dhp,
+            num_objs,
+            err: 0,
+            objs: Vec::new(),
+            gen: 0,
         };
 
-        if err == 0 {
-            self.wait_log_commit();
-            Ok((objs, gen))
+        let arg_u64 = &mut arg as *mut LibuzfsCreateObjectsArg as u64;
+
+        UzfsCoroutineFuture::new(libuzfs_objects_create_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
+            Ok((arg.objs, arg.gen))
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
     // delete_object won't wait until synced, wait_log_commit is needed if you want wait sync
-    pub fn delete_object(&self, obj: u64) -> Result<()> {
-        let err = unsafe { sys::libuzfs_object_delete(self.dhp, obj) };
+    pub async fn delete_object(&self, obj: u64) -> Result<()> {
+        let mut arg = LibuzfsDeleteObjectArg {
+            dhp: self.dhp,
+            obj,
+            err: 0,
+        };
 
-        if err == 0 {
+        let arg_64 = &mut arg as *mut LibuzfsDeleteObjectArg as u64;
+
+        UzfsCoroutineFuture::new(libuzfs_delete_object_c, arg_64, 0).await;
+
+        if arg.err == 0 {
             Ok(())
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
-    pub fn wait_log_commit(&self) {
-        unsafe { sys::libuzfs_wait_log_commit(self.dhp) };
+    pub async fn wait_log_commit(&self) {
+        let arg_u64 = self.dhp as u64;
+        UzfsCoroutineFuture::new(libuzfs_wait_log_commit_c, arg_u64, 0).await;
     }
 
-    pub fn get_object_gen(&self, obj: u64) -> Result<u64> {
-        let mut gen: u64 = 0;
-        let gen_ptr: *mut u64 = &mut gen;
+    pub async fn get_object_gen(&self, obj: u64) -> Result<u64> {
+        let mut arg = LibuzfsGetGenArg {
+            dhp: self.dhp,
+            obj,
+            gen: 0,
+            err: 0,
+        };
 
-        let err = unsafe { sys::libuzfs_object_get_gen(self.dhp, obj, gen_ptr) };
+        let arg_u64 = &mut arg as *mut LibuzfsGetGenArg as u64;
 
-        if err == 0 {
-            Ok(gen)
+        UzfsCoroutineFuture::new(libuzfs_get_object_gen_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
+            Ok(arg.gen)
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
-    pub fn get_object_size(&self, obj: u64) -> Result<u64> {
-        let mut size: u64 = 0;
-        let size_ptr: *mut u64 = &mut size;
+    pub async fn get_object_size(&self, obj: u64) -> Result<u64> {
+        let mut arg = LibuzfsGetSizeArg {
+            dhp: self.dhp,
+            obj,
+            size: 0,
+            err: 0,
+        };
 
-        let err = unsafe { sys::libuzfs_object_get_size(self.dhp, obj, size_ptr) };
+        let arg_u64 = &mut arg as *mut LibuzfsGetSizeArg as u64;
 
-        if err == 0 {
-            Ok(size)
+        UzfsCoroutineFuture::new(libuzfs_get_object_size_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
+            Ok(arg.size)
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
-    pub fn list_object(&self) -> Result<u64> {
-        let n = unsafe { sys::libuzfs_object_list(self.dhp) };
-        Ok(n)
+    pub async fn list_object(&self) -> Result<u64> {
+        let mut arg = LibuzfsListObjectArg {
+            dhp: self.dhp,
+            num_objs: 0,
+        };
+
+        let arg_u64 = &mut arg as *mut LibuzfsListObjectArg as u64;
+
+        UzfsCoroutineFuture::new(libuzfs_list_object_c, arg_u64, 0).await;
+
+        Ok(arg.num_objs)
     }
 
-    pub fn stat_object(&self, obj: u64) -> Result<sys::dmu_object_info_t> {
-        let doi = Box::<sys::dmu_object_info>::default();
-        let doip = Box::into_raw(doi);
+    pub async fn stat_object(&self, obj: u64) -> Result<sys::dmu_object_info_t> {
+        let mut arg = LibuzfsStatObjectArg {
+            dhp: self.dhp,
+            obj,
+            doi: sys::dmu_object_info_t::default(),
+            err: 0,
+        };
 
-        let err = unsafe { sys::libuzfs_object_stat(self.dhp, obj, doip) };
-        let doi = unsafe { Box::from_raw(doip) };
+        let arg_u64 = &mut arg as *mut LibuzfsStatObjectArg as u64;
 
-        if err == 0 {
-            Ok(*doi)
+        UzfsCoroutineFuture::new(libuzfs_stat_object_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
+            Ok(arg.doi)
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
-    pub fn read_object(&self, obj: u64, offset: u64, size: u64) -> Result<Vec<u8>> {
-        let mut data = Vec::<u8>::with_capacity(size as usize);
-        data.resize_with(size as usize, Default::default);
-        let ptr = data.as_mut_ptr() as *mut c_char;
+    pub async fn read_object(&self, obj: u64, offset: u64, size: u64) -> Result<Vec<u8>> {
+        let mut arg = LibuzfsReadObjectArg {
+            dhp: self.dhp,
+            obj,
+            offset,
+            size,
+            err: 0,
+            data: Vec::<u8>::with_capacity(size as usize),
+        };
 
-        let res = unsafe { sys::libuzfs_object_read(self.dhp, obj, offset, size, ptr) };
+        let arg_u64 = &mut arg as *mut LibuzfsReadObjectArg as u64;
 
-        if res >= 0 {
-            assert!(res as u64 <= size);
-            if (res as u64) < size {
-                data.truncate(res as usize);
-            }
-            Ok(data)
+        UzfsCoroutineFuture::new(libuzfs_read_object_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
+            Ok(arg.data)
         } else {
-            Err(io::Error::from_raw_os_error(-res))
+            Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
     // TODO(hping): add unit tests to verify sync write works well in crash scenario
-    pub fn write_object(&self, obj: u64, offset: u64, sync: bool, data: &[u8]) -> Result<()> {
-        let size = data.len() as u64;
-        let ptr = data.as_ptr() as *const c_char;
-        let sync = sync as u32;
-        let err = unsafe { sys::libuzfs_object_write(self.dhp, obj, offset, size, ptr, sync) };
+    pub async fn write_object(&self, obj: u64, offset: u64, sync: bool, data: &[u8]) -> Result<()> {
+        let mut arg = LibuzfsWriteObjectArg {
+            dhp: self.dhp,
+            obj,
+            offset,
+            size: data.len() as u64,
+            data: data.as_ptr() as *const i8,
+            sync,
+            err: 0,
+        };
 
-        if err == 0 {
+        let arg_u64 = &mut arg as *mut LibuzfsWriteObjectArg as u64;
+
+        UzfsCoroutineFuture::new(libuzfs_write_object_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
             Ok(())
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
     // TODO(hping): add ut
-    pub fn sync_object(&self, obj: u64) {
-        unsafe { sys::libuzfs_object_sync(self.dhp, obj) };
+    pub async fn sync_object(&self, obj: u64) {
+        let mut arg = LibuzfsSyncObjectArg { dhp: self.dhp, obj };
+
+        let arg_u64 = &mut arg as *mut LibuzfsSyncObjectArg as u64;
+
+        UzfsCoroutineFuture::new(libuzfs_sync_object_c, arg_u64, 0).await;
     }
 
-    pub fn truncate_object(&self, obj: u64, offset: u64, size: u64) -> Result<()> {
-        let err = unsafe { sys::libuzfs_object_truncate(self.dhp, obj, offset, size) };
+    pub async fn truncate_object(&self, obj: u64, offset: u64, size: u64) -> Result<()> {
+        let mut arg = LibuzfsTruncateObjectArg {
+            dhp: self.dhp,
+            obj,
+            offset,
+            size,
+            err: 0,
+        };
 
-        if err == 0 {
+        let arg_u64 = &mut arg as *mut LibuzfsTruncateObjectArg as u64;
+
+        UzfsCoroutineFuture::new(libuzfs_truncate_object_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
             Ok(())
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
-    pub fn space(&self) -> (u64, u64, u64, u64) {
-        let mut refdbytes: u64 = 0;
-        let mut availbytes: u64 = 0;
-        let mut usedobjs: u64 = 0;
-        let mut availobjs: u64 = 0;
-        unsafe {
-            sys::libuzfs_dataset_space(
-                self.dhp,
-                &mut refdbytes,
-                &mut availbytes,
-                &mut usedobjs,
-                &mut availobjs,
-            )
+    pub async fn space(&self) -> (u64, u64, u64, u64) {
+        let mut arg = LibuzfsDatasetSpaceArg {
+            dhp: self.dhp,
+            refd_bytes: 0,
+            avail_bytes: 0,
+            used_objs: 0,
+            avail_objs: 0,
         };
-        (refdbytes, availbytes, usedobjs, availobjs)
+
+        let arg_u64 = &mut arg as *mut LibuzfsDatasetSpaceArg as u64;
+
+        UzfsCoroutineFuture::new(libuzfs_dataset_space_c, arg_u64, 0).await;
+
+        (
+            arg.refd_bytes,
+            arg.avail_bytes,
+            arg.used_objs,
+            arg.avail_objs,
+        )
     }
 
-    pub fn object_has_hole_in_range(&self, obj: u64, offset: u64, size: u64) -> Result<bool> {
-        let mut hole_offset: u64 = offset;
-        let err =
-            unsafe { sys::libuzfs_object_next_hole(self.dhp, obj, &mut hole_offset as *mut u64) };
+    pub async fn object_has_hole_in_range(&self, obj: u64, offset: u64, size: u64) -> Result<bool> {
+        let mut arg = LibuzfsFindHoleArg {
+            dhp: self.dhp,
+            obj,
+            off: offset,
+            err: 0,
+        };
 
-        match err {
-            0 => Ok(hole_offset < offset + size),
+        let arg_u64 = &mut arg as *mut LibuzfsFindHoleArg as u64;
+
+        UzfsCoroutineFuture::new(libuzfs_object_next_hole_c, arg_u64, 0).await;
+
+        match arg.err {
+            0 => Ok(arg.off < offset + size),
             other => Err(io::Error::from_raw_os_error(other)),
         }
     }
@@ -541,233 +484,297 @@ impl Dataset {
         println!("\tfill_count: {}", doi.doi_fill_count);
     }
 
-    pub fn create_inode(&self, inode_type: InodeType) -> Result<(u64, u64)> {
-        let mut ino: u64 = 0;
-        let mut txg: u64 = 0;
-        let ino_ptr: *mut u64 = &mut ino;
-        let txg_ptr: *mut u64 = &mut txg;
-
-        let err =
-            unsafe { sys::libuzfs_inode_create(self.dhp, ino_ptr, inode_type as u32, txg_ptr) };
-
-        if err == 0 {
-            Ok((ino, txg))
-        } else {
-            Err(io::Error::from_raw_os_error(err))
-        }
-    }
-
-    pub fn claim_inode(&self, ino: u64, inode_type: InodeType) -> Result<()> {
-        let err = unsafe { sys::libuzfs_inode_claim(self.dhp, ino, inode_type as u32) };
-
-        if err == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::from_raw_os_error(err))
-        }
-    }
-
-    pub fn delete_inode(&self, ino: u64, inode_type: InodeType) -> Result<u64> {
-        let mut txg: u64 = 0;
-        let txg_ptr: *mut u64 = &mut txg;
-
-        let err = unsafe { sys::libuzfs_inode_delete(self.dhp, ino, inode_type as u32, txg_ptr) };
-
-        if err == 0 {
-            Ok(txg)
-        } else {
-            Err(io::Error::from_raw_os_error(err))
-        }
-    }
-
-    pub fn get_attr(&self, ino: u64, size: u64) -> Result<Vec<u8>> {
-        assert!(size_of::<sys::uzfs_attr_t>() == size as usize);
-        let mut attr = Vec::<u8>::with_capacity(size as usize);
-        attr.resize_with(size as usize, Default::default);
-        let attr_ptr = attr.as_mut_ptr() as *mut sys::uzfs_attr_t;
-
-        let err = unsafe { sys::libuzfs_inode_getattr(self.dhp, ino, attr_ptr) };
-
-        if err == 0 {
-            Ok(attr)
-        } else {
-            Err(io::Error::from_raw_os_error(err))
-        }
-    }
-
-    pub fn set_attr(&self, ino: u64, attr: &[u8]) -> Result<u64> {
-        assert!(size_of::<sys::uzfs_attr_t>() == attr.len());
-        let attr_ptr = attr.as_ptr() as *mut sys::uzfs_attr_t;
-        let mut txg: u64 = 0;
-        let txg_ptr: *mut u64 = &mut txg;
-
-        let err = unsafe { sys::libuzfs_inode_setattr(self.dhp, ino, attr_ptr, txg_ptr) };
-
-        if err == 0 {
-            Ok(txg)
-        } else {
-            Err(io::Error::from_raw_os_error(err))
-        }
-    }
-
-    pub fn get_kvattr<P: CStrArgument>(&self, ino: u64, name: P, flags: i32) -> Result<Vec<u8>> {
-        let mut data = Vec::<u8>::with_capacity(MAX_KVATTR_VALUE_SIZE);
-        data.resize_with(MAX_KVATTR_VALUE_SIZE, Default::default);
-        let data_ptr = data.as_mut_ptr() as *mut c_char;
-        let cname = name.into_cstr();
-        let name_ptr = cname.as_ref().as_ptr() as *const c_char;
-
-        let rc = unsafe {
-            sys::libuzfs_inode_get_kvattr(
-                self.dhp,
-                ino,
-                name_ptr,
-                data_ptr,
-                MAX_KVATTR_VALUE_SIZE as u64,
-                flags,
-            )
+    pub async fn create_inode(&self, inode_type: InodeType) -> Result<(u64, u64)> {
+        let mut arg = LibuzfsCreateInode {
+            dhp: self.dhp,
+            inode_type: inode_type as u32,
+            ino: 0,
+            txg: 0,
+            err: 0,
         };
 
-        if rc > 0 {
-            data.resize_with(rc as usize, Default::default);
-            Ok(data)
+        let arg_u64 = &mut arg as *mut LibuzfsCreateInode as u64;
+
+        UzfsCoroutineFuture::new(libuzfs_create_inode_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
+            Ok((arg.ino, arg.txg))
         } else {
-            Err(io::Error::from_raw_os_error(-rc as i32))
+            Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
-    pub fn set_kvattr<P: CStrArgument>(
+    pub async fn claim_inode(&self, ino: u64, inode_type: InodeType) -> Result<()> {
+        let mut arg = LibuzfsClaimInodeArg {
+            dhp: self.dhp,
+            inode_type: inode_type as u32,
+            ino,
+            err: 0,
+        };
+
+        let arg_u64 = &mut arg as *mut LibuzfsClaimInodeArg as u64;
+
+        UzfsCoroutineFuture::new(libuzfs_claim_inode_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(arg.err))
+        }
+    }
+
+    pub async fn delete_inode(&self, ino: u64, inode_type: InodeType) -> Result<u64> {
+        let mut arg = LibuzfsDeleteInode {
+            dhp: self.dhp,
+            ino,
+            inode_type: inode_type as u32,
+            err: 0,
+            txg: 0,
+        };
+
+        let arg_u64 = &mut arg as *mut LibuzfsDeleteInode as u64;
+
+        UzfsCoroutineFuture::new(libuzfs_delete_inode_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
+            Ok(arg.txg)
+        } else {
+            Err(io::Error::from_raw_os_error(arg.err))
+        }
+    }
+
+    pub async fn get_attr(&self, ino: u64, size: u64) -> Result<Vec<u8>> {
+        assert!(size_of::<sys::uzfs_attr_t>() == size as usize);
+        let mut arg = LibuzfsGetAttrArg {
+            dhp: self.dhp,
+            ino,
+            attr: Vec::new(),
+            err: 0,
+        };
+        arg.attr.resize(size as usize, 0);
+
+        let arg_u64 = &mut arg as *mut LibuzfsGetAttrArg as u64;
+
+        UzfsCoroutineFuture::new(libuzfs_inode_getattr_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
+            Ok(arg.attr)
+        } else {
+            Err(io::Error::from_raw_os_error(arg.err))
+        }
+    }
+
+    pub async fn set_attr(&self, ino: u64, attr: &[u8]) -> Result<u64> {
+        assert!(size_of::<sys::uzfs_attr_t>() == attr.len());
+        let mut arg = LibuzfsSetAttrArg {
+            dhp: self.dhp,
+            ino,
+            attr: attr.as_ptr() as *const sys::uzfs_attr_t,
+            err: 0,
+            txg: 0,
+        };
+
+        let arg_u64 = &mut arg as *mut LibuzfsSetAttrArg as u64;
+
+        UzfsCoroutineFuture::new(libuzfs_set_attr_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
+            Ok(arg.txg)
+        } else {
+            Err(io::Error::from_raw_os_error(arg.err))
+        }
+    }
+
+    pub async fn get_kvattr<P: CStrArgument>(
+        &self,
+        ino: u64,
+        name: P,
+        flags: i32,
+    ) -> Result<Vec<u8>> {
+        let cname = name.into_cstr();
+        let mut arg = LibuzfsGetKvattrArg {
+            dhp: self.dhp,
+            ino,
+            name: cname.as_ref().as_ptr(),
+            flags,
+            data: Vec::new(),
+            err: 0,
+        };
+
+        let arg_u64 = &mut arg as *mut LibuzfsGetKvattrArg as u64;
+
+        UzfsCoroutineFuture::new(libuzfs_inode_get_kvattr_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
+            Ok(arg.data)
+        } else {
+            Err(io::Error::from_raw_os_error(arg.err))
+        }
+    }
+
+    pub async fn set_kvattr<P: CStrArgument>(
         &self,
         ino: u64,
         name: P,
         value: &[u8],
         flags: i32,
     ) -> Result<u64> {
-        let mut txg: u64 = 0;
-        let txg_ptr: *mut u64 = &mut txg;
         let cname = name.into_cstr();
-        let name_ptr = cname.as_ref().as_ptr() as *const c_char;
-        let value_ptr = value.as_ptr() as *const c_char;
-        let size = value.len() as u64;
-
-        let err = unsafe {
-            sys::libuzfs_inode_set_kvattr(self.dhp, ino, name_ptr, value_ptr, size, flags, txg_ptr)
+        let mut arg = LibuzfsSetKvAttrArg {
+            dhp: self.dhp,
+            ino,
+            name: cname.as_ref().as_ptr(),
+            flags,
+            value: value.as_ptr() as *const c_char,
+            size: value.len() as u64,
+            err: 0,
+            txg: 0,
         };
 
-        if err == 0 {
-            Ok(txg)
+        let arg_u64 = &mut arg as *mut LibuzfsSetKvAttrArg as u64;
+
+        UzfsCoroutineFuture::new(libuzfs_set_kvattr_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
+            Ok(arg.txg)
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
-    pub fn remove_kvattr<P: CStrArgument>(&self, ino: u64, name: P) -> Result<u64> {
-        let mut txg: u64 = 0;
-        let txg_ptr: *mut u64 = &mut txg;
+    pub async fn remove_kvattr<P: CStrArgument>(&self, ino: u64, name: P) -> Result<u64> {
         let cname = name.into_cstr();
-        let name_ptr = cname.as_ref().as_ptr() as *const c_char;
+        let mut arg = LibuzfsRemoveKvattrArg {
+            dhp: self.dhp,
+            ino,
+            name: cname.as_ref().as_ptr(),
+            err: 0,
+            txg: 0,
+        };
 
-        let err = unsafe { sys::libuzfs_inode_remove_kvattr(self.dhp, ino, name_ptr, txg_ptr) };
+        let arg_u64 = &mut arg as *mut LibuzfsRemoveKvattrArg as u64;
 
-        if err == 0 {
-            Ok(txg)
+        UzfsCoroutineFuture::new(libuzfs_remove_kvattr_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
+            Ok(arg.txg)
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
-    pub fn list_kvattrs(&self, ino: u64) -> Result<Vec<String>> {
-        let mut err: i32 = 0;
-        let iter = unsafe { sys::libuzfs_new_kvattr_iterator(self.dhp, ino, &mut err as *mut i32) };
-        if iter.is_null() {
-            assert_ne!(err, 0);
-            return Err(io::Error::from_raw_os_error(err));
+    pub async fn list_kvattrs(&self, ino: u64) -> Result<Vec<String>> {
+        let mut arg = LibuzfsListKvAttrsArg {
+            dhp: self.dhp,
+            ino,
+            err: 0,
+            names: Vec::new(),
+        };
+
+        let arg_u64 = &mut arg as *mut LibuzfsListKvAttrsArg as u64;
+
+        UzfsCoroutineFuture::new(libuzfs_list_kvattrs_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
+            Ok(arg.names)
+        } else {
+            Err(io::Error::from_raw_os_error(arg.err))
         }
-
-        let mut res: Vec<String> = vec![];
-        loop {
-            let mut buf = Vec::<u8>::with_capacity(MAX_KVATTR_KEY_SIZE);
-            buf.resize_with(MAX_KVATTR_KEY_SIZE, Default::default);
-            let rc = unsafe {
-                sys::libuzfs_next_kvattr_name(
-                    iter,
-                    buf.as_mut_ptr() as *mut c_char,
-                    MAX_KVATTR_KEY_SIZE as i32,
-                )
-            };
-            assert!(rc >= 0);
-            if rc == 0 {
-                break;
-            }
-            buf.resize_with(rc as usize, Default::default);
-            let key = String::from_utf8(buf).unwrap();
-            res.push(key);
-        }
-
-        unsafe { sys::libuzfs_kvattr_iterator_fini(iter) };
-
-        Ok(res)
     }
 
-    pub fn create_dentry<P: CStrArgument>(&self, pino: u64, name: P, value: u64) -> Result<u64> {
-        let mut txg: u64 = 0;
-        let txg_ptr: *mut u64 = &mut txg;
+    pub async fn create_dentry<P: CStrArgument>(
+        &self,
+        pino: u64,
+        name: P,
+        value: u64,
+    ) -> Result<u64> {
         let cname = name.into_cstr();
-        let name_ptr = cname.as_ref().as_ptr() as *const c_char;
+        let mut arg = LibuzfsCreateDentryArg {
+            dhp: self.dhp,
+            pino,
+            name: cname.as_ref().as_ptr(),
+            ino: value,
+            err: 0,
+            txg: 0,
+        };
 
-        let err = unsafe { sys::libuzfs_dentry_create(self.dhp, pino, name_ptr, value, txg_ptr) };
+        let arg_u64 = &mut arg as *mut LibuzfsCreateDentryArg as u64;
 
-        if err == 0 {
-            Ok(txg)
+        UzfsCoroutineFuture::new(libuzfs_create_dentry_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
+            Ok(arg.txg)
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
-    pub fn delete_dentry<P: CStrArgument>(&self, pino: u64, name: P) -> Result<u64> {
-        let mut txg: u64 = 0;
-        let txg_ptr: *mut u64 = &mut txg;
+    pub async fn delete_dentry<P: CStrArgument>(&self, pino: u64, name: P) -> Result<u64> {
         let cname = name.into_cstr();
-        let name_ptr = cname.as_ref().as_ptr() as *const c_char;
+        let mut arg = LibuzfsDeleteDentryArg {
+            dhp: self.dhp,
+            pino,
+            name: cname.as_ref().as_ptr(),
+            err: 0,
+            txg: 0,
+        };
 
-        let err = unsafe { sys::libuzfs_dentry_delete(self.dhp, pino, name_ptr, txg_ptr) };
+        let arg_u64 = &mut arg as *mut LibuzfsDeleteDentryArg as u64;
 
-        if err == 0 {
-            Ok(txg)
+        UzfsCoroutineFuture::new(libuzfs_delete_entry_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
+            Ok(arg.txg)
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
-    pub fn lookup_dentry<P: CStrArgument>(&self, pino: u64, name: P) -> Result<u64> {
-        let mut value: u64 = 0;
-        let value_ptr: *mut u64 = &mut value;
+    pub async fn lookup_dentry<P: CStrArgument>(&self, pino: u64, name: P) -> Result<u64> {
         let cname = name.into_cstr();
-        let name_ptr = cname.as_ref().as_ptr() as *const c_char;
+        let mut arg = LibuzfsLookupDentryArg {
+            dhp: self.dhp,
+            pino,
+            name: cname.as_ref().as_ptr(),
+            ino: 0,
+            err: 0,
+        };
 
-        let err = unsafe { sys::libuzfs_dentry_lookup(self.dhp, pino, name_ptr, value_ptr) };
+        let arg_u64 = &mut arg as *mut LibuzfsLookupDentryArg as u64;
 
-        if err == 0 {
-            Ok(value)
+        UzfsCoroutineFuture::new(libuzfs_lookup_dentry_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
+            Ok(arg.ino)
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
-    pub fn iterate_dentry(&self, pino: u64, whence: u64, size: u32) -> Result<(Vec<u8>, u32)> {
-        let mut data = Vec::<u8>::with_capacity(size as usize);
-        data.resize_with(size as usize, Default::default);
-        let data_ptr = data.as_mut_ptr() as *mut c_char;
-        let mut num: u32 = 0;
-        let num_ptr: *mut u32 = &mut num;
+    pub async fn iterate_dentry(
+        &self,
+        pino: u64,
+        whence: u64,
+        size: u32,
+    ) -> Result<(Vec<u8>, u32)> {
+        let mut arg = LibuzfsIterateDentryArg {
+            dhp: self.dhp,
+            pino,
+            whence,
+            size,
+            err: 0,
+            data: Vec::new(),
+            num: 0,
+        };
 
-        let err =
-            unsafe { sys::libuzfs_dentry_iterate(self.dhp, pino, whence, size, data_ptr, num_ptr) };
+        let arg_u64 = &mut arg as *mut LibuzfsIterateDentryArg as u64;
 
-        if err == 0 {
-            Ok((data, num))
+        UzfsCoroutineFuture::new(libuzfs_iterate_dentry_c, arg_u64, 0).await;
+
+        if arg.err == 0 {
+            Ok((arg.data, arg.num))
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
@@ -776,18 +783,29 @@ impl Dataset {
         Ok(txg)
     }
 
-    pub fn wait_synced(&self) -> Result<()> {
-        unsafe { sys::libuzfs_wait_synced(self.dhp) };
+    pub async fn wait_synced(&self) -> Result<()> {
+        let arg_u64 = self.dhp as u64;
+        UzfsCoroutineFuture::new(libuzfs_wait_synced_c, arg_u64, 0).await;
         Ok(())
     }
-}
 
-impl Drop for Dataset {
-    fn drop(&mut self) {
-        unsafe { sys::libuzfs_dataset_close(self.dhp) };
-        unsafe { sys::libuzfs_zpool_close(self.zhp) };
-        let err = unsafe { sys::libuzfs_zpool_export(self.poolname.as_ref().as_ptr()) };
-        assert_eq!(err, 0);
+    pub async fn close(&self) -> Result<()> {
+        let mut arg = LibuzfsDatasetFiniArg {
+            dhp: self.dhp,
+            zhp: self.zhp,
+            poolname: self.poolname.as_ptr(),
+            err: 0,
+        };
+
+        let arg_u64 = &mut arg as *mut LibuzfsDatasetFiniArg as u64;
+
+        UzfsCoroutineFuture::new(libuzfs_dataset_fini_c, arg_u64, 0).await;
+
+        if arg.err != 0 {
+            Err(io::Error::from_raw_os_error(arg.err))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -795,9 +813,7 @@ unsafe impl Send for Dataset {}
 unsafe impl Sync for Dataset {}
 
 pub struct UzfsTestEnv {
-    #[allow(dead_code)]
     dev_file: NamedTempFile,
-    cache_file: NamedTempFile,
 }
 
 impl UzfsTestEnv {
@@ -808,29 +824,16 @@ impl UzfsTestEnv {
     ///
     /// If dev_size is zero, no block device and pool/dataset is created
     ///
-    /// A temp cache file is always automacally created, used by uzfs to find zpool.
-    ///
     /// All of the resources (temp file, dev_file) will be deleted automatically when the env
     /// goes out of scope
     pub fn new(dev_size: u64) -> Self {
         let mut dev_file = NamedTempFile::new().unwrap();
-        let cache_file = NamedTempFile::new().unwrap();
-        let cache_path = cache_file.path().to_str().unwrap();
-        Uzfs::set_zpool_cache_path(cache_path);
 
         if dev_size > 0 {
             dev_file.as_file_mut().set_len(dev_size).unwrap();
         }
 
-        UzfsTestEnv {
-            dev_file,
-            cache_file,
-        }
-    }
-
-    pub fn get_cache_path(&self) -> Result<String> {
-        let cache_path = self.cache_file.path().to_str().unwrap();
-        Ok(cache_path.to_owned())
+        UzfsTestEnv { dev_file }
     }
 
     pub fn get_dev_path(&self) -> Result<String> {
@@ -847,7 +850,9 @@ impl UzfsTestEnv {
 mod tests {
     use super::Dataset;
     use super::InodeType;
-    use super::{Uzfs, UzfsTestEnv};
+    use super::UzfsTestEnv;
+    use crate::uzfs_env_fini;
+    use crate::uzfs_env_init;
     use cstr_argument::CStrArgument;
     use dashmap::DashMap;
     use petgraph::algo::is_cyclic_directed;
@@ -858,10 +863,10 @@ mod tests {
     use std::mem::{size_of, transmute};
     use std::sync::atomic::AtomicU16;
     use std::sync::Arc;
-    use std::thread::JoinHandle;
     use std::time::Duration;
-    use test_log::test;
-    use uzfs_sys::{self as sys, uzfs_attr_t as Attr};
+    use sys::uzfs_attr_t as Attr;
+    use tokio::task::JoinHandle;
+    use uzfs_sys::bindings as sys;
 
     enum FileType {
         FILE = sys::FileType_TYPE_FILE as isize,
@@ -872,9 +877,9 @@ mod tests {
         ::std::slice::from_raw_parts((p as *const T) as *const u8, ::std::mem::size_of::<T>())
     }
 
+    #[tokio::test(flavor = "multi_thread")]
     #[serial]
-    #[test]
-    fn uzfs_test() {
+    async fn uzfs_test() {
         let rwobj;
         let gen;
         let sb_ino;
@@ -897,104 +902,108 @@ mod tests {
 
         let dsname = "uzfs-test-pool/ds";
         let poolname = "uzfs-test-pool";
+        uzfs_env_init().await;
         let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
 
         {
-            Uzfs::set_zpool_cache_path(uzfs_test_env.get_cache_path().unwrap());
-            let uzfs = Arc::new(Uzfs::init().unwrap());
-
             let hdl = unsafe { sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr()) };
             assert!(hdl.is_null());
             let hdl = unsafe { sys::libuzfs_zpool_open(poolname.into_cstr().as_ptr()) };
             assert!(hdl.is_null());
 
-            for _ in 0..100 {
-                Dataset::init(
-                    dsname,
-                    uzfs_test_env.get_dev_path().unwrap().as_str(),
-                    uzfs.clone(),
-                )
-                .unwrap();
+            for _ in 0..10 {
+                Dataset::init(dsname, &uzfs_test_env.get_dev_path().unwrap())
+                    .await
+                    .unwrap()
+                    .close()
+                    .await
+                    .unwrap();
             }
 
-            let ds = Dataset::init(
-                dsname,
-                uzfs_test_env.get_dev_path().unwrap().as_str(),
-                uzfs.clone(),
-            )
-            .unwrap();
+            let ds = Dataset::init(dsname, uzfs_test_env.get_dev_path().unwrap().as_str())
+                .await
+                .unwrap();
 
-            println!("dataset space: {:?}", ds.space());
+            println!("used space: {:?}", ds.space().await);
 
             sb_ino = ds.get_superblock_ino().unwrap();
             let last_txg = ds.get_last_synced_txg().unwrap();
 
-            txg = ds.set_kvattr(sb_ino, key, value.as_bytes(), 0).unwrap();
+            txg = ds
+                .set_kvattr(sb_ino, key, value.as_bytes(), 0)
+                .await
+                .unwrap();
             assert!(txg > last_txg);
 
-            let value_read = ds.get_kvattr(sb_ino, key, 0).unwrap();
+            let value_read = ds.get_kvattr(sb_ino, key, 0).await.unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
-            ds.wait_synced().unwrap();
+            ds.wait_synced().await.unwrap();
 
-            (tmp_ino, _) = ds.create_inode(InodeType::DIR).unwrap();
+            (tmp_ino, _) = ds.create_inode(InodeType::DIR).await.unwrap();
 
             tmp_dentry_data = (FileType::DIR as u64) << 60 | tmp_ino;
 
-            txg = ds.create_dentry(sb_ino, tmp_name, tmp_dentry_data).unwrap();
-            ds.wait_synced().unwrap();
+            txg = ds
+                .create_dentry(sb_ino, tmp_name, tmp_dentry_data)
+                .await
+                .unwrap();
+            ds.wait_synced().await.unwrap();
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
-            let tmp_dentry_data_read = ds.lookup_dentry(sb_ino, tmp_name).unwrap();
+            let tmp_dentry_data_read = ds.lookup_dentry(sb_ino, tmp_name).await.unwrap();
             assert_eq!(tmp_dentry_data, tmp_dentry_data_read);
 
-            num = ds.list_object().unwrap();
+            num = ds.list_object().await.unwrap();
             let objs;
-            (objs, gen) = ds.create_objects(1).unwrap();
+            (objs, gen) = ds.create_objects(1).await.unwrap();
 
             rwobj = objs[0];
-            assert_eq!(ds.get_object_size(rwobj).unwrap(), 0);
-            assert_eq!(ds.get_object_gen(rwobj).unwrap(), gen);
-            assert_eq!(ds.list_object().unwrap(), num + 1);
+            assert_eq!(ds.get_object_size(rwobj).await.unwrap(), 0);
+            assert_eq!(ds.get_object_gen(rwobj).await.unwrap(), gen);
+            assert_eq!(ds.list_object().await.unwrap(), num + 1);
 
-            let doi = ds.stat_object(rwobj).unwrap();
+            let doi = ds.stat_object(rwobj).await.unwrap();
             Dataset::dump_object_doi(rwobj, doi);
 
             let data = s.as_bytes();
             let size = s.len() as u64;
-            ds.write_object(rwobj, 0, true, data).unwrap();
-            assert_eq!(ds.get_object_size(rwobj).unwrap(), size);
-            assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), data);
-            assert_eq!(ds.read_object(rwobj, 0, size + 10).unwrap(), data);
-            assert!(ds.read_object(rwobj, size, size).unwrap().is_empty());
+            ds.write_object(rwobj, 0, true, data).await.unwrap();
+            assert_eq!(ds.get_object_size(rwobj).await.unwrap(), size);
+            assert_eq!(ds.read_object(rwobj, 0, size).await.unwrap(), data);
+            assert_eq!(ds.read_object(rwobj, 0, size + 10).await.unwrap(), data);
+            assert!(ds.read_object(rwobj, size, size).await.unwrap().is_empty());
 
             // offset must be 0 for truncate
-            assert!(ds.truncate_object(rwobj, 1, size - 1).is_err());
-            ds.truncate_object(rwobj, 0, 1).unwrap();
-            assert_eq!(ds.get_object_size(rwobj).unwrap(), 1);
-            assert_eq!(ds.read_object(rwobj, 0, size).unwrap().len(), 1);
+            assert!(ds.truncate_object(rwobj, 1, size - 1).await.is_err());
+            ds.truncate_object(rwobj, 0, 1).await.unwrap();
+            assert_eq!(ds.get_object_size(rwobj).await.unwrap(), 1);
+            assert_eq!(ds.read_object(rwobj, 0, size).await.unwrap().len(), 1);
 
             // extend size via truncate
-            ds.truncate_object(rwobj, 0, size).unwrap();
-            assert_eq!(ds.get_object_size(rwobj).unwrap(), size);
-            assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), t);
+            ds.truncate_object(rwobj, 0, size).await.unwrap();
+            assert_eq!(ds.get_object_size(rwobj).await.unwrap(), size);
+            assert_eq!(ds.read_object(rwobj, 0, size).await.unwrap(), t);
 
-            (file_ino, _) = ds.create_inode(InodeType::FILE).unwrap();
-            (dir_ino, _) = ds.create_inode(InodeType::DIR).unwrap();
+            (file_ino, _) = ds.create_inode(InodeType::FILE).await.unwrap();
+            (dir_ino, _) = ds.create_inode(InodeType::DIR).await.unwrap();
 
             dentry_data = (FileType::FILE as u64) << 60 | file_ino;
 
-            txg = ds.create_dentry(dir_ino, file_name, dentry_data).unwrap();
-            let dentry_data_read = ds.lookup_dentry(dir_ino, file_name).unwrap();
+            txg = ds
+                .create_dentry(dir_ino, file_name, dentry_data)
+                .await
+                .unwrap();
+            let dentry_data_read = ds.lookup_dentry(dir_ino, file_name).await.unwrap();
             assert_eq!(dentry_data, dentry_data_read);
-            ds.wait_synced().unwrap();
+            ds.wait_synced().await.unwrap();
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
-            let (_, dentry_num) = ds.iterate_dentry(dir_ino, 0, 4096).unwrap();
+            let (_, dentry_num) = ds.iterate_dentry(dir_ino, 0, 4096).await.unwrap();
 
             // TODO(hping): verify dentry content
             assert_eq!(dentry_num, 1);
 
-            assert_eq!(ds.list_object().unwrap(), num + 3);
+            assert_eq!(ds.list_object().await.unwrap(), num + 3);
 
             attr.ino = file_ino;
             attr.nlink = 1;
@@ -1002,9 +1011,12 @@ mod tests {
 
             let attr_bytes = unsafe { any_as_u8_slice(&attr) };
 
-            _ = ds.set_attr(file_ino, attr_bytes).unwrap();
+            _ = ds.set_attr(file_ino, attr_bytes).await.unwrap();
 
-            let attr_new = ds.get_attr(file_ino, attr_bytes.len() as u64).unwrap();
+            let attr_new = ds
+                .get_attr(file_ino, attr_bytes.len() as u64)
+                .await
+                .unwrap();
             assert_eq!(attr_new.as_slice(), attr_bytes);
 
             let attr_got =
@@ -1012,110 +1024,112 @@ mod tests {
             assert_eq!(attr_got.ino, attr.ino);
             assert_eq!(attr_got.nlink, attr.nlink);
 
-            _ = ds.set_kvattr(file_ino, key, value.as_bytes(), 0).unwrap();
+            _ = ds
+                .set_kvattr(file_ino, key, value.as_bytes(), 0)
+                .await
+                .unwrap();
 
-            let value_read = ds.get_kvattr(file_ino, key, 0).unwrap();
+            let value_read = ds.get_kvattr(file_ino, key, 0).await.unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
-            assert_eq!(ds.list_object().unwrap(), num + 3);
-            println!("dataset space: {:?}", ds.space());
+            assert_eq!(ds.list_object().await.unwrap(), num + 3);
+            println!("used space: {:?}", ds.space().await);
 
-            let obj = ds.create_objects(1).unwrap().0[0];
+            let obj = ds.create_objects(1).await.unwrap().0[0];
             let size = 1 << 18;
             let mut data = Vec::<u8>::with_capacity(size);
             data.resize(size, 1);
-            ds.write_object(obj, 0, false, &data).unwrap();
+            ds.write_object(obj, 0, false, &data).await.unwrap();
             ds.write_object(obj, (size * 2) as u64, false, &data)
+                .await
                 .unwrap();
-            ds.wait_synced().unwrap();
-            assert!(!ds.object_has_hole_in_range(obj, 0, size as u64).unwrap());
+            ds.wait_synced().await.unwrap();
+            assert!(!ds
+                .object_has_hole_in_range(obj, 0, size as u64)
+                .await
+                .unwrap());
             assert!(ds
                 .object_has_hole_in_range(obj, size as u64, size as u64 * 2)
+                .await
                 .unwrap());
-            ds.delete_object(obj).unwrap();
+            ds.delete_object(obj).await.unwrap();
+            ds.close().await.unwrap();
         }
 
         {
-            Uzfs::set_zpool_cache_path(uzfs_test_env.get_cache_path().unwrap());
-            let uzfs = Arc::new(Uzfs::init().unwrap());
-
             let hdl = unsafe { sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr()) };
             assert!(hdl.is_null());
             let hdl = unsafe { sys::libuzfs_zpool_open(poolname.into_cstr().as_ptr()) };
             assert!(hdl.is_null());
 
-            let ds = Dataset::init(
-                dsname,
-                uzfs_test_env.get_dev_path().unwrap().as_str(),
-                uzfs.clone(),
-            )
-            .unwrap();
+            let ds = Dataset::init(dsname, uzfs_test_env.get_dev_path().unwrap().as_str())
+                .await
+                .unwrap();
 
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
-            assert_eq!(ds.list_object().unwrap(), num + 3);
+            assert_eq!(ds.list_object().await.unwrap(), num + 3);
 
             assert_eq!(ds.get_superblock_ino().unwrap(), sb_ino);
 
-            let value_read = ds.get_kvattr(sb_ino, key, 0).unwrap();
+            let value_read = ds.get_kvattr(sb_ino, key, 0).await.unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
-            let tmp_dentry_data_read = ds.lookup_dentry(sb_ino, tmp_name).unwrap();
+            let tmp_dentry_data_read = ds.lookup_dentry(sb_ino, tmp_name).await.unwrap();
             assert_eq!(tmp_dentry_data, tmp_dentry_data_read);
 
-            assert_eq!(ds.get_object_gen(rwobj).unwrap(), gen);
+            assert_eq!(ds.get_object_gen(rwobj).await.unwrap(), gen);
 
             let size = s.len() as u64;
-            assert_eq!(ds.get_object_size(rwobj).unwrap(), size);
-            assert_eq!(ds.read_object(rwobj, 0, size).unwrap(), t);
-            assert_eq!(ds.read_object(rwobj, 0, size + 10).unwrap(), t);
-            assert!(ds.read_object(rwobj, size, size).unwrap().is_empty());
+            assert_eq!(ds.get_object_size(rwobj).await.unwrap(), size);
+            assert_eq!(ds.read_object(rwobj, 0, size).await.unwrap(), t);
+            assert_eq!(ds.read_object(rwobj, 0, size + 10).await.unwrap(), t);
+            assert!(ds.read_object(rwobj, size, size).await.unwrap().is_empty());
 
-            ds.delete_object(rwobj).unwrap();
+            ds.delete_object(rwobj).await.unwrap();
 
-            assert_eq!(ds.list_object().unwrap(), num + 2);
+            assert_eq!(ds.list_object().await.unwrap(), num + 2);
 
-            let dentry_data_read = ds.lookup_dentry(dir_ino, file_name).unwrap();
+            let dentry_data_read = ds.lookup_dentry(dir_ino, file_name).await.unwrap();
             assert_eq!(dentry_data, dentry_data_read);
 
-            let (_, dentry_num) = ds.iterate_dentry(dir_ino, 0, 4096).unwrap();
+            let (_, dentry_num) = ds.iterate_dentry(dir_ino, 0, 4096).await.unwrap();
             assert_eq!(dentry_num, 1);
 
-            _ = ds.delete_dentry(dir_ino, file_name).unwrap();
+            _ = ds.delete_dentry(dir_ino, file_name).await.unwrap();
 
-            let (_, dentry_num) = ds.iterate_dentry(dir_ino, 0, 4096).unwrap();
+            let (_, dentry_num) = ds.iterate_dentry(dir_ino, 0, 4096).await.unwrap();
             assert_eq!(dentry_num, 0);
 
             let attr_bytes = unsafe { any_as_u8_slice(&attr) };
-            let attr_new = ds.get_attr(file_ino, attr_bytes.len() as u64).unwrap();
+            let attr_new = ds
+                .get_attr(file_ino, attr_bytes.len() as u64)
+                .await
+                .unwrap();
             assert_eq!(attr_new.as_slice(), attr_bytes);
 
-            let value_read = ds.get_kvattr(file_ino, key, 0).unwrap();
+            let value_read = ds.get_kvattr(file_ino, key, 0).await.unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
-            txg = ds.remove_kvattr(file_ino, key).unwrap();
-            ds.wait_synced().unwrap();
+            txg = ds.remove_kvattr(file_ino, key).await.unwrap();
+            ds.wait_synced().await.unwrap();
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
-            _ = ds.delete_inode(dir_ino, InodeType::DIR).unwrap();
-            txg = ds.delete_inode(file_ino, InodeType::FILE).unwrap();
-            ds.wait_synced().unwrap();
+            _ = ds.delete_inode(dir_ino, InodeType::DIR).await.unwrap();
+            txg = ds.delete_inode(file_ino, InodeType::FILE).await.unwrap();
+            ds.wait_synced().await.unwrap();
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
-            assert_eq!(ds.list_object().unwrap(), num);
+            assert_eq!(ds.list_object().await.unwrap(), num);
+            ds.close().await.unwrap();
         }
 
         {
-            Uzfs::set_zpool_cache_path(uzfs_test_env.get_cache_path().unwrap());
-            let uzfs = Arc::new(Uzfs::init().unwrap());
-            let ds = Dataset::init(
-                dsname,
-                uzfs_test_env.get_dev_path().unwrap().as_str(),
-                uzfs.clone(),
-            )
-            .unwrap();
+            let ds = Dataset::init(dsname, uzfs_test_env.get_dev_path().unwrap().as_str())
+                .await
+                .unwrap();
 
-            let ino = ds.create_inode(InodeType::FILE).unwrap().0;
-            let keys = ds.list_kvattrs(ino).unwrap();
+            let ino = ds.create_inode(InodeType::FILE).await.unwrap().0;
+            let keys = ds.list_kvattrs(ino).await.unwrap();
             assert!(keys.is_empty());
 
             let total_kvs: usize = 4096;
@@ -1125,10 +1139,10 @@ mod tests {
                 let value_size: usize = 256;
                 value.resize_with(value_size, Default::default);
 
-                ds.set_kvattr(ino, key.as_str(), &value, 0).unwrap();
+                ds.set_kvattr(ino, key.as_str(), &value, 0).await.unwrap();
             }
 
-            let keys = ds.list_kvattrs(ino).unwrap();
+            let keys = ds.list_kvattrs(ino).await.unwrap();
             assert_eq!(keys.len(), total_kvs);
 
             let mut numbers: Vec<usize> = Vec::<usize>::with_capacity(total_kvs);
@@ -1140,85 +1154,77 @@ mod tests {
             let expect_vec: Vec<usize> = (0..total_kvs).collect();
             assert_eq!(numbers, expect_vec);
 
-            ds.delete_inode(ino, InodeType::FILE).unwrap();
+            ds.delete_inode(ino, InodeType::FILE).await.unwrap();
+            ds.close().await.unwrap();
         }
+        uzfs_env_fini().await;
     }
 
+    #[tokio::test(flavor = "multi_thread")]
     #[serial]
-    #[test]
-    fn uzfs_claim_test() {
+    async fn uzfs_claim_test() {
         let ino;
         let dsname = "uzfs-test-pool/ds";
         let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+        uzfs_env_init().await;
 
         {
-            Uzfs::set_zpool_cache_path(uzfs_test_env.get_cache_path().unwrap());
-            let uzfs = Arc::new(Uzfs::init().unwrap());
+            let ds = Dataset::init(dsname, uzfs_test_env.get_dev_path().unwrap().as_str())
+                .await
+                .unwrap();
 
-            let ds = Dataset::init(
-                dsname,
-                uzfs_test_env.get_dev_path().unwrap().as_str(),
-                uzfs.clone(),
-            )
-            .unwrap();
+            (ino, _) = ds.create_inode(InodeType::DIR).await.unwrap();
 
-            (ino, _) = ds.create_inode(InodeType::DIR).unwrap();
-
-            ds.wait_synced().unwrap();
+            ds.wait_synced().await.unwrap();
+            ds.close().await.unwrap();
         }
 
         {
-            Uzfs::set_zpool_cache_path(uzfs_test_env.get_cache_path().unwrap());
-            let uzfs = Arc::new(Uzfs::init().unwrap());
-
-            let ds = Dataset::init(
-                dsname,
-                uzfs_test_env.get_dev_path().unwrap().as_str(),
-                uzfs.clone(),
-            )
-            .unwrap();
+            let ds = Dataset::init(dsname, uzfs_test_env.get_dev_path().unwrap().as_str())
+                .await
+                .unwrap();
 
             // test claim when inode exists
-            ds.claim_inode(ino, InodeType::DIR).unwrap();
+            ds.claim_inode(ino, InodeType::DIR).await.unwrap();
 
-            ds.delete_inode(ino, InodeType::DIR).unwrap();
-            ds.wait_synced().unwrap();
+            ds.delete_inode(ino, InodeType::DIR).await.unwrap();
+            ds.wait_synced().await.unwrap();
 
             // test claim when inode doesn't exist
-            ds.claim_inode(ino, InodeType::DIR).unwrap();
+            ds.claim_inode(ino, InodeType::DIR).await.unwrap();
+            ds.close().await.unwrap();
         }
+
+        uzfs_env_fini().await;
     }
 
+    #[tokio::test(flavor = "multi_thread")]
     #[serial]
-    #[test]
-    fn uzfs_zap_iterator_test() {
+    async fn uzfs_zap_iterator_test() {
         let dsname = "uzfs-test-pool/ds";
         let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
-
-        Uzfs::set_zpool_cache_path(uzfs_test_env.get_cache_path().unwrap());
-        let uzfs = Arc::new(Uzfs::init().unwrap());
+        uzfs_env_init().await;
 
         let ds = Arc::new(
-            Dataset::init(
-                dsname,
-                uzfs_test_env.get_dev_path().unwrap().as_str(),
-                uzfs.clone(),
-            )
-            .unwrap(),
+            Dataset::init(dsname, uzfs_test_env.get_dev_path().unwrap().as_str())
+                .await
+                .unwrap(),
         );
 
-        let (zap_obj, _) = ds.zap_create().unwrap();
+        let (zap_obj, _) = ds.zap_create().await.unwrap();
         let num_adders = 10;
         let num_ops_per_adder = 20000;
 
         let ds_remover = ds.clone();
-        let remover_handle = std::thread::spawn(move || {
+        let remover_handle = tokio::task::spawn(async move {
             let mut total_ops = num_adders * num_ops_per_adder;
             while total_ops > 0 {
-                for (key, value) in ds_remover.zap_list(zap_obj).unwrap() {
+                for (key, value) in ds_remover.zap_list(zap_obj).await.unwrap() {
+                    ds_remover.zap_remove(zap_obj, &key).await.unwrap();
                     assert_eq!(key.as_bytes(), value.as_slice());
                     total_ops -= 1;
                 }
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
             println!("remover exited");
         });
@@ -1227,32 +1233,36 @@ mod tests {
         for i in 0..num_adders {
             let adder_idx = i;
             let ds_adder = ds.clone();
-            adder_handles.push(std::thread::spawn(move || {
+            adder_handles.push(tokio::task::spawn(async move {
                 for j in 0..num_ops_per_adder {
                     let name = format!("{}_{}fghkjsghj", adder_idx, j);
-                    ds_adder.zap_add(zap_obj, &name, name.as_bytes()).unwrap();
+                    ds_adder
+                        .zap_add(zap_obj, &name, name.as_bytes())
+                        .await
+                        .unwrap();
                 }
                 println!("adder exited");
             }));
         }
 
         for adder_handle in adder_handles {
-            adder_handle.join().unwrap();
+            adder_handle.await.unwrap();
         }
 
-        remover_handle.join().unwrap();
+        remover_handle.await.unwrap();
+        ds.close().await.unwrap();
+        uzfs_env_fini().await;
     }
 
+    #[tokio::test(flavor = "multi_thread")]
     #[serial]
-    #[test]
-    fn uzfs_expand_test() {
+    async fn uzfs_expand_test() {
         let dsname = "uzfs-test-pool/ds";
         let mut uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
-        Uzfs::set_zpool_cache_path(uzfs_test_env.get_cache_path().unwrap());
-        let uzfs = Arc::new(Uzfs::init().unwrap());
+        uzfs_env_init().await;
 
         let dev_path = uzfs_test_env.get_dev_path().unwrap();
-        let ds = Arc::new(Dataset::init(dsname, &dev_path, uzfs).unwrap());
+        let ds = Arc::new(Dataset::init(dsname, &dev_path).await.unwrap());
 
         let io_workers = 10;
         let size = 20 << 20;
@@ -1260,54 +1270,59 @@ mod tests {
         let mut workers = Vec::new();
         for _ in 0..io_workers {
             let ds_clone = ds.clone();
-            workers.push(std::thread::spawn(move || {
+            workers.push(tokio::task::spawn(async move {
                 let buf = vec![123 as u8; block_size];
                 let mut offset = 0;
-                let obj = ds_clone.create_objects(1).unwrap().0[0];
+                let obj = ds_clone.create_objects(1).await.unwrap().0[0];
                 while offset < size {
-                    while let Err(err) = ds_clone.write_object(obj, offset, false, &buf) {
+                    while let Err(err) = ds_clone.write_object(obj, offset, false, &buf).await {
                         println!("write error: ({offset}, {block_size}), {err}");
-                        std::thread::sleep(Duration::from_secs(1));
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                     offset += block_size as u64;
                 }
             }));
         }
 
-        let expander = std::thread::spawn(move || {
+        let ds_expander = ds.clone();
+        let expander = tokio::task::spawn(async move {
             let mut cur_size = 100 << 20;
             let target_size = 400 << 20;
             let incr_size = 20 << 20;
             while cur_size < target_size {
-                std::thread::sleep(Duration::from_secs(2));
+                tokio::time::sleep(Duration::from_secs(2)).await;
                 cur_size += incr_size;
                 uzfs_test_env.set_dev_size(cur_size);
                 println!("new size: {cur_size}");
-                ds.expand().unwrap();
+                ds_expander.expand().await.unwrap();
             }
             uzfs_test_env
         });
 
-        _ = expander.join().unwrap();
+        let _ = expander.await.unwrap();
 
         for worker in workers {
-            worker.join().unwrap();
+            worker.await.unwrap();
         }
+
+        ds.close().await.unwrap();
+        uzfs_env_fini().await;
     }
 
+    #[tokio::test(flavor = "multi_thread")]
     #[serial]
-    #[test]
-    fn uzfs_ranglock_test() {
+    async fn uzfs_rangelock_test() {
         let dsname = "uzfs-test-pool/ds";
         let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
-        Uzfs::set_zpool_cache_path(uzfs_test_env.get_cache_path().unwrap());
-        let uzfs = Arc::new(Uzfs::init().unwrap());
+        uzfs_env_init().await;
 
         let ds = Arc::new(
-            Dataset::init(dsname, uzfs_test_env.get_dev_path().unwrap().as_str(), uzfs).unwrap(),
+            Dataset::init(dsname, uzfs_test_env.get_dev_path().unwrap().as_str())
+                .await
+                .unwrap(),
         );
 
-        let obj = ds.create_objects(1).unwrap().0[0];
+        let obj = ds.create_objects(1).await.unwrap().0[0];
 
         let num_writers = 10;
         let max_file_size = 1 << 24;
@@ -1324,10 +1339,9 @@ mod tests {
             let ds_clone = ds.clone();
             let version_clone = version.clone();
             let write_offsets_clone = write_offsets.clone();
-            handles.push(std::thread::spawn(move || {
-                let mut rng = rand::thread_rng();
+            handles.push(tokio::task::spawn(async move {
                 for _ in 0..num_writes_per_writer {
-                    let offset = rng.gen_range(0..(max_file_size - write_size));
+                    let offset = rand::thread_rng().gen_range(0..(max_file_size - write_size));
                     let my_version =
                         version_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     write_offsets_clone.insert(my_version, offset);
@@ -1337,6 +1351,7 @@ mod tests {
                     let buf_u8 = unsafe { buf_u16.align_to::<u8>().1 };
                     ds_clone
                         .write_object(obj, offset as u64 * 2, false, buf_u8)
+                        .await
                         .unwrap();
                 }
             }));
@@ -1347,13 +1362,12 @@ mod tests {
         for _ in 0..num_readers {
             let ds_clone = ds.clone();
             let write_offsets_clone = write_offsets.clone();
-            handles.push(std::thread::spawn(move || {
-                let mut rng = rand::thread_rng();
-
+            handles.push(tokio::task::spawn(async move {
                 for _ in 0..num_reads_per_reader {
-                    let offset = rng.gen_range(0..(max_file_size - read_size));
+                    let offset = rand::thread_rng().gen_range(0..(max_file_size - read_size));
                     let data_u8 = ds_clone
                         .read_object(obj, offset as u64 * 2, read_size as u64)
+                        .await
                         .unwrap();
                     let data_u16 = unsafe { data_u8.align_to::<u16>().1 };
 
@@ -1400,7 +1414,10 @@ mod tests {
         }
 
         for handle in handles {
-            handle.join().unwrap();
+            handle.await.unwrap();
         }
+
+        ds.close().await.unwrap();
+        uzfs_env_fini().await;
     }
 }

@@ -5,19 +5,6 @@
 #![allow(deref_nullptr)]
 
 #[rustfmt::skip]
-mod bindings;
-pub use bindings::*;
-
-pub const DMU_OT_NEWTYPE: u32 = 0x80;
-pub const DMU_OT_BYTESWAP_MASK: u32 = 0x1f;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn uzfs_sys_works() {
-        unsafe { libuzfs_init() };
-        unsafe { libuzfs_fini() };
-    }
-}
+pub mod bindings;
+pub mod async_sys;
+pub mod coroutine;
