@@ -9,6 +9,10 @@ pkg-config = "0.3.26"
 
 [dependencies]
 libc = "0.2"
+futures.workspace = true
+tokio.workspace = true
+dashmap.workspace = true
+once_cell.workspace = true
 
 [lib]
 crate-type = ["staticlib", "rlib"]
