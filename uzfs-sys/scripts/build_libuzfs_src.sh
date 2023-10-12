@@ -6,12 +6,12 @@ TOP_SRCDIR=$1
 ENABLE_DEBUG=$2
 
 ZFS_DIR=${TOP_SRCDIR}/zfs
-ZFS_PKG=zfs-uzfs-coroutine
+ZFS_PKG=zfs-uzfs-coroutine-tracing
 ZFS_ZIP=${ZFS_PKG}.zip
 INSTALL_DIR=${TOP_SRCDIR}/install
 LIBUZFS=${INSTALL_DIR}/lib/libuzfs.a
 DOWNLOAD_DIR=${TOP_SRCDIR}/download
-DOWNLOAD_URL=https://github.com/iomesh/zfs/archive/refs/heads/uzfs-coroutine.zip
+DOWNLOAD_URL=https://github.com/iomesh/zfs/archive/refs/heads/uzfs-coroutine-tracing.zip
 LIBUZFS_PC=${INSTALL_DIR}/lib/pkgconfig/libuzfs.pc
 
 download_src() {
@@ -36,7 +36,7 @@ unzip_src() {
 
 build_libuzfs_lib() {
     cd ${ZFS_DIR}
-    ./autogen.sh && CFLAGS=-fPIC ./configure --with-config=user --enable-shared=no --enable-debuginfo=${ENABLE_DEBUG} --enable-debug=${ENABLE_DEBUG} --prefix=${INSTALL_DIR} && make gitrev
+    ./autogen.sh && CFLAGS=-fPIC ./configure --with-config=user --with-minitrace_c=/usr/local --enable-shared=no --enable-debuginfo=${ENABLE_DEBUG} --enable-debug=${ENABLE_DEBUG} --prefix=${INSTALL_DIR} && make gitrev
     cd lib
     make -j4 && make install
     cd ../include

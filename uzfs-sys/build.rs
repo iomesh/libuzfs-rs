@@ -4,6 +4,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/wrapper.h");
     println!("cargo:rerun-if-changed=zfs");
+    println!("cargo:rustc-link-lib=minitrace_c");
 
     let root = fs::canonicalize(".").unwrap();
 
