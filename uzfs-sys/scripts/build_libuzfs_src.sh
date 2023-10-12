@@ -6,7 +6,7 @@ TOP_SRCDIR=$1
 ENABLE_DEBUG=$2
 
 ZFS_DIR=${TOP_SRCDIR}/zfs
-ZFS_TAG=uzfs-1.0.0-rc6
+ZFS_TAG=uzfs-1.0.0-rc7
 ZFS_PKG=zfs-${ZFS_TAG}
 ZFS_ZIP=${ZFS_PKG}.zip
 INSTALL_DIR=${TOP_SRCDIR}/install
@@ -42,7 +42,7 @@ fi;
 
 build_libuzfs_lib() {
     cd ${ZFS_DIR}
-    ./autogen.sh && CFLAGS=${CFLAGS} ./configure --with-config=user --enable-shared=no --enable-debuginfo=${ENABLE_DEBUG} --enable-debug=${ENABLE_DEBUG} --prefix=${INSTALL_DIR} && make gitrev
+    ./autogen.sh && CFLAGS=${CFLAGS} ./configure --with-config=user --with-minitrace_c=/usr/local --enable-shared=no --enable-debuginfo=${ENABLE_DEBUG} --enable-debug=${ENABLE_DEBUG} --prefix=${INSTALL_DIR} && make gitrev
     cd lib
     make -j4 && make install
     cd ../include

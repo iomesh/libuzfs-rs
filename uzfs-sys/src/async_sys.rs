@@ -1,7 +1,9 @@
 use crate::bindings::*;
 use crate::coroutine::*;
+use minitrace::prelude::SpanContext;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_void};
+use std::ptr::null;
 
 const MAX_POOL_NAME_SIZE: i32 = 32;
 const MAX_NAME_SIZE: usize = 256;
@@ -383,6 +385,7 @@ pub struct LibuzfsReadObjectArg {
     pub obj: u64,
     pub offset: u64,
     pub size: u64,
+    pub span_ctx: SpanContext,
 
     pub err: i32,
     pub data: Vec<u8>,
@@ -401,6 +404,11 @@ pub unsafe extern "C" fn libuzfs_read_object_c(arg: *mut c_void) {
         arg.offset,
         arg.size,
         arg.data.as_mut_ptr() as *mut c_char,
+        if arg.span_ctx.trace_id.0 != 0 {
+            &arg.span_ctx as *const _ as _
+        } else {
+            null()
+        },
     );
 
     if rc >= 0 {

@@ -24,6 +24,9 @@ fn main() {
     // probe_library tells cargo all link info of libuzfs automatically
     let lib = pkg_config::probe_library("libuzfs").unwrap();
 
+    println!("cargo:rustc-link-search=/usr/local/lib");
+    println!("cargo:rustc-link-lib=minitrace_c");
+
     let bindings = bindgen::Builder::default()
         .clang_args(
             lib.include_paths
