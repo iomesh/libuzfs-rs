@@ -3,6 +3,7 @@ use crate::coroutine::*;
 use std::ffi::CStr;
 use std::io::{Error, ErrorKind};
 use std::os::raw::{c_char, c_void};
+use minitrace::prelude::SpanContext;
 
 const MAX_POOL_NAME_SIZE: i32 = 32;
 const MAX_NAME_SIZE: usize = 256;
@@ -370,6 +371,7 @@ pub struct LibuzfsReadObjectArg {
     pub obj: u64,
     pub offset: u64,
     pub size: u64,
+    pub span_ctx: SpanContext,
 
     pub err: i32,
     pub data: Vec<u8>,
@@ -381,6 +383,11 @@ unsafe impl Sync for LibuzfsReadObjectArg {}
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_read_object_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsReadObjectArg);
+    let _span = if arg.span_ctx.trace_id.0 != 0 {
+        minitrace::Span::root("libuzfs_read_object_c", arg.span_ctx)
+    } else {
+        minitrace::Span::noop()
+    };
 
     let rc = libuzfs_object_read(
         arg.dhp,
@@ -388,6 +395,7 @@ pub unsafe extern "C" fn libuzfs_read_object_c(arg: *mut c_void) {
         arg.offset,
         arg.size,
         arg.data.as_mut_ptr() as *mut c_char,
+        &arg.span_ctx as *const _ as _,
     );
 
     if rc >= 0 {

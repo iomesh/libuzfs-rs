@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 use uzfs_sys::async_sys::*;
 use uzfs_sys::bindings as sys;
 use uzfs_sys::coroutine::UzfsCoroutineFuture;
+use minitrace::prelude::SpanContext;
 
 pub const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
 
@@ -355,17 +356,23 @@ impl Dataset {
         }
     }
 
-    pub async fn read_object(&self, obj: u64, offset: u64, size: u64) -> Result<Vec<u8>> {
+    pub async fn read_object(&self, obj: u64, offset: u64, size: u64, span_ctx: SpanContext) -> Result<Vec<u8>> {
         let mut arg = LibuzfsReadObjectArg {
             dhp: self.dhp,
             obj,
             offset,
             size,
+            span_ctx,
             err: 0,
             data: Vec::<u8>::with_capacity(size as usize),
         };
 
         let arg_u64 = &mut arg as *mut LibuzfsReadObjectArg as u64;
+        let _span = if span_ctx.trace_id.0 != 0 {
+            minitrace::Span::root("dataset read_object", span_ctx)
+        } else {
+            minitrace::Span::noop()
+        };
 
         UzfsCoroutineFuture::new(libuzfs_read_object_c, arg_u64, 0, true).await;
 
