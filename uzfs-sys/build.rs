@@ -4,8 +4,6 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/wrapper.h");
     println!("cargo:rerun-if-changed=zfs");
-    println!("cargo:rustc-link-lib=static=minitrace_c");
-    println!("cargo:rustc-link-search=/usr/local/lib");
 
     let root = fs::canonicalize(".").unwrap();
 
@@ -25,6 +23,10 @@ fn main() {
 
     // probe_library tells cargo all link info of libuzfs automatically
     let lib = pkg_config::probe_library("libuzfs").unwrap();
+
+    println!("cargo:rustc-link-search=/usr/local/lib");
+    println!("cargo:rustc-link-lib=static=minitrace_c");
+    println!("cargo:rustc-link-lib=static=minitrace_rust");
 
     let bindings = bindgen::Builder::default()
         .clang_args(
