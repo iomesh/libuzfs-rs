@@ -25,8 +25,8 @@ fn main() {
     let lib = pkg_config::probe_library("libuzfs").unwrap();
 
     println!("cargo:rustc-link-search=/usr/local/lib");
-    println!("cargo:rustc-link-lib=static=minitrace_c");
-    println!("cargo:rustc-link-lib=static=minitrace_rust");
+    println!("cargo:rustc-link-lib=minitrace_c");
+    println!("cargo:rustc-link-lib=minitrace_rust");
 
     let bindings = bindgen::Builder::default()
         .clang_args(
