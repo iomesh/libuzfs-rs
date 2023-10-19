@@ -370,6 +370,7 @@ pub struct LibuzfsReadObjectArg {
     pub obj: u64,
     pub offset: u64,
     pub size: u64,
+    pub span_ctx: *const c_void,
 
     pub err: i32,
     pub data: Vec<u8>,
@@ -388,6 +389,7 @@ pub unsafe extern "C" fn libuzfs_read_object_c(arg: *mut c_void) {
         arg.offset,
         arg.size,
         arg.data.as_mut_ptr() as *mut c_char,
+        arg.span_ctx,
     );
 
     if rc >= 0 {

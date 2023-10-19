@@ -355,12 +355,13 @@ impl Dataset {
         }
     }
 
-    pub async fn read_object(&self, obj: u64, offset: u64, size: u64) -> Result<Vec<u8>> {
+    pub async fn read_object(&self, obj: u64, offset: u64, size: u64, span_ctx: *const c_void) -> Result<Vec<u8>> {
         let mut arg = LibuzfsReadObjectArg {
             dhp: self.dhp,
             obj,
             offset,
             size,
+            span_ctx,
             err: 0,
             data: Vec::<u8>::with_capacity(size as usize),
         };
