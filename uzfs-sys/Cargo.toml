@@ -13,6 +13,7 @@ futures.workspace = true
 tokio.workspace = true
 dashmap.workspace = true
 once_cell.workspace = true
+minitrace.workspace = true
 
 [lib]
 crate-type = ["staticlib", "rlib"]
