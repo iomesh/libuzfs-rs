@@ -368,6 +368,11 @@ impl Dataset {
         };
 
         let arg_u64 = &mut arg as *mut LibuzfsReadObjectArg as u64;
+        let _span = if span_ctx.trace_id.0 != 0 {
+            minitrace::Span::root("dataset read_object", span_ctx)
+        } else {
+            minitrace::Span::noop()
+        };
 
         UzfsCoroutineFuture::new(libuzfs_read_object_c, arg_u64, 0, true).await;
 

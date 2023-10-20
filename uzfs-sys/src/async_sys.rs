@@ -383,6 +383,11 @@ unsafe impl Sync for LibuzfsReadObjectArg {}
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_read_object_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsReadObjectArg);
+    let _span = if arg.span_ctx.trace_id.0 != 0 {
+        minitrace::Span::root("libuzfs_read_object_c", arg.span_ctx)
+    } else {
+        minitrace::Span::noop()
+    };
 
     let rc = libuzfs_object_read(
         arg.dhp,
