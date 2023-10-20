@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use uzfs_sys::async_sys::*;
 use uzfs_sys::bindings as sys;
 use uzfs_sys::coroutine::UzfsCoroutineFuture;
-use minitrace::prelude::*;
+use minitrace::prelude::SpanContext;
 
 pub const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
 
@@ -357,19 +357,12 @@ impl Dataset {
     }
 
     pub async fn read_object(&self, obj: u64, offset: u64, size: u64, span_ctx: SpanContext) -> Result<Vec<u8>> {
-        let span = if span_ctx.trace_id.0 != 0 {
-            Span::root("dataset read_object", span_ctx)
-        } else {
-            Span::noop()
-        };
-        let _guard = span.set_local_parent();
-
         let mut arg = LibuzfsReadObjectArg {
             dhp: self.dhp,
             obj,
             offset,
             size,
-            span_ctx: SpanContext::current_local_parent().unwrap_or_default(),
+            span_ctx,
             err: 0,
             data: Vec::<u8>::with_capacity(size as usize),
         };

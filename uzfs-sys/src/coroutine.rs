@@ -9,7 +9,6 @@ use std::{
     task::{Context, Poll, Waker},
 };
 use tokio::runtime::Runtime;
-use minitrace::trace;
 
 static id_task_handle_map: OnceCell<DashMap<u64, tokio::task::JoinHandle<()>>> = OnceCell::new();
 static id_runtime_map: OnceCell<DashMap<u64, std::thread::JoinHandle<()>>> = OnceCell::new();
@@ -28,7 +27,6 @@ type CoroutineFunc = unsafe extern "C" fn(arg: *mut c_void);
 
 impl UzfsCoroutineFuture {
     // FIXME(sundengyu): pin arg to the address of arg to prevent future swap
-    #[trace(name = "uzfs create coroutine")]
     pub fn new(func: CoroutineFunc, arg: u64, mut stack_size: i32, foreground: bool) -> Self {
         // only support fixed stack size for now
         assert_eq!(stack_size, 0);
@@ -77,7 +75,6 @@ impl Future for UzfsCoroutineFuture {
 }
 
 impl Drop for UzfsCoroutineFuture {
-    #[trace(name = "uzfs destroy coroutine")]
     fn drop(&mut self) {
         unsafe { libuzfs_destroy_coroutine(self.uc) };
     }
