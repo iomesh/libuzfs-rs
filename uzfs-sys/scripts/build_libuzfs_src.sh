@@ -36,7 +36,7 @@ unzip_src() {
 
 build_libuzfs_lib() {
     cd ${ZFS_DIR}
-    ./autogen.sh && CFLAGS=-fPIC ./configure --with-config=user --with-minitrace_c=/usr/local --enable-shared=no --enable-debuginfo=yes --enable-debug=yes --prefix=${INSTALL_DIR} && make gitrev
+    ./autogen.sh && CFLAGS=-fPIC ./configure --with-config=user --with-minitrace_c=/usr/local --enable-shared=no --enable-debuginfo=${ENABLE_DEBUG} --enable-debug=${ENABLE_DEBUG} --prefix=${INSTALL_DIR} && make gitrev
     cd lib
     make -j4 && make install
     cd ../include
