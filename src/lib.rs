@@ -3,17 +3,28 @@ use io::Result;
 use once_cell::sync::OnceCell;
 use std::ffi::{CStr, CString};
 use std::io;
-use std::mem::size_of;
 use std::os::raw::{c_char, c_void};
 use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
 use uzfs_sys::async_sys::*;
-use uzfs_sys::bindings as sys;
+use uzfs_sys::bindings::{self as sys, uzfs_inode_attr_t, uzfs_object_attr_t};
 use uzfs_sys::coroutine::UzfsCoroutineFuture;
 
 pub const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
 
 static UZFS_INIT_REF: OnceCell<Mutex<u32>> = OnceCell::new();
+const MAX_RESERVED_SIZE: usize = 512;
+const UZFS_DNODESIZE_META: u32 = 4096;
+// zero UZFS_DNODESIZE_DATA to use default dnodesize
+const UZFS_DNODESIZE_DATA: u32 = 0;
+
+#[derive(Default)]
+pub struct InodeAttr {
+    pub gen: u64,
+    pub blksize: u32,
+    pub blocks: u64,
+    pub reserved: Vec<u8>,
+}
 
 #[inline]
 pub async fn uzfs_env_init() {
@@ -48,6 +59,16 @@ pub enum InodeType {
     DIR = sys::libuzfs_inode_type_t_INODE_DIR as isize,
 }
 
+pub enum DatasetType {
+    Data,
+    Meta,
+}
+
+pub enum KvSetOption {
+    HighPriority = sys::libuzfs_kvset_option_t_HIGH_PRIORITY as isize,
+    LowPriority = sys::libuzfs_kvset_option_t_LOW_PRIORITY as isize,
+}
+
 pub struct Dataset {
     dhp: *mut sys::libuzfs_dataset_handle_t,
     zhp: *mut sys::libuzfs_zpool_handle_t,
@@ -64,15 +85,25 @@ impl Dataset {
         Ok(CString::new(v[0]).unwrap())
     }
 
-    pub async fn init<P: CStrArgument>(dsname: P, dev_path: P) -> Result<Self> {
+    pub async fn init<P: CStrArgument>(
+        dsname: P,
+        dev_path: P,
+        dstype: DatasetType,
+    ) -> Result<Self> {
         let dsname = dsname.into_cstr();
         let poolname = Self::dsname_to_poolname(&dsname)?;
         let dev_path_c = dev_path.into_cstr();
+
+        let dnodesize = match dstype {
+            DatasetType::Data => UZFS_DNODESIZE_DATA,
+            DatasetType::Meta => UZFS_DNODESIZE_META,
+        };
 
         let mut arg = LibuzfsDatasetInitArg {
             dsname: dsname.as_ref().as_ptr(),
             dev_path: dev_path_c.as_ref().as_ptr(),
             pool_name: poolname.as_ptr() as *const c_char,
+            dnodesize,
 
             ret: 0,
             dhp: std::ptr::null_mut(),
@@ -285,39 +316,20 @@ impl Dataset {
         UzfsCoroutineFuture::new(libuzfs_wait_log_commit_c, arg_u64, 0, true).await;
     }
 
-    pub async fn get_object_gen(&self, obj: u64) -> Result<u64> {
-        let mut arg = LibuzfsGetGenArg {
+    pub async fn get_object_attr(&self, obj: u64) -> Result<uzfs_object_attr_t> {
+        let mut arg = LibuzfsGetObjectAttrArg {
             dhp: self.dhp,
             obj,
-            gen: 0,
+            attr: uzfs_object_attr_t::default(),
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsGetGenArg as u64;
+        let arg_u64 = &mut arg as *mut LibuzfsGetObjectAttrArg as u64;
 
-        UzfsCoroutineFuture::new(libuzfs_get_object_gen_c, arg_u64, 0, true).await;
-
-        if arg.err == 0 {
-            Ok(arg.gen)
-        } else {
-            Err(io::Error::from_raw_os_error(arg.err))
-        }
-    }
-
-    pub async fn get_object_size(&self, obj: u64) -> Result<u64> {
-        let mut arg = LibuzfsGetSizeArg {
-            dhp: self.dhp,
-            obj,
-            size: 0,
-            err: 0,
-        };
-
-        let arg_u64 = &mut arg as *mut LibuzfsGetSizeArg as u64;
-
-        UzfsCoroutineFuture::new(libuzfs_get_object_size_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_get_object_attr_c, arg_u64, 0, true).await;
 
         if arg.err == 0 {
-            Ok(arg.size)
+            Ok(arg.attr)
         } else {
             Err(io::Error::from_raw_os_error(arg.err))
         }
@@ -543,33 +555,40 @@ impl Dataset {
         }
     }
 
-    pub async fn get_attr(&self, ino: u64, size: u64) -> Result<Vec<u8>> {
-        assert!(size_of::<sys::uzfs_attr_t>() == size as usize);
+    pub async fn get_attr(&self, ino: u64) -> Result<InodeAttr> {
+        let mut attr = InodeAttr::default();
+        attr.reserved.reserve(MAX_RESERVED_SIZE);
+
         let mut arg = LibuzfsGetAttrArg {
             dhp: self.dhp,
             ino,
-            attr: Vec::new(),
+            reserved: attr.reserved.as_mut_ptr() as *mut i8,
+            size: 0,
+            attr: uzfs_inode_attr_t::default(),
             err: 0,
         };
-        arg.attr.resize(size as usize, 0);
 
         let arg_u64 = &mut arg as *mut LibuzfsGetAttrArg as u64;
 
         UzfsCoroutineFuture::new(libuzfs_inode_getattr_c, arg_u64, 0, true).await;
 
         if arg.err == 0 {
-            Ok(arg.attr)
+            unsafe { attr.reserved.set_len(arg.size as usize) };
+            (attr.gen, attr.blksize, attr.blocks) =
+                (arg.attr.gen, arg.attr.blksize, arg.attr.blocks);
+            Ok(attr)
         } else {
             Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
-    pub async fn set_attr(&self, ino: u64, attr: &[u8]) -> Result<u64> {
-        assert!(size_of::<sys::uzfs_attr_t>() == attr.len());
+    pub async fn set_attr(&self, ino: u64, reserved: &[u8]) -> Result<u64> {
+        assert!(reserved.len() <= MAX_RESERVED_SIZE);
         let mut arg = LibuzfsSetAttrArg {
             dhp: self.dhp,
             ino,
-            attr: attr.as_ptr() as *const sys::uzfs_attr_t,
+            reserved: reserved.as_ptr() as *mut i8,
+            size: reserved.len() as u32,
             err: 0,
             txg: 0,
         };
@@ -585,18 +604,12 @@ impl Dataset {
         }
     }
 
-    pub async fn get_kvattr<P: CStrArgument>(
-        &self,
-        ino: u64,
-        name: P,
-        flags: i32,
-    ) -> Result<Vec<u8>> {
+    pub async fn get_kvattr<P: CStrArgument>(&self, ino: u64, name: P) -> Result<Vec<u8>> {
         let cname = name.into_cstr();
         let mut arg = LibuzfsGetKvattrArg {
             dhp: self.dhp,
             ino,
             name: cname.as_ref().as_ptr(),
-            flags,
             data: Vec::new(),
             err: 0,
         };
@@ -617,14 +630,14 @@ impl Dataset {
         ino: u64,
         name: P,
         value: &[u8],
-        flags: i32,
+        flag: KvSetOption,
     ) -> Result<u64> {
         let cname = name.into_cstr();
         let mut arg = LibuzfsSetKvAttrArg {
             dhp: self.dhp,
             ino,
             name: cname.as_ref().as_ptr(),
-            flags,
+            flag: flag as u32,
             value: value.as_ptr() as *const c_char,
             size: value.len() as u64,
             err: 0,
@@ -853,29 +866,22 @@ mod tests {
     use super::UzfsTestEnv;
     use crate::uzfs_env_fini;
     use crate::uzfs_env_init;
+    use crate::DatasetType;
+    use crate::KvSetOption;
+    use crate::MAX_RESERVED_SIZE;
     use cstr_argument::CStrArgument;
     use dashmap::DashMap;
     use petgraph::algo::is_cyclic_directed;
     use petgraph::prelude::DiGraph;
+    use rand::distributions::Alphanumeric;
     use rand::Rng;
     use serial_test::serial;
     use std::collections::HashMap;
-    use std::mem::{size_of, transmute};
     use std::sync::atomic::AtomicU16;
     use std::sync::Arc;
     use std::time::Duration;
-    use sys::uzfs_attr_t as Attr;
     use tokio::task::JoinHandle;
     use uzfs_sys::bindings as sys;
-
-    enum FileType {
-        FILE = sys::FileType_TYPE_FILE as isize,
-        DIR = sys::FileType_TYPE_DIR as isize,
-    }
-
-    unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
-        ::std::slice::from_raw_parts((p as *const T) as *const u8, ::std::mem::size_of::<T>())
-    }
 
     #[tokio::test(flavor = "multi_thread")]
     #[serial]
@@ -885,20 +891,16 @@ mod tests {
         let sb_ino;
         let tmp_ino;
         let tmp_name = "tmp_dir";
-        let tmp_dentry_data;
         let s = String::from("Hello uzfs!");
         let t = vec!['H' as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let file_ino;
         let dir_ino;
         let num;
         let mut txg;
-        let mut attr: Attr = Attr {
-            ..Default::default()
-        };
         let key = "acl";
         let value = "root,admin";
         let file_name = "fileA";
-        let dentry_data;
+        let reserved = vec![1; 128];
 
         let dsname = "uzfs-test-pool/ds";
         let poolname = "uzfs-test-pool";
@@ -912,17 +914,25 @@ mod tests {
             assert!(hdl.is_null());
 
             for _ in 0..10 {
-                Dataset::init(dsname, &uzfs_test_env.get_dev_path().unwrap())
-                    .await
-                    .unwrap()
-                    .close()
-                    .await
-                    .unwrap();
-            }
-
-            let ds = Dataset::init(dsname, uzfs_test_env.get_dev_path().unwrap().as_str())
+                Dataset::init(
+                    dsname,
+                    &uzfs_test_env.get_dev_path().unwrap(),
+                    DatasetType::Meta,
+                )
+                .await
+                .unwrap()
+                .close()
                 .await
                 .unwrap();
+            }
+
+            let ds = Dataset::init(
+                dsname,
+                uzfs_test_env.get_dev_path().unwrap().as_str(),
+                DatasetType::Meta,
+            )
+            .await
+            .unwrap();
 
             println!("used space: {:?}", ds.space().await);
 
@@ -930,36 +940,32 @@ mod tests {
             let last_txg = ds.get_last_synced_txg().unwrap();
 
             txg = ds
-                .set_kvattr(sb_ino, key, value.as_bytes(), 0)
+                .set_kvattr(sb_ino, key, value.as_bytes(), KvSetOption::HighPriority)
                 .await
                 .unwrap();
+            println!("{txg} > {last_txg}");
             assert!(txg > last_txg);
 
-            let value_read = ds.get_kvattr(sb_ino, key, 0).await.unwrap();
+            let value_read = ds.get_kvattr(sb_ino, key).await.unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
             ds.wait_synced().await.unwrap();
 
             (tmp_ino, _) = ds.create_inode(InodeType::DIR).await.unwrap();
 
-            tmp_dentry_data = (FileType::DIR as u64) << 60 | tmp_ino;
-
-            txg = ds
-                .create_dentry(sb_ino, tmp_name, tmp_dentry_data)
-                .await
-                .unwrap();
+            txg = ds.create_dentry(sb_ino, tmp_name, tmp_ino).await.unwrap();
             ds.wait_synced().await.unwrap();
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
             let tmp_dentry_data_read = ds.lookup_dentry(sb_ino, tmp_name).await.unwrap();
-            assert_eq!(tmp_dentry_data, tmp_dentry_data_read);
+            assert_eq!(tmp_ino, tmp_dentry_data_read);
 
             num = ds.list_object().await.unwrap();
             let objs;
             (objs, gen) = ds.create_objects(1).await.unwrap();
 
             rwobj = objs[0];
-            assert_eq!(ds.get_object_size(rwobj).await.unwrap(), 0);
-            assert_eq!(ds.get_object_gen(rwobj).await.unwrap(), gen);
+            assert_eq!(ds.get_object_attr(rwobj).await.unwrap().size, 0);
+            assert_eq!(ds.get_object_attr(rwobj).await.unwrap().gen, gen);
             assert_eq!(ds.list_object().await.unwrap(), num + 1);
 
             let doi = ds.stat_object(rwobj).await.unwrap();
@@ -968,7 +974,7 @@ mod tests {
             let data = s.as_bytes();
             let size = s.len() as u64;
             ds.write_object(rwobj, 0, true, data).await.unwrap();
-            assert_eq!(ds.get_object_size(rwobj).await.unwrap(), size);
+            assert_eq!(ds.get_object_attr(rwobj).await.unwrap().size, size);
             assert_eq!(ds.read_object(rwobj, 0, size).await.unwrap(), data);
             assert_eq!(ds.read_object(rwobj, 0, size + 10).await.unwrap(), data);
             assert!(ds.read_object(rwobj, size, size).await.unwrap().is_empty());
@@ -976,25 +982,23 @@ mod tests {
             // offset must be 0 for truncate
             assert!(ds.truncate_object(rwobj, 1, size - 1).await.is_err());
             ds.truncate_object(rwobj, 0, 1).await.unwrap();
-            assert_eq!(ds.get_object_size(rwobj).await.unwrap(), 1);
+            assert_eq!(ds.get_object_attr(rwobj).await.unwrap().size, 1);
             assert_eq!(ds.read_object(rwobj, 0, size).await.unwrap().len(), 1);
 
             // extend size via truncate
             ds.truncate_object(rwobj, 0, size).await.unwrap();
-            assert_eq!(ds.get_object_size(rwobj).await.unwrap(), size);
+            assert_eq!(ds.get_object_attr(rwobj).await.unwrap().size, size);
             assert_eq!(ds.read_object(rwobj, 0, size).await.unwrap(), t);
 
             (file_ino, _) = ds.create_inode(InodeType::FILE).await.unwrap();
             (dir_ino, _) = ds.create_inode(InodeType::DIR).await.unwrap();
 
-            dentry_data = (FileType::FILE as u64) << 60 | file_ino;
-
             txg = ds
-                .create_dentry(dir_ino, file_name, dentry_data)
+                .create_dentry(dir_ino, file_name, file_ino)
                 .await
                 .unwrap();
             let dentry_data_read = ds.lookup_dentry(dir_ino, file_name).await.unwrap();
-            assert_eq!(dentry_data, dentry_data_read);
+            assert_eq!(file_ino, dentry_data_read);
             ds.wait_synced().await.unwrap();
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
@@ -1005,31 +1009,17 @@ mod tests {
 
             assert_eq!(ds.list_object().await.unwrap(), num + 3);
 
-            attr.ino = file_ino;
-            attr.nlink = 1;
-            attr.gen = 101;
+            _ = ds.set_attr(file_ino, &reserved).await.unwrap();
 
-            let attr_bytes = unsafe { any_as_u8_slice(&attr) };
-
-            _ = ds.set_attr(file_ino, attr_bytes).await.unwrap();
-
-            let attr_new = ds
-                .get_attr(file_ino, attr_bytes.len() as u64)
-                .await
-                .unwrap();
-            assert_eq!(attr_new.as_slice(), attr_bytes);
-
-            let attr_got =
-                unsafe { transmute::<[u8; size_of::<Attr>()], Attr>(attr_new.try_into().unwrap()) };
-            assert_eq!(attr_got.ino, attr.ino);
-            assert_eq!(attr_got.nlink, attr.nlink);
+            let attr = ds.get_attr(file_ino).await.unwrap();
+            assert_eq!(attr.reserved, reserved);
 
             _ = ds
-                .set_kvattr(file_ino, key, value.as_bytes(), 0)
+                .set_kvattr(file_ino, key, value.as_bytes(), KvSetOption::HighPriority)
                 .await
                 .unwrap();
 
-            let value_read = ds.get_kvattr(file_ino, key, 0).await.unwrap();
+            let value_read = ds.get_kvattr(file_ino, key).await.unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
             assert_eq!(ds.list_object().await.unwrap(), num + 3);
@@ -1061,26 +1051,29 @@ mod tests {
             assert!(hdl.is_null());
             let hdl = unsafe { sys::libuzfs_zpool_open(poolname.into_cstr().as_ptr()) };
             assert!(hdl.is_null());
-
-            let ds = Dataset::init(dsname, uzfs_test_env.get_dev_path().unwrap().as_str())
-                .await
-                .unwrap();
+            let ds = Dataset::init(
+                dsname,
+                uzfs_test_env.get_dev_path().unwrap().as_str(),
+                DatasetType::Meta,
+            )
+            .await
+            .unwrap();
 
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
             assert_eq!(ds.list_object().await.unwrap(), num + 3);
 
             assert_eq!(ds.get_superblock_ino().unwrap(), sb_ino);
 
-            let value_read = ds.get_kvattr(sb_ino, key, 0).await.unwrap();
+            let value_read = ds.get_kvattr(sb_ino, key).await.unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
             let tmp_dentry_data_read = ds.lookup_dentry(sb_ino, tmp_name).await.unwrap();
-            assert_eq!(tmp_dentry_data, tmp_dentry_data_read);
+            assert_eq!(tmp_ino, tmp_dentry_data_read);
 
-            assert_eq!(ds.get_object_gen(rwobj).await.unwrap(), gen);
+            assert_eq!(ds.get_object_attr(rwobj).await.unwrap().gen, gen);
 
             let size = s.len() as u64;
-            assert_eq!(ds.get_object_size(rwobj).await.unwrap(), size);
+            assert_eq!(ds.get_object_attr(rwobj).await.unwrap().size, size);
             assert_eq!(ds.read_object(rwobj, 0, size).await.unwrap(), t);
             assert_eq!(ds.read_object(rwobj, 0, size + 10).await.unwrap(), t);
             assert!(ds.read_object(rwobj, size, size).await.unwrap().is_empty());
@@ -1090,7 +1083,7 @@ mod tests {
             assert_eq!(ds.list_object().await.unwrap(), num + 2);
 
             let dentry_data_read = ds.lookup_dentry(dir_ino, file_name).await.unwrap();
-            assert_eq!(dentry_data, dentry_data_read);
+            assert_eq!(file_ino, dentry_data_read);
 
             let (_, dentry_num) = ds.iterate_dentry(dir_ino, 0, 4096).await.unwrap();
             assert_eq!(dentry_num, 1);
@@ -1100,14 +1093,10 @@ mod tests {
             let (_, dentry_num) = ds.iterate_dentry(dir_ino, 0, 4096).await.unwrap();
             assert_eq!(dentry_num, 0);
 
-            let attr_bytes = unsafe { any_as_u8_slice(&attr) };
-            let attr_new = ds
-                .get_attr(file_ino, attr_bytes.len() as u64)
-                .await
-                .unwrap();
-            assert_eq!(attr_new.as_slice(), attr_bytes);
+            let attr = ds.get_attr(file_ino).await.unwrap();
+            assert_eq!(attr.reserved, reserved);
 
-            let value_read = ds.get_kvattr(file_ino, key, 0).await.unwrap();
+            let value_read = ds.get_kvattr(file_ino, key).await.unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
             txg = ds.remove_kvattr(file_ino, key).await.unwrap();
@@ -1124,9 +1113,13 @@ mod tests {
         }
 
         {
-            let ds = Dataset::init(dsname, uzfs_test_env.get_dev_path().unwrap().as_str())
-                .await
-                .unwrap();
+            let ds = Dataset::init(
+                dsname,
+                uzfs_test_env.get_dev_path().unwrap().as_str(),
+                DatasetType::Meta,
+            )
+            .await
+            .unwrap();
 
             let ino = ds.create_inode(InodeType::FILE).await.unwrap().0;
             let keys = ds.list_kvattrs(ino).await.unwrap();
@@ -1139,7 +1132,10 @@ mod tests {
                 let value_size: usize = 256;
                 value.resize_with(value_size, Default::default);
 
-                ds.set_kvattr(ino, key.as_str(), &value, 0).await.unwrap();
+                ds.set_kvattr(ino, key.as_str(), &value, KvSetOption::HighPriority)
+                    .await
+                    .unwrap();
+                assert_eq!(ds.get_kvattr(ino, &key).await.unwrap(), value);
             }
 
             let keys = ds.list_kvattrs(ino).await.unwrap();
@@ -1169,9 +1165,13 @@ mod tests {
         uzfs_env_init().await;
 
         {
-            let ds = Dataset::init(dsname, uzfs_test_env.get_dev_path().unwrap().as_str())
-                .await
-                .unwrap();
+            let ds = Dataset::init(
+                dsname,
+                uzfs_test_env.get_dev_path().unwrap().as_str(),
+                DatasetType::Meta,
+            )
+            .await
+            .unwrap();
 
             (ino, _) = ds.create_inode(InodeType::DIR).await.unwrap();
 
@@ -1180,9 +1180,13 @@ mod tests {
         }
 
         {
-            let ds = Dataset::init(dsname, uzfs_test_env.get_dev_path().unwrap().as_str())
-                .await
-                .unwrap();
+            let ds = Dataset::init(
+                dsname,
+                uzfs_test_env.get_dev_path().unwrap().as_str(),
+                DatasetType::Meta,
+            )
+            .await
+            .unwrap();
 
             // test claim when inode exists
             ds.claim_inode(ino, InodeType::DIR).await.unwrap();
@@ -1206,9 +1210,13 @@ mod tests {
         uzfs_env_init().await;
 
         let ds = Arc::new(
-            Dataset::init(dsname, uzfs_test_env.get_dev_path().unwrap().as_str())
-                .await
-                .unwrap(),
+            Dataset::init(
+                dsname,
+                uzfs_test_env.get_dev_path().unwrap().as_str(),
+                DatasetType::Meta,
+            )
+            .await
+            .unwrap(),
         );
 
         let (zap_obj, _) = ds.zap_create().await.unwrap();
@@ -1262,7 +1270,11 @@ mod tests {
         uzfs_env_init().await;
 
         let dev_path = uzfs_test_env.get_dev_path().unwrap();
-        let ds = Arc::new(Dataset::init(dsname, &dev_path).await.unwrap());
+        let ds = Arc::new(
+            Dataset::init(dsname, &dev_path, DatasetType::Data)
+                .await
+                .unwrap(),
+        );
 
         let io_workers = 10;
         let size = 20 << 20;
@@ -1317,9 +1329,13 @@ mod tests {
         uzfs_env_init().await;
 
         let ds = Arc::new(
-            Dataset::init(dsname, uzfs_test_env.get_dev_path().unwrap().as_str())
-                .await
-                .unwrap(),
+            Dataset::init(
+                dsname,
+                uzfs_test_env.get_dev_path().unwrap().as_str(),
+                DatasetType::Data,
+            )
+            .await
+            .unwrap(),
         );
 
         let obj = ds.create_objects(1).await.unwrap().0[0];
@@ -1409,6 +1425,115 @@ mod tests {
                     }
 
                     assert!(!is_cyclic_directed(&graph));
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        ds.close().await.unwrap();
+        uzfs_env_fini().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial]
+    async fn uzfs_attr_test() {
+        let dsname = "uzfs-test-pool/ds";
+        let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+        uzfs_env_init().await;
+
+        let ds = Arc::new(
+            Dataset::init(
+                dsname,
+                uzfs_test_env.get_dev_path().unwrap().as_str(),
+                DatasetType::Meta,
+            )
+            .await
+            .unwrap(),
+        );
+
+        let ntests = 16;
+        let nloops = 50;
+        let max_key_size = 256;
+        let max_value_size = 8192;
+        let mut handles = Vec::new();
+        for _ in 0..ntests {
+            let ds_cloned = ds.clone();
+            handles.push(tokio::spawn(async move {
+                let inode_type = if rand::thread_rng().gen_bool(0.5) {
+                    InodeType::DIR
+                } else {
+                    InodeType::FILE
+                };
+                let ino = ds_cloned.create_inode(inode_type).await.unwrap().0;
+                assert!(ds_cloned.get_attr(ino).await.unwrap().reserved.is_empty());
+
+                let mut kvs: HashMap<String, Vec<u8>> = HashMap::new();
+
+                for _ in 0..nloops {
+                    let mut reserved: Vec<u8> = Vec::new();
+                    {
+                        let mut rng = rand::thread_rng();
+                        reserved.resize_with(rng.gen_range(0..MAX_RESERVED_SIZE), || rng.gen());
+                    }
+                    ds_cloned.set_attr(ino, &reserved).await.unwrap();
+
+                    let nkvs = 10;
+                    for _ in 0..nkvs {
+                        let new_key;
+                        let key = {
+                            let mut rng = rand::thread_rng();
+                            new_key = rng.gen_bool(0.3) || kvs.is_empty();
+                            if new_key {
+                                let key_size = rng.gen_range(1..max_key_size);
+                                rng.sample_iter(&Alphanumeric)
+                                    .take(key_size)
+                                    .map(char::from)
+                                    .collect()
+                            } else {
+                                let key_idx = rng.gen_range(0..kvs.len());
+                                kvs.iter().nth(key_idx).unwrap().0.to_owned()
+                            }
+                        };
+
+                        let value = {
+                            let mut rng = rand::thread_rng();
+                            if new_key || rng.gen_bool(0.8) {
+                                let value_size = rng.gen_range(1..max_value_size);
+                                let mut value: Vec<u8> = Vec::new();
+                                value.resize_with(value_size, || rng.gen());
+                                value
+                            } else {
+                                Vec::new()
+                            }
+                        };
+
+                        if value.is_empty() {
+                            ds_cloned.remove_kvattr(ino, &key).await.unwrap();
+                            kvs.remove(&key).unwrap();
+                        } else {
+                            ds_cloned
+                                .set_kvattr(ino, &key, &value, KvSetOption::HighPriority)
+                                .await
+                                .unwrap();
+                            kvs.insert(key, value);
+                        }
+
+                        let mut stored_keys = ds_cloned.list_kvattrs(ino).await.unwrap();
+                        stored_keys.sort();
+                        let mut keys: Vec<String> = kvs.keys().map(|k| k.to_owned()).collect();
+                        keys.sort();
+                        assert_eq!(keys, stored_keys);
+
+                        for (k, v) in &kvs {
+                            let value = ds_cloned.get_kvattr(ino, k).await.unwrap();
+                            assert_eq!(*v, value);
+                        }
+
+                        assert_eq!(ds_cloned.get_attr(ino).await.unwrap().reserved, reserved);
+                    }
                 }
             }));
         }
