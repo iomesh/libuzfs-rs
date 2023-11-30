@@ -34,9 +34,14 @@ unzip_src() {
     mv ${DOWNLOAD_DIR}/${ZFS_PKG} ${ZFS_DIR}
 }
 
+CFLAGS="-fPIC -O2 -ftls-model=initial-exec -g"
+if [ "${ENABLE_DEBUG}" = "yes" ]; then
+    CFLAGS="-fPIC"
+fi;
+
 build_libuzfs_lib() {
     cd ${ZFS_DIR}
-    ./autogen.sh && CFLAGS=-fPIC ./configure --with-config=user --enable-shared=no --enable-debuginfo=${ENABLE_DEBUG} --enable-debug=${ENABLE_DEBUG} --prefix=${INSTALL_DIR} && make gitrev
+    ./autogen.sh && CFLAGS=${CFLAGS} ./configure --with-config=user --enable-shared=no --enable-debuginfo=${ENABLE_DEBUG} --enable-debug=${ENABLE_DEBUG} --prefix=${INSTALL_DIR} && make gitrev
     cd lib
     make -j4 && make install
     cd ../include
