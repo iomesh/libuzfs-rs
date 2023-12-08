@@ -290,7 +290,7 @@ pub unsafe extern "C" fn libuzfs_objects_create_c(arg: *mut c_void) {
 
 pub struct LibuzfsDeleteObjectArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
-    pub obj: u64,
+    pub obj_hdl: usize,
 
     pub err: i32,
 }
@@ -301,7 +301,7 @@ unsafe impl Sync for LibuzfsDeleteObjectArg {}
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_delete_object_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsDeleteObjectArg);
-    arg.err = libuzfs_object_delete(arg.dhp, arg.obj);
+    arg.err = libuzfs_object_delete(arg.dhp, arg.obj_hdl as *mut libuzfs_object_handle_t);
 }
 
 #[allow(clippy::missing_safety_doc)]
@@ -312,7 +312,7 @@ pub unsafe extern "C" fn libuzfs_wait_log_commit_c(arg: *mut c_void) {
 
 pub struct LibuzfsGetObjectAttrArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
-    pub obj: u64,
+    pub obj_hdl: usize,
 
     pub attr: uzfs_object_attr_t,
     pub err: i32,
@@ -324,7 +324,11 @@ unsafe impl Sync for LibuzfsGetObjectAttrArg {}
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_get_object_attr_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsGetObjectAttrArg);
-    arg.err = libuzfs_object_get_attr(arg.dhp, arg.obj, &mut arg.attr as *mut uzfs_object_attr_t)
+    arg.err = libuzfs_object_get_attr(
+        arg.dhp,
+        arg.obj_hdl as *mut libuzfs_object_handle_t,
+        &mut arg.attr as *mut uzfs_object_attr_t,
+    )
 }
 
 pub struct LibuzfsListObjectArg {
@@ -362,7 +366,7 @@ pub unsafe extern "C" fn libuzfs_stat_object_c(arg: *mut c_void) {
 
 pub struct LibuzfsReadObjectArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
-    pub obj: u64,
+    pub obj_hdl: usize,
     pub offset: u64,
     pub size: u64,
 
@@ -379,7 +383,7 @@ pub unsafe extern "C" fn libuzfs_read_object_c(arg: *mut c_void) {
 
     let rc = libuzfs_object_read(
         arg.dhp,
-        arg.obj,
+        arg.obj_hdl as *mut libuzfs_object_handle_t,
         arg.offset,
         arg.size,
         arg.data.as_mut_ptr() as *mut c_char,
@@ -395,7 +399,7 @@ pub unsafe extern "C" fn libuzfs_read_object_c(arg: *mut c_void) {
 
 pub struct LibuzfsWriteObjectArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
-    pub obj: u64,
+    pub obj_hdl: usize,
     pub offset: u64,
     pub size: u64,
     pub data: *const c_char,
@@ -413,7 +417,7 @@ pub unsafe extern "C" fn libuzfs_write_object_c(arg: *mut c_void) {
 
     arg.err = libuzfs_object_write(
         arg.dhp,
-        arg.obj,
+        arg.obj_hdl as *mut libuzfs_object_handle_t,
         arg.offset,
         arg.size,
         arg.data,
@@ -423,7 +427,7 @@ pub unsafe extern "C" fn libuzfs_write_object_c(arg: *mut c_void) {
 
 pub struct LibuzfsSyncObjectArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
-    pub obj: u64,
+    pub obj_hdl: usize,
 }
 
 unsafe impl Send for LibuzfsSyncObjectArg {}
@@ -432,12 +436,12 @@ unsafe impl Sync for LibuzfsSyncObjectArg {}
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_sync_object_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsSyncObjectArg);
-    libuzfs_object_sync(arg.dhp, arg.obj);
+    libuzfs_object_sync(arg.dhp, arg.obj_hdl as *mut libuzfs_object_handle_t);
 }
 
 pub struct LibuzfsTruncateObjectArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
-    pub obj: u64,
+    pub obj_hdl: usize,
     pub offset: u64,
     pub size: u64,
 
@@ -450,7 +454,12 @@ unsafe impl Sync for LibuzfsTruncateObjectArg {}
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_truncate_object_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsTruncateObjectArg);
-    arg.err = libuzfs_object_truncate(arg.dhp, arg.obj, arg.offset, arg.size);
+    arg.err = libuzfs_object_truncate(
+        arg.dhp,
+        arg.obj_hdl as *mut libuzfs_object_handle_t,
+        arg.offset,
+        arg.size,
+    );
 }
 
 pub struct LibuzfsDatasetSpaceArg {
@@ -498,6 +507,7 @@ pub struct LibuzfsCreateInode {
     pub dhp: *mut libuzfs_dataset_handle_t,
     pub inode_type: libuzfs_inode_type_t,
 
+    pub ino_hdl: usize,
     pub ino: u64,
     pub txg: u64,
     pub err: i32,
@@ -509,7 +519,13 @@ unsafe impl Sync for LibuzfsCreateInode {}
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_create_inode_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsCreateInode);
-    arg.err = libuzfs_inode_create(arg.dhp, &mut arg.ino, arg.inode_type, &mut arg.txg);
+    arg.ino_hdl = libuzfs_inode_create(
+        arg.dhp,
+        &mut arg.ino,
+        arg.inode_type,
+        &mut arg.txg,
+        &mut arg.err,
+    ) as usize;
 }
 
 pub struct LibuzfsClaimInodeArg {
@@ -517,6 +533,7 @@ pub struct LibuzfsClaimInodeArg {
     pub inode_type: libuzfs_inode_type_t,
     pub ino: u64,
 
+    pub ino_hdl: usize,
     pub err: i32,
 }
 
@@ -526,12 +543,12 @@ unsafe impl Sync for LibuzfsClaimInodeArg {}
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_claim_inode_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsClaimInodeArg);
-    arg.err = libuzfs_inode_claim(arg.dhp, arg.ino, arg.inode_type);
+    arg.ino_hdl = libuzfs_inode_claim(arg.dhp, arg.ino, arg.inode_type, &mut arg.err) as usize;
 }
 
 pub struct LibuzfsDeleteInode {
     pub dhp: *mut libuzfs_dataset_handle_t,
-    pub ino: u64,
+    pub ino_hdl: usize,
     pub inode_type: libuzfs_inode_type_t,
 
     pub err: i32,
@@ -544,12 +561,17 @@ unsafe impl Sync for LibuzfsDeleteInode {}
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_delete_inode_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsDeleteInode);
-    arg.err = libuzfs_inode_delete(arg.dhp, arg.ino, arg.inode_type, &mut arg.txg);
+    arg.err = libuzfs_inode_delete(
+        arg.dhp,
+        arg.ino_hdl as *mut libuzfs_inode_handle_t,
+        arg.inode_type,
+        &mut arg.txg,
+    );
 }
 
 pub struct LibuzfsGetAttrArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
-    pub ino: u64,
+    pub ino_hdl: usize,
     pub reserved: *mut i8,
     pub size: i32,
 
@@ -565,7 +587,7 @@ pub unsafe extern "C" fn libuzfs_inode_getattr_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsGetAttrArg);
     arg.err = libuzfs_inode_getattr(
         arg.dhp,
-        arg.ino,
+        arg.ino_hdl as *mut libuzfs_inode_handle_t,
         &mut arg.attr as *mut uzfs_inode_attr_t,
         arg.reserved,
         &mut arg.size as *mut i32,
@@ -574,7 +596,7 @@ pub unsafe extern "C" fn libuzfs_inode_getattr_c(arg: *mut c_void) {
 
 pub struct LibuzfsSetAttrArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
-    pub ino: u64,
+    pub ino_hdl: usize,
     pub reserved: *const i8,
     pub size: u32,
 
@@ -588,12 +610,18 @@ unsafe impl Sync for LibuzfsSetAttrArg {}
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_set_attr_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsSetAttrArg);
-    arg.err = libuzfs_inode_setattr(arg.dhp, arg.ino, arg.reserved, arg.size, &mut arg.txg);
+    arg.err = libuzfs_inode_setattr(
+        arg.dhp,
+        arg.ino_hdl as *mut libuzfs_inode_handle_t,
+        arg.reserved,
+        arg.size,
+        &mut arg.txg,
+    );
 }
 
 pub struct LibuzfsGetKvattrArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
-    pub ino: u64,
+    pub ino_hdl: usize,
     pub name: *const c_char,
 
     pub data: Vec<u8>,
@@ -609,7 +637,7 @@ pub unsafe extern "C" fn libuzfs_inode_get_kvattr_c(arg: *mut c_void) {
     arg.data = vec![0; MAX_KVATTR_VALUE_SIZE];
     let rc = libuzfs_inode_get_kvattr(
         arg.dhp,
-        arg.ino,
+        arg.ino_hdl as *mut libuzfs_inode_handle_t,
         arg.name,
         arg.data.as_mut_ptr() as *mut i8,
         MAX_KVATTR_VALUE_SIZE as u64,
@@ -625,11 +653,11 @@ pub unsafe extern "C" fn libuzfs_inode_get_kvattr_c(arg: *mut c_void) {
 
 pub struct LibuzfsSetKvAttrArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
-    pub ino: u64,
+    pub ino_hdl: usize,
     pub name: *const c_char,
     pub value: *const c_char,
     pub size: u64,
-    pub flag: libuzfs_kvset_option_t,
+    pub option: libuzfs_kvset_option_t,
 
     pub err: i32,
     pub txg: u64,
@@ -643,18 +671,18 @@ pub unsafe extern "C" fn libuzfs_set_kvattr_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsSetKvAttrArg);
     arg.err = libuzfs_inode_set_kvattr(
         arg.dhp,
-        arg.ino,
+        arg.ino_hdl as *mut libuzfs_inode_handle_t,
         arg.name,
         arg.value,
         arg.size,
         &mut arg.txg,
-        arg.flag,
+        arg.option,
     );
 }
 
 pub struct LibuzfsRemoveKvattrArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
-    pub ino: u64,
+    pub ino_hdl: usize,
     pub name: *const c_char,
 
     pub err: i32,
@@ -668,12 +696,17 @@ unsafe impl Sync for LibuzfsRemoveKvattrArg {}
 pub unsafe extern "C" fn libuzfs_remove_kvattr_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsRemoveKvattrArg);
 
-    arg.err = libuzfs_inode_remove_kvattr(arg.dhp, arg.ino, arg.name, &mut arg.txg);
+    arg.err = libuzfs_inode_remove_kvattr(
+        arg.dhp,
+        arg.ino_hdl as *mut libuzfs_inode_handle_t,
+        arg.name,
+        &mut arg.txg,
+    );
 }
 
 pub struct LibuzfsListKvAttrsArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
-    pub ino: u64,
+    pub ino_hdl: usize,
 
     pub err: i32,
     pub names: Vec<String>,
@@ -685,7 +718,11 @@ unsafe impl Sync for LibuzfsListKvAttrsArg {}
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_list_kvattrs_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsListKvAttrsArg);
-    let iter = libuzfs_new_kvattr_iterator(arg.dhp, arg.ino, &mut arg.err);
+    let iter = libuzfs_new_kvattr_iterator(
+        arg.dhp,
+        arg.ino_hdl as *mut libuzfs_inode_handle_t,
+        &mut arg.err,
+    );
     if iter.is_null() {
         return;
     }
@@ -707,7 +744,7 @@ pub unsafe extern "C" fn libuzfs_list_kvattrs_c(arg: *mut c_void) {
 
 pub struct LibuzfsCreateDentryArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
-    pub pino: u64,
+    pub pino_hdl: usize,
     pub name: *const c_char,
     pub ino: u64,
 
@@ -722,12 +759,18 @@ unsafe impl Sync for LibuzfsCreateDentryArg {}
 pub unsafe extern "C" fn libuzfs_create_dentry_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsCreateDentryArg);
 
-    arg.err = libuzfs_dentry_create(arg.dhp, arg.pino, arg.name, arg.ino, &mut arg.txg);
+    arg.err = libuzfs_dentry_create(
+        arg.dhp,
+        arg.pino_hdl as *mut libuzfs_inode_handle_t,
+        arg.name,
+        arg.ino,
+        &mut arg.txg,
+    );
 }
 
 pub struct LibuzfsDeleteDentryArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
-    pub pino: u64,
+    pub pino_hdl: usize,
     pub name: *const c_char,
 
     pub err: i32,
@@ -741,12 +784,17 @@ unsafe impl Sync for LibuzfsDeleteDentryArg {}
 pub unsafe extern "C" fn libuzfs_delete_entry_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsDeleteDentryArg);
 
-    arg.err = libuzfs_dentry_delete(arg.dhp, arg.pino, arg.name, &mut arg.txg);
+    arg.err = libuzfs_dentry_delete(
+        arg.dhp,
+        arg.pino_hdl as *mut libuzfs_inode_handle_t,
+        arg.name,
+        &mut arg.txg,
+    );
 }
 
 pub struct LibuzfsLookupDentryArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
-    pub pino: u64,
+    pub pino_hdl: usize,
     pub name: *const c_char,
 
     pub ino: u64,
@@ -759,12 +807,17 @@ unsafe impl Sync for LibuzfsLookupDentryArg {}
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_lookup_dentry_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsLookupDentryArg);
-    arg.err = libuzfs_dentry_lookup(arg.dhp, arg.pino, arg.name, &mut arg.ino);
+    arg.err = libuzfs_dentry_lookup(
+        arg.dhp,
+        arg.pino_hdl as *mut libuzfs_inode_handle_t,
+        arg.name,
+        &mut arg.ino,
+    );
 }
 
 pub struct LibuzfsIterateDentryArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
-    pub pino: u64,
+    pub pino_hdl: usize,
     pub whence: u64,
     pub size: u32,
 
@@ -784,7 +837,7 @@ pub unsafe extern "C" fn libuzfs_iterate_dentry_c(arg: *mut c_void) {
 
     arg.err = libuzfs_dentry_iterate(
         arg.dhp,
-        arg.pino,
+        arg.pino_hdl as *mut libuzfs_inode_handle_t,
         arg.whence,
         arg.size,
         arg.data.as_mut_ptr() as *mut c_char,
@@ -798,4 +851,65 @@ pub unsafe extern "C" fn libuzfs_iterate_dentry_c(arg: *mut c_void) {
 pub unsafe extern "C" fn libuzfs_wait_synced_c(arg: *mut c_void) {
     let dhp = arg as *mut libuzfs_dataset_handle_t;
     libuzfs_wait_synced(dhp);
+}
+
+pub struct LibuzfsInodeHandleGetArg {
+    pub dhp: *mut libuzfs_dataset_handle_t,
+    pub ino: u64,
+    pub ino_hdl: usize,
+    pub err: i32,
+}
+
+unsafe impl Send for LibuzfsInodeHandleGetArg {}
+unsafe impl Sync for LibuzfsInodeHandleGetArg {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_inode_handle_get_c(arg: *mut c_void) {
+    let arg = (arg as *mut LibuzfsInodeHandleGetArg).as_mut().unwrap();
+    arg.ino_hdl = libuzfs_inode_handle_get(arg.dhp, arg.ino, &mut arg.err) as usize;
+}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_inode_handle_destroy_c(arg: *mut c_void) {
+    libuzfs_inode_handle_destroy(arg as *mut libuzfs_inode_handle_t);
+}
+
+pub struct LibuzfsObjectHandleGetArg {
+    pub dhp: *mut libuzfs_dataset_handle_t,
+    pub obj: u64,
+    pub obj_hdl: usize,
+    pub err: i32,
+}
+
+unsafe impl Send for LibuzfsObjectHandleGetArg {}
+unsafe impl Sync for LibuzfsObjectHandleGetArg {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_object_handle_get_c(arg: *mut c_void) {
+    let arg = (arg as *mut LibuzfsObjectHandleGetArg).as_mut().unwrap();
+    arg.obj_hdl = libuzfs_object_handle_get(arg.dhp, arg.obj, &mut arg.err) as usize;
+}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_object_handle_destroy_c(arg: *mut c_void) {
+    libuzfs_object_handle_rele(arg as *mut libuzfs_object_handle_t);
+}
+
+pub struct LibuzfsGetSBHandle {
+    pub dhp: *mut libuzfs_dataset_handle_t,
+    pub err: i32,
+    pub hdl: usize,
+}
+
+unsafe impl Send for LibuzfsGetSBHandle {}
+unsafe impl Sync for LibuzfsGetSBHandle {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_superblock_handle_get_c(arg: *mut c_void) {
+    let arg = (arg as *mut LibuzfsGetSBHandle).as_mut().unwrap();
+    let mut sb_ino: u64 = 0;
+    arg.err = libuzfs_dataset_get_superblock_ino(arg.dhp, &mut sb_ino);
+    if arg.err == 0 {
+        arg.hdl = libuzfs_inode_handle_get(arg.dhp, sb_ino, &mut arg.err) as usize;
+    }
 }

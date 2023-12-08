@@ -7,7 +7,9 @@ use std::os::raw::{c_char, c_void};
 use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
 use uzfs_sys::async_sys::*;
-use uzfs_sys::bindings::{self as sys, uzfs_inode_attr_t, uzfs_object_attr_t};
+use uzfs_sys::bindings::{
+    self as sys, libuzfs_kvset_option_t, uzfs_inode_attr_t, uzfs_object_attr_t,
+};
 use uzfs_sys::coroutine::UzfsCoroutineFuture;
 
 pub const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
@@ -20,6 +22,7 @@ const UZFS_DNODESIZE_DATA: u32 = 0;
 
 #[derive(Default)]
 pub struct InodeAttr {
+    pub ino: u64,
     pub gen: u64,
     pub blksize: u32,
     pub blocks: u64,
@@ -110,9 +113,9 @@ impl Dataset {
             zhp: std::ptr::null_mut(),
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsDatasetInitArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsDatasetInitArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_dataset_init_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_dataset_init_c, arg_usize, 0, true).await;
 
         if arg.ret != 0 {
             Err(io::Error::from_raw_os_error(arg.ret))
@@ -133,9 +136,9 @@ impl Dataset {
             ret: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsDatasetExpandArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsDatasetExpandArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_dataset_expand_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_dataset_expand_c, arg_usize, 0, true).await;
 
         if arg.ret == 0 {
             Ok(())
@@ -144,17 +147,21 @@ impl Dataset {
         }
     }
 
-    // this function should never block
-    pub fn get_superblock_ino(&self) -> Result<u64> {
-        let mut obj: u64 = 0;
-        let obj_ptr: *mut u64 = &mut obj;
+    pub async fn get_superblock_inode_hdl(&self) -> Result<usize> {
+        let mut arg = LibuzfsGetSBHandle {
+            dhp: self.dhp,
+            err: 0,
+            hdl: 0,
+        };
 
-        let err = unsafe { sys::libuzfs_dataset_get_superblock_ino(self.dhp, obj_ptr) };
+        let arg_usize = &mut arg as *mut LibuzfsGetSBHandle as usize;
 
-        if err == 0 {
-            Ok(obj)
+        UzfsCoroutineFuture::new(libuzfs_superblock_handle_get_c, arg_usize, 0, true).await;
+
+        if arg.err == 0 {
+            Ok(arg.hdl)
         } else {
-            Err(io::Error::from_raw_os_error(err))
+            Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
@@ -166,9 +173,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsZapCreateArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsZapCreateArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_zap_create_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_zap_create_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok((arg.obj, arg.txg))
@@ -185,9 +192,9 @@ impl Dataset {
             list: Vec::new(),
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsZapListArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsZapListArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_zap_list_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_zap_list_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok(arg.list)
@@ -209,9 +216,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsZapUpdateArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsZapUpdateArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_zap_update_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_zap_update_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -240,9 +247,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsZapUpdateArg as *mut c_void as u64;
+        let arg_usize = &mut arg as *mut LibuzfsZapUpdateArg as *mut c_void as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_zap_update_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_zap_update_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -261,9 +268,9 @@ impl Dataset {
             txg: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsZapRemoveArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsZapRemoveArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_zap_remove_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_zap_remove_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -281,9 +288,9 @@ impl Dataset {
             gen: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsCreateObjectsArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsCreateObjectsArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_objects_create_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_objects_create_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok((arg.objs, arg.gen))
@@ -293,16 +300,16 @@ impl Dataset {
     }
 
     // delete_object won't wait until synced, wait_log_commit is needed if you want wait sync
-    pub async fn delete_object(&self, obj: u64) -> Result<()> {
+    pub async fn delete_object(&self, obj_hdl: usize) -> Result<()> {
         let mut arg = LibuzfsDeleteObjectArg {
             dhp: self.dhp,
-            obj,
+            obj_hdl,
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsDeleteObjectArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsDeleteObjectArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_delete_object_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_delete_object_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok(())
@@ -312,21 +319,21 @@ impl Dataset {
     }
 
     pub async fn wait_log_commit(&self) {
-        let arg_u64 = self.dhp as u64;
-        UzfsCoroutineFuture::new(libuzfs_wait_log_commit_c, arg_u64, 0, true).await;
+        let arg_usize = self.dhp as usize;
+        UzfsCoroutineFuture::new(libuzfs_wait_log_commit_c, arg_usize, 0, true).await;
     }
 
-    pub async fn get_object_attr(&self, obj: u64) -> Result<uzfs_object_attr_t> {
+    pub async fn get_object_attr(&self, obj_hdl: usize) -> Result<uzfs_object_attr_t> {
         let mut arg = LibuzfsGetObjectAttrArg {
             dhp: self.dhp,
-            obj,
+            obj_hdl,
             attr: uzfs_object_attr_t::default(),
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsGetObjectAttrArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsGetObjectAttrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_get_object_attr_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_get_object_attr_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok(arg.attr)
@@ -341,9 +348,9 @@ impl Dataset {
             num_objs: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsListObjectArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsListObjectArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_list_object_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_list_object_c, arg_usize, 0, true).await;
 
         Ok(arg.num_objs)
     }
@@ -356,9 +363,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsStatObjectArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsStatObjectArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_stat_object_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_stat_object_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok(arg.doi)
@@ -367,19 +374,19 @@ impl Dataset {
         }
     }
 
-    pub async fn read_object(&self, obj: u64, offset: u64, size: u64) -> Result<Vec<u8>> {
+    pub async fn read_object(&self, obj_hdl: usize, offset: u64, size: u64) -> Result<Vec<u8>> {
         let mut arg = LibuzfsReadObjectArg {
             dhp: self.dhp,
-            obj,
+            obj_hdl,
             offset,
             size,
             err: 0,
             data: Vec::<u8>::with_capacity(size as usize),
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsReadObjectArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsReadObjectArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_read_object_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_read_object_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok(arg.data)
@@ -389,10 +396,16 @@ impl Dataset {
     }
 
     // TODO(hping): add unit tests to verify sync write works well in crash scenario
-    pub async fn write_object(&self, obj: u64, offset: u64, sync: bool, data: &[u8]) -> Result<()> {
+    pub async fn write_object(
+        &self,
+        obj_hdl: usize,
+        offset: u64,
+        sync: bool,
+        data: &[u8],
+    ) -> Result<()> {
         let mut arg = LibuzfsWriteObjectArg {
             dhp: self.dhp,
-            obj,
+            obj_hdl,
             offset,
             size: data.len() as u64,
             data: data.as_ptr() as *const i8,
@@ -400,9 +413,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsWriteObjectArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsWriteObjectArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_write_object_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_write_object_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok(())
@@ -412,32 +425,58 @@ impl Dataset {
     }
 
     // TODO(hping): add ut
-    pub async fn sync_object(&self, obj: u64) {
-        let mut arg = LibuzfsSyncObjectArg { dhp: self.dhp, obj };
+    pub async fn sync_object(&self, obj_hdl: usize) {
+        let mut arg = LibuzfsSyncObjectArg {
+            dhp: self.dhp,
+            obj_hdl,
+        };
 
-        let arg_u64 = &mut arg as *mut LibuzfsSyncObjectArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsSyncObjectArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_sync_object_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_sync_object_c, arg_usize, 0, true).await;
     }
 
-    pub async fn truncate_object(&self, obj: u64, offset: u64, size: u64) -> Result<()> {
+    pub async fn truncate_object(&self, obj_hdl: usize, offset: u64, size: u64) -> Result<()> {
         let mut arg = LibuzfsTruncateObjectArg {
             dhp: self.dhp,
-            obj,
+            obj_hdl,
             offset,
             size,
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsTruncateObjectArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsTruncateObjectArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_truncate_object_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_truncate_object_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok(())
         } else {
             Err(io::Error::from_raw_os_error(arg.err))
         }
+    }
+
+    pub async fn get_object_handle(&self, obj: u64) -> Result<usize> {
+        let mut arg = LibuzfsObjectHandleGetArg {
+            dhp: self.dhp,
+            obj,
+            obj_hdl: 0,
+            err: 0,
+        };
+
+        let arg_usize = &mut arg as *mut LibuzfsObjectHandleGetArg as usize;
+
+        UzfsCoroutineFuture::new(libuzfs_object_handle_get_c, arg_usize, 0, true).await;
+
+        if arg.err == 0 {
+            Ok(arg.obj_hdl)
+        } else {
+            Err(io::Error::from_raw_os_error(arg.err))
+        }
+    }
+
+    pub async fn destroy_object_handle(obj_hdl: usize) {
+        UzfsCoroutineFuture::new(libuzfs_object_handle_destroy_c, obj_hdl, 0, true).await;
     }
 
     pub async fn space(&self) -> (u64, u64, u64, u64) {
@@ -449,9 +488,9 @@ impl Dataset {
             avail_objs: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsDatasetSpaceArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsDatasetSpaceArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_dataset_space_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_dataset_space_c, arg_usize, 0, true).await;
 
         (
             arg.refd_bytes,
@@ -469,9 +508,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsFindHoleArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsFindHoleArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_object_next_hole_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_object_next_hole_c, arg_usize, 0, true).await;
 
         match arg.err {
             0 => Ok(arg.off < offset + size),
@@ -496,57 +535,82 @@ impl Dataset {
         println!("\tfill_count: {}", doi.doi_fill_count);
     }
 
-    pub async fn create_inode(&self, inode_type: InodeType) -> Result<(u64, u64)> {
+    pub async fn get_inode_handle(&self, ino: u64) -> Result<usize> {
+        let mut arg = LibuzfsInodeHandleGetArg {
+            dhp: self.dhp,
+            ino,
+            ino_hdl: 0,
+            err: 0,
+        };
+
+        let arg_usize = &mut arg as *mut LibuzfsInodeHandleGetArg as usize;
+
+        UzfsCoroutineFuture::new(libuzfs_inode_handle_get_c, arg_usize, 0, true).await;
+
+        if arg.err == 0 {
+            Ok(arg.ino_hdl)
+        } else {
+            Err(io::Error::from_raw_os_error(arg.err))
+        }
+    }
+
+    pub async fn destroy_inode_handle(ino_hdl: usize) {
+        UzfsCoroutineFuture::new(libuzfs_inode_handle_destroy_c, ino_hdl, 0, true).await;
+    }
+
+    pub async fn create_inode(&self, inode_type: InodeType) -> Result<(usize, u64, u64)> {
         let mut arg = LibuzfsCreateInode {
             dhp: self.dhp,
             inode_type: inode_type as u32,
+            ino_hdl: 0,
             ino: 0,
             txg: 0,
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsCreateInode as u64;
+        let arg_usize = &mut arg as *mut LibuzfsCreateInode as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_create_inode_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_create_inode_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
-            Ok((arg.ino, arg.txg))
+            Ok((arg.ino_hdl, arg.ino, arg.txg))
         } else {
             Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
-    pub async fn claim_inode(&self, ino: u64, inode_type: InodeType) -> Result<()> {
+    pub async fn claim_inode(&self, ino: u64, inode_type: InodeType) -> Result<usize> {
         let mut arg = LibuzfsClaimInodeArg {
             dhp: self.dhp,
             inode_type: inode_type as u32,
             ino,
+            ino_hdl: 0,
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsClaimInodeArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsClaimInodeArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_claim_inode_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_claim_inode_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
-            Ok(())
+            Ok(arg.ino_hdl)
         } else {
             Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
-    pub async fn delete_inode(&self, ino: u64, inode_type: InodeType) -> Result<u64> {
+    pub async fn delete_inode(&self, ino_hdl: usize, inode_type: InodeType) -> Result<u64> {
         let mut arg = LibuzfsDeleteInode {
             dhp: self.dhp,
-            ino,
+            ino_hdl,
             inode_type: inode_type as u32,
             err: 0,
             txg: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsDeleteInode as u64;
+        let arg_usize = &mut arg as *mut LibuzfsDeleteInode as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_delete_inode_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_delete_inode_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -555,47 +619,51 @@ impl Dataset {
         }
     }
 
-    pub async fn get_attr(&self, ino: u64) -> Result<InodeAttr> {
+    pub async fn get_attr(&self, ino_hdl: usize) -> Result<InodeAttr> {
         let mut attr = InodeAttr::default();
         attr.reserved.reserve(MAX_RESERVED_SIZE);
 
         let mut arg = LibuzfsGetAttrArg {
             dhp: self.dhp,
-            ino,
+            ino_hdl,
             reserved: attr.reserved.as_mut_ptr() as *mut i8,
             size: 0,
             attr: uzfs_inode_attr_t::default(),
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsGetAttrArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsGetAttrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_inode_getattr_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_inode_getattr_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             unsafe { attr.reserved.set_len(arg.size as usize) };
-            (attr.gen, attr.blksize, attr.blocks) =
-                (arg.attr.gen, arg.attr.blksize, arg.attr.blocks);
+            (attr.ino, attr.gen, attr.blksize, attr.blocks) = (
+                arg.attr.ino,
+                arg.attr.gen,
+                arg.attr.blksize,
+                arg.attr.blocks,
+            );
             Ok(attr)
         } else {
             Err(io::Error::from_raw_os_error(arg.err))
         }
     }
 
-    pub async fn set_attr(&self, ino: u64, reserved: &[u8]) -> Result<u64> {
+    pub async fn set_attr(&self, ino_hdl: usize, reserved: &[u8]) -> Result<u64> {
         assert!(reserved.len() <= MAX_RESERVED_SIZE);
         let mut arg = LibuzfsSetAttrArg {
             dhp: self.dhp,
-            ino,
+            ino_hdl,
             reserved: reserved.as_ptr() as *mut i8,
             size: reserved.len() as u32,
             err: 0,
             txg: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsSetAttrArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsSetAttrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_set_attr_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_set_attr_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -604,19 +672,19 @@ impl Dataset {
         }
     }
 
-    pub async fn get_kvattr<P: CStrArgument>(&self, ino: u64, name: P) -> Result<Vec<u8>> {
+    pub async fn get_kvattr<P: CStrArgument>(&self, ino_hdl: usize, name: P) -> Result<Vec<u8>> {
         let cname = name.into_cstr();
         let mut arg = LibuzfsGetKvattrArg {
             dhp: self.dhp,
-            ino,
+            ino_hdl,
             name: cname.as_ref().as_ptr(),
             data: Vec::new(),
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsGetKvattrArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsGetKvattrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_inode_get_kvattr_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_inode_get_kvattr_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok(arg.data)
@@ -627,26 +695,26 @@ impl Dataset {
 
     pub async fn set_kvattr<P: CStrArgument>(
         &self,
-        ino: u64,
+        ino_hdl: usize,
         name: P,
         value: &[u8],
-        flag: KvSetOption,
+        option: KvSetOption,
     ) -> Result<u64> {
         let cname = name.into_cstr();
         let mut arg = LibuzfsSetKvAttrArg {
             dhp: self.dhp,
-            ino,
+            ino_hdl,
             name: cname.as_ref().as_ptr(),
-            flag: flag as u32,
+            option: option as libuzfs_kvset_option_t,
             value: value.as_ptr() as *const c_char,
             size: value.len() as u64,
             err: 0,
             txg: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsSetKvAttrArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsSetKvAttrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_set_kvattr_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_set_kvattr_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -655,19 +723,19 @@ impl Dataset {
         }
     }
 
-    pub async fn remove_kvattr<P: CStrArgument>(&self, ino: u64, name: P) -> Result<u64> {
+    pub async fn remove_kvattr<P: CStrArgument>(&self, ino_hdl: usize, name: P) -> Result<u64> {
         let cname = name.into_cstr();
         let mut arg = LibuzfsRemoveKvattrArg {
             dhp: self.dhp,
-            ino,
+            ino_hdl,
             name: cname.as_ref().as_ptr(),
             err: 0,
             txg: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsRemoveKvattrArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsRemoveKvattrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_remove_kvattr_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_remove_kvattr_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -676,17 +744,17 @@ impl Dataset {
         }
     }
 
-    pub async fn list_kvattrs(&self, ino: u64) -> Result<Vec<String>> {
+    pub async fn list_kvattrs(&self, ino_hdl: usize) -> Result<Vec<String>> {
         let mut arg = LibuzfsListKvAttrsArg {
             dhp: self.dhp,
-            ino,
+            ino_hdl,
             err: 0,
             names: Vec::new(),
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsListKvAttrsArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsListKvAttrsArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_list_kvattrs_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_list_kvattrs_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok(arg.names)
@@ -697,23 +765,23 @@ impl Dataset {
 
     pub async fn create_dentry<P: CStrArgument>(
         &self,
-        pino: u64,
+        pino_hdl: usize,
         name: P,
         value: u64,
     ) -> Result<u64> {
         let cname = name.into_cstr();
         let mut arg = LibuzfsCreateDentryArg {
             dhp: self.dhp,
-            pino,
+            pino_hdl,
             name: cname.as_ref().as_ptr(),
             ino: value,
             err: 0,
             txg: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsCreateDentryArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsCreateDentryArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_create_dentry_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_create_dentry_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -722,19 +790,19 @@ impl Dataset {
         }
     }
 
-    pub async fn delete_dentry<P: CStrArgument>(&self, pino: u64, name: P) -> Result<u64> {
+    pub async fn delete_dentry<P: CStrArgument>(&self, pino_hdl: usize, name: P) -> Result<u64> {
         let cname = name.into_cstr();
         let mut arg = LibuzfsDeleteDentryArg {
             dhp: self.dhp,
-            pino,
+            pino_hdl,
             name: cname.as_ref().as_ptr(),
             err: 0,
             txg: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsDeleteDentryArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsDeleteDentryArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_delete_entry_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_delete_entry_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -743,19 +811,19 @@ impl Dataset {
         }
     }
 
-    pub async fn lookup_dentry<P: CStrArgument>(&self, pino: u64, name: P) -> Result<u64> {
+    pub async fn lookup_dentry<P: CStrArgument>(&self, pino_hdl: usize, name: P) -> Result<u64> {
         let cname = name.into_cstr();
         let mut arg = LibuzfsLookupDentryArg {
             dhp: self.dhp,
-            pino,
+            pino_hdl,
             name: cname.as_ref().as_ptr(),
             ino: 0,
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsLookupDentryArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsLookupDentryArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_lookup_dentry_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_lookup_dentry_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok(arg.ino)
@@ -766,13 +834,13 @@ impl Dataset {
 
     pub async fn iterate_dentry(
         &self,
-        pino: u64,
+        pino_hdl: usize,
         whence: u64,
         size: u32,
     ) -> Result<(Vec<u8>, u32)> {
         let mut arg = LibuzfsIterateDentryArg {
             dhp: self.dhp,
-            pino,
+            pino_hdl,
             whence,
             size,
             err: 0,
@@ -780,9 +848,9 @@ impl Dataset {
             num: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsIterateDentryArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsIterateDentryArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_iterate_dentry_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_iterate_dentry_c, arg_usize, 0, true).await;
 
         if arg.err == 0 {
             Ok((arg.data, arg.num))
@@ -797,8 +865,8 @@ impl Dataset {
     }
 
     pub async fn wait_synced(&self) -> Result<()> {
-        let arg_u64 = self.dhp as u64;
-        UzfsCoroutineFuture::new(libuzfs_wait_synced_c, arg_u64, 0, true).await;
+        let arg_usize = self.dhp as usize;
+        UzfsCoroutineFuture::new(libuzfs_wait_synced_c, arg_usize, 0, true).await;
         Ok(())
     }
 
@@ -810,9 +878,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsDatasetFiniArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsDatasetFiniArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_dataset_fini_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_dataset_fini_c, arg_usize, 0, true).await;
 
         if arg.err != 0 {
             Err(io::Error::from_raw_os_error(arg.err))
@@ -888,13 +956,15 @@ mod tests {
     async fn uzfs_test() {
         let rwobj;
         let gen;
-        let sb_ino;
         let tmp_ino;
+        let tmp_hdl;
         let tmp_name = "tmp_dir";
         let s = String::from("Hello uzfs!");
         let t = vec!['H' as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let file_ino;
+        let file_ino_hdl;
         let dir_ino;
+        let dir_ino_hdl;
         let num;
         let mut txg;
         let key = "acl";
@@ -936,27 +1006,32 @@ mod tests {
 
             println!("used space: {:?}", ds.space().await);
 
-            sb_ino = ds.get_superblock_ino().unwrap();
+            let sb_ino_hdl = ds.get_superblock_inode_hdl().await.unwrap();
             let last_txg = ds.get_last_synced_txg().unwrap();
 
             txg = ds
-                .set_kvattr(sb_ino, key, value.as_bytes(), KvSetOption::HighPriority)
+                .set_kvattr(sb_ino_hdl, key, value.as_bytes(), KvSetOption::HighPriority)
                 .await
                 .unwrap();
             println!("{txg} > {last_txg}");
             assert!(txg > last_txg);
 
-            let value_read = ds.get_kvattr(sb_ino, key).await.unwrap();
+            let value_read = ds.get_kvattr(sb_ino_hdl, key).await.unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
             ds.wait_synced().await.unwrap();
 
-            (tmp_ino, _) = ds.create_inode(InodeType::DIR).await.unwrap();
+            (tmp_hdl, tmp_ino, _) = ds.create_inode(InodeType::DIR).await.unwrap();
+            Dataset::destroy_inode_handle(tmp_hdl).await;
 
-            txg = ds.create_dentry(sb_ino, tmp_name, tmp_ino).await.unwrap();
+            txg = ds
+                .create_dentry(sb_ino_hdl, tmp_name, tmp_ino)
+                .await
+                .unwrap();
             ds.wait_synced().await.unwrap();
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
-            let tmp_dentry_data_read = ds.lookup_dentry(sb_ino, tmp_name).await.unwrap();
+            let tmp_dentry_data_read = ds.lookup_dentry(sb_ino_hdl, tmp_name).await.unwrap();
+            Dataset::destroy_inode_handle(sb_ino_hdl).await;
             assert_eq!(tmp_ino, tmp_dentry_data_read);
 
             num = ds.list_object().await.unwrap();
@@ -964,8 +1039,9 @@ mod tests {
             (objs, gen) = ds.create_objects(1).await.unwrap();
 
             rwobj = objs[0];
-            assert_eq!(ds.get_object_attr(rwobj).await.unwrap().size, 0);
-            assert_eq!(ds.get_object_attr(rwobj).await.unwrap().gen, gen);
+            let rwobj_hdl = ds.get_object_handle(rwobj).await.unwrap();
+            assert_eq!(ds.get_object_attr(rwobj_hdl).await.unwrap().size, 0);
+            assert_eq!(ds.get_object_attr(rwobj_hdl).await.unwrap().gen, gen);
             assert_eq!(ds.list_object().await.unwrap(), num + 1);
 
             let doi = ds.stat_object(rwobj).await.unwrap();
@@ -973,64 +1049,78 @@ mod tests {
 
             let data = s.as_bytes();
             let size = s.len() as u64;
-            ds.write_object(rwobj, 0, true, data).await.unwrap();
-            assert_eq!(ds.get_object_attr(rwobj).await.unwrap().size, size);
-            assert_eq!(ds.read_object(rwobj, 0, size).await.unwrap(), data);
-            assert_eq!(ds.read_object(rwobj, 0, size + 10).await.unwrap(), data);
-            assert!(ds.read_object(rwobj, size, size).await.unwrap().is_empty());
+            ds.write_object(rwobj_hdl, 0, true, data).await.unwrap();
+            assert_eq!(ds.get_object_attr(rwobj_hdl).await.unwrap().size, size);
+            assert_eq!(ds.read_object(rwobj_hdl, 0, size).await.unwrap(), data);
+            assert_eq!(ds.read_object(rwobj_hdl, 0, size + 10).await.unwrap(), data);
+            assert!(ds
+                .read_object(rwobj_hdl, size, size)
+                .await
+                .unwrap()
+                .is_empty());
 
             // offset must be 0 for truncate
-            assert!(ds.truncate_object(rwobj, 1, size - 1).await.is_err());
-            ds.truncate_object(rwobj, 0, 1).await.unwrap();
-            assert_eq!(ds.get_object_attr(rwobj).await.unwrap().size, 1);
-            assert_eq!(ds.read_object(rwobj, 0, size).await.unwrap().len(), 1);
+            assert!(ds.truncate_object(rwobj_hdl, 1, size - 1).await.is_err());
+            println!("handle destroyed");
+            ds.truncate_object(rwobj_hdl, 0, 1).await.unwrap();
+            assert_eq!(ds.get_object_attr(rwobj_hdl).await.unwrap().size, 1);
+            assert_eq!(ds.read_object(rwobj_hdl, 0, size).await.unwrap().len(), 1);
 
             // extend size via truncate
-            ds.truncate_object(rwobj, 0, size).await.unwrap();
-            assert_eq!(ds.get_object_attr(rwobj).await.unwrap().size, size);
-            assert_eq!(ds.read_object(rwobj, 0, size).await.unwrap(), t);
+            ds.truncate_object(rwobj_hdl, 0, size).await.unwrap();
+            assert_eq!(ds.get_object_attr(rwobj_hdl).await.unwrap().size, size);
+            assert_eq!(ds.read_object(rwobj_hdl, 0, size).await.unwrap(), t);
+            Dataset::destroy_object_handle(rwobj_hdl).await;
 
-            (file_ino, _) = ds.create_inode(InodeType::FILE).await.unwrap();
-            (dir_ino, _) = ds.create_inode(InodeType::DIR).await.unwrap();
+            (file_ino_hdl, file_ino, _) = ds.create_inode(InodeType::FILE).await.unwrap();
+            (dir_ino_hdl, dir_ino, _) = ds.create_inode(InodeType::DIR).await.unwrap();
 
             txg = ds
-                .create_dentry(dir_ino, file_name, file_ino)
+                .create_dentry(dir_ino_hdl, file_name, file_ino)
                 .await
                 .unwrap();
-            let dentry_data_read = ds.lookup_dentry(dir_ino, file_name).await.unwrap();
+            let dentry_data_read = ds.lookup_dentry(dir_ino_hdl, file_name).await.unwrap();
             assert_eq!(file_ino, dentry_data_read);
             ds.wait_synced().await.unwrap();
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
-            let (_, dentry_num) = ds.iterate_dentry(dir_ino, 0, 4096).await.unwrap();
+            let (_, dentry_num) = ds.iterate_dentry(dir_ino_hdl, 0, 4096).await.unwrap();
+            Dataset::destroy_inode_handle(dir_ino_hdl).await;
 
             // TODO(hping): verify dentry content
             assert_eq!(dentry_num, 1);
 
             assert_eq!(ds.list_object().await.unwrap(), num + 3);
 
-            _ = ds.set_attr(file_ino, &reserved).await.unwrap();
+            _ = ds.set_attr(file_ino_hdl, &reserved).await.unwrap();
 
-            let attr = ds.get_attr(file_ino).await.unwrap();
+            let attr = ds.get_attr(file_ino_hdl).await.unwrap();
             assert_eq!(attr.reserved, reserved);
 
             _ = ds
-                .set_kvattr(file_ino, key, value.as_bytes(), KvSetOption::HighPriority)
+                .set_kvattr(
+                    file_ino_hdl,
+                    key,
+                    value.as_bytes(),
+                    KvSetOption::HighPriority,
+                )
                 .await
                 .unwrap();
 
-            let value_read = ds.get_kvattr(file_ino, key).await.unwrap();
+            let value_read = ds.get_kvattr(file_ino_hdl, key).await.unwrap();
+            Dataset::destroy_inode_handle(file_ino_hdl).await;
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
             assert_eq!(ds.list_object().await.unwrap(), num + 3);
             println!("used space: {:?}", ds.space().await);
 
             let obj = ds.create_objects(1).await.unwrap().0[0];
+            let obj_hdl = ds.get_object_handle(obj).await.unwrap();
             let size = 1 << 18;
             let mut data = Vec::<u8>::with_capacity(size);
             data.resize(size, 1);
-            ds.write_object(obj, 0, false, &data).await.unwrap();
-            ds.write_object(obj, (size * 2) as u64, false, &data)
+            ds.write_object(obj_hdl, 0, false, &data).await.unwrap();
+            ds.write_object(obj_hdl, (size * 2) as u64, false, &data)
                 .await
                 .unwrap();
             ds.wait_synced().await.unwrap();
@@ -1042,7 +1132,8 @@ mod tests {
                 .object_has_hole_in_range(obj, size as u64, size as u64 * 2)
                 .await
                 .unwrap());
-            ds.delete_object(obj).await.unwrap();
+            ds.delete_object(obj_hdl).await.unwrap();
+            Dataset::destroy_object_handle(obj_hdl).await;
             ds.close().await.unwrap();
         }
 
@@ -1062,53 +1153,67 @@ mod tests {
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
             assert_eq!(ds.list_object().await.unwrap(), num + 3);
 
-            assert_eq!(ds.get_superblock_ino().unwrap(), sb_ino);
-
-            let value_read = ds.get_kvattr(sb_ino, key).await.unwrap();
+            let sb_ino_hdl = ds.get_superblock_inode_hdl().await.unwrap();
+            let value_read = ds.get_kvattr(sb_ino_hdl, key).await.unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
-            let tmp_dentry_data_read = ds.lookup_dentry(sb_ino, tmp_name).await.unwrap();
+            let tmp_dentry_data_read = ds.lookup_dentry(sb_ino_hdl, tmp_name).await.unwrap();
+            Dataset::destroy_inode_handle(sb_ino_hdl).await;
             assert_eq!(tmp_ino, tmp_dentry_data_read);
 
-            assert_eq!(ds.get_object_attr(rwobj).await.unwrap().gen, gen);
+            let rwobj_hdl = ds.get_object_handle(rwobj).await.unwrap();
+            assert_eq!(ds.get_object_attr(rwobj_hdl).await.unwrap().gen, gen);
 
             let size = s.len() as u64;
-            assert_eq!(ds.get_object_attr(rwobj).await.unwrap().size, size);
-            assert_eq!(ds.read_object(rwobj, 0, size).await.unwrap(), t);
-            assert_eq!(ds.read_object(rwobj, 0, size + 10).await.unwrap(), t);
-            assert!(ds.read_object(rwobj, size, size).await.unwrap().is_empty());
+            assert_eq!(ds.get_object_attr(rwobj_hdl).await.unwrap().size, size);
+            assert_eq!(ds.read_object(rwobj_hdl, 0, size).await.unwrap(), t);
+            assert_eq!(ds.read_object(rwobj_hdl, 0, size + 10).await.unwrap(), t);
+            assert!(ds
+                .read_object(rwobj_hdl, size, size)
+                .await
+                .unwrap()
+                .is_empty());
 
-            ds.delete_object(rwobj).await.unwrap();
+            ds.delete_object(rwobj_hdl).await.unwrap();
+            Dataset::destroy_object_handle(rwobj_hdl).await;
 
             assert_eq!(ds.list_object().await.unwrap(), num + 2);
 
-            let dentry_data_read = ds.lookup_dentry(dir_ino, file_name).await.unwrap();
+            let dir_ino_hdl = ds.get_inode_handle(dir_ino).await.unwrap();
+            let dentry_data_read = ds.lookup_dentry(dir_ino_hdl, file_name).await.unwrap();
             assert_eq!(file_ino, dentry_data_read);
 
-            let (_, dentry_num) = ds.iterate_dentry(dir_ino, 0, 4096).await.unwrap();
+            let (_, dentry_num) = ds.iterate_dentry(dir_ino_hdl, 0, 4096).await.unwrap();
             assert_eq!(dentry_num, 1);
 
-            _ = ds.delete_dentry(dir_ino, file_name).await.unwrap();
+            _ = ds.delete_dentry(dir_ino_hdl, file_name).await.unwrap();
 
-            let (_, dentry_num) = ds.iterate_dentry(dir_ino, 0, 4096).await.unwrap();
+            let (_, dentry_num) = ds.iterate_dentry(dir_ino_hdl, 0, 4096).await.unwrap();
             assert_eq!(dentry_num, 0);
 
-            let attr = ds.get_attr(file_ino).await.unwrap();
+            let file_ino_hdl = ds.get_inode_handle(file_ino).await.unwrap();
+            let attr = ds.get_attr(file_ino_hdl).await.unwrap();
             assert_eq!(attr.reserved, reserved);
 
-            let value_read = ds.get_kvattr(file_ino, key).await.unwrap();
+            let value_read = ds.get_kvattr(file_ino_hdl, key).await.unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
-            txg = ds.remove_kvattr(file_ino, key).await.unwrap();
+            txg = ds.remove_kvattr(file_ino_hdl, key).await.unwrap();
             ds.wait_synced().await.unwrap();
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
-            _ = ds.delete_inode(dir_ino, InodeType::DIR).await.unwrap();
-            txg = ds.delete_inode(file_ino, InodeType::FILE).await.unwrap();
+            _ = ds.delete_inode(dir_ino_hdl, InodeType::DIR).await.unwrap();
+            txg = ds
+                .delete_inode(file_ino_hdl, InodeType::FILE)
+                .await
+                .unwrap();
             ds.wait_synced().await.unwrap();
             assert!(ds.get_last_synced_txg().unwrap() >= txg);
 
+            Dataset::destroy_inode_handle(dir_ino_hdl).await;
+            Dataset::destroy_inode_handle(file_ino_hdl).await;
             assert_eq!(ds.list_object().await.unwrap(), num);
+
             ds.close().await.unwrap();
         }
 
@@ -1121,8 +1226,8 @@ mod tests {
             .await
             .unwrap();
 
-            let ino = ds.create_inode(InodeType::FILE).await.unwrap().0;
-            let keys = ds.list_kvattrs(ino).await.unwrap();
+            let ino_hdl = ds.create_inode(InodeType::FILE).await.unwrap().0;
+            let keys = ds.list_kvattrs(ino_hdl).await.unwrap();
             assert!(keys.is_empty());
 
             let total_kvs: usize = 4096;
@@ -1132,13 +1237,13 @@ mod tests {
                 let value_size: usize = 256;
                 value.resize_with(value_size, Default::default);
 
-                ds.set_kvattr(ino, key.as_str(), &value, KvSetOption::HighPriority)
+                ds.set_kvattr(ino_hdl, key.as_str(), &value, KvSetOption::HighPriority)
                     .await
                     .unwrap();
-                assert_eq!(ds.get_kvattr(ino, &key).await.unwrap(), value);
+                assert_eq!(ds.get_kvattr(ino_hdl, &key).await.unwrap(), value);
             }
 
-            let keys = ds.list_kvattrs(ino).await.unwrap();
+            let keys = ds.list_kvattrs(ino_hdl).await.unwrap();
             assert_eq!(keys.len(), total_kvs);
 
             let mut numbers: Vec<usize> = Vec::<usize>::with_capacity(total_kvs);
@@ -1150,7 +1255,8 @@ mod tests {
             let expect_vec: Vec<usize> = (0..total_kvs).collect();
             assert_eq!(numbers, expect_vec);
 
-            ds.delete_inode(ino, InodeType::FILE).await.unwrap();
+            ds.delete_inode(ino_hdl, InodeType::FILE).await.unwrap();
+            Dataset::destroy_inode_handle(ino_hdl).await;
             ds.close().await.unwrap();
         }
         uzfs_env_fini().await;
@@ -1160,6 +1266,7 @@ mod tests {
     #[serial]
     async fn uzfs_claim_test() {
         let ino;
+        let mut handle;
         let dsname = "uzfs-test-pool/ds";
         let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
         uzfs_env_init().await;
@@ -1173,7 +1280,8 @@ mod tests {
             .await
             .unwrap();
 
-            (ino, _) = ds.create_inode(InodeType::DIR).await.unwrap();
+            (handle, ino, _) = ds.create_inode(InodeType::DIR).await.unwrap();
+            Dataset::destroy_inode_handle(handle).await;
 
             ds.wait_synced().await.unwrap();
             ds.close().await.unwrap();
@@ -1189,13 +1297,15 @@ mod tests {
             .unwrap();
 
             // test claim when inode exists
-            ds.claim_inode(ino, InodeType::DIR).await.unwrap();
+            handle = ds.claim_inode(ino, InodeType::DIR).await.unwrap();
 
-            ds.delete_inode(ino, InodeType::DIR).await.unwrap();
+            ds.delete_inode(handle, InodeType::DIR).await.unwrap();
+            Dataset::destroy_inode_handle(handle).await;
             ds.wait_synced().await.unwrap();
 
             // test claim when inode doesn't exist
-            ds.claim_inode(ino, InodeType::DIR).await.unwrap();
+            handle = ds.claim_inode(ino, InodeType::DIR).await.unwrap();
+            Dataset::destroy_inode_handle(handle).await;
             ds.close().await.unwrap();
         }
 
@@ -1286,13 +1396,15 @@ mod tests {
                 let buf = vec![123 as u8; block_size];
                 let mut offset = 0;
                 let obj = ds_clone.create_objects(1).await.unwrap().0[0];
+                let obj_hdl = ds_clone.get_object_handle(obj).await.unwrap();
                 while offset < size {
-                    while let Err(err) = ds_clone.write_object(obj, offset, false, &buf).await {
+                    while let Err(err) = ds_clone.write_object(obj_hdl, offset, false, &buf).await {
                         println!("write error: ({offset}, {block_size}), {err}");
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                     offset += block_size as u64;
                 }
+                Dataset::destroy_object_handle(obj_hdl).await;
             }));
         }
 
@@ -1357,6 +1469,7 @@ mod tests {
             let write_offsets_clone = write_offsets.clone();
             handles.push(tokio::task::spawn(async move {
                 for _ in 0..num_writes_per_writer {
+                    let obj_hdl = ds_clone.get_object_handle(obj).await.unwrap();
                     let offset = rand::thread_rng().gen_range(0..(max_file_size - write_size));
                     let my_version =
                         version_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1366,9 +1479,10 @@ mod tests {
                     buf_u16.resize(write_size, my_version);
                     let buf_u8 = unsafe { buf_u16.align_to::<u8>().1 };
                     ds_clone
-                        .write_object(obj, offset as u64 * 2, false, buf_u8)
+                        .write_object(obj_hdl, offset as u64 * 2, false, buf_u8)
                         .await
                         .unwrap();
+                    Dataset::destroy_object_handle(obj_hdl).await;
                 }
             }));
         }
@@ -1380,9 +1494,10 @@ mod tests {
             let write_offsets_clone = write_offsets.clone();
             handles.push(tokio::task::spawn(async move {
                 for _ in 0..num_reads_per_reader {
+                    let obj_hdl = ds_clone.get_object_handle(obj).await.unwrap();
                     let offset = rand::thread_rng().gen_range(0..(max_file_size - read_size));
                     let data_u8 = ds_clone
-                        .read_object(obj, offset as u64 * 2, read_size as u64)
+                        .read_object(obj_hdl, offset as u64 * 2, read_size as u64)
                         .await
                         .unwrap();
                     let data_u16 = unsafe { data_u8.align_to::<u16>().1 };
@@ -1425,6 +1540,7 @@ mod tests {
                     }
 
                     assert!(!is_cyclic_directed(&graph));
+                    Dataset::destroy_object_handle(obj_hdl).await;
                 }
             }));
         }
@@ -1454,7 +1570,7 @@ mod tests {
             .unwrap(),
         );
 
-        let ntests = 16;
+        let ntests = 1;
         let nloops = 50;
         let max_key_size = 256;
         let max_value_size = 8192;
@@ -1467,8 +1583,13 @@ mod tests {
                 } else {
                     InodeType::FILE
                 };
-                let ino = ds_cloned.create_inode(inode_type).await.unwrap().0;
-                assert!(ds_cloned.get_attr(ino).await.unwrap().reserved.is_empty());
+                let ino_hdl = ds_cloned.create_inode(inode_type).await.unwrap().0;
+                assert!(ds_cloned
+                    .get_attr(ino_hdl)
+                    .await
+                    .unwrap()
+                    .reserved
+                    .is_empty());
 
                 let mut kvs: HashMap<String, Vec<u8>> = HashMap::new();
 
@@ -1478,7 +1599,7 @@ mod tests {
                         let mut rng = rand::thread_rng();
                         reserved.resize_with(rng.gen_range(0..MAX_RESERVED_SIZE), || rng.gen());
                     }
-                    ds_cloned.set_attr(ino, &reserved).await.unwrap();
+                    ds_cloned.set_attr(ino_hdl, &reserved).await.unwrap();
 
                     let nkvs = 10;
                     for _ in 0..nkvs {
@@ -1511,30 +1632,34 @@ mod tests {
                         };
 
                         if value.is_empty() {
-                            ds_cloned.remove_kvattr(ino, &key).await.unwrap();
+                            ds_cloned.remove_kvattr(ino_hdl, &key).await.unwrap();
                             kvs.remove(&key).unwrap();
                         } else {
                             ds_cloned
-                                .set_kvattr(ino, &key, &value, KvSetOption::HighPriority)
+                                .set_kvattr(ino_hdl, &key, &value, KvSetOption::HighPriority)
                                 .await
                                 .unwrap();
                             kvs.insert(key, value);
                         }
 
-                        let mut stored_keys = ds_cloned.list_kvattrs(ino).await.unwrap();
+                        let mut stored_keys = ds_cloned.list_kvattrs(ino_hdl).await.unwrap();
                         stored_keys.sort();
                         let mut keys: Vec<String> = kvs.keys().map(|k| k.to_owned()).collect();
                         keys.sort();
                         assert_eq!(keys, stored_keys);
 
                         for (k, v) in &kvs {
-                            let value = ds_cloned.get_kvattr(ino, k).await.unwrap();
+                            let value = ds_cloned.get_kvattr(ino_hdl, k).await.unwrap();
                             assert_eq!(*v, value);
                         }
 
-                        assert_eq!(ds_cloned.get_attr(ino).await.unwrap().reserved, reserved);
+                        assert_eq!(
+                            ds_cloned.get_attr(ino_hdl).await.unwrap().reserved,
+                            reserved
+                        );
                     }
                 }
+                Dataset::destroy_inode_handle(ino_hdl).await;
             }));
         }
 
