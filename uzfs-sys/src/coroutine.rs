@@ -27,7 +27,7 @@ type CoroutineFunc = unsafe extern "C" fn(arg: *mut c_void);
 
 impl UzfsCoroutineFuture {
     // FIXME(sundengyu): pin arg to the address of arg to prevent future swap
-    pub fn new(func: CoroutineFunc, arg: u64, mut stack_size: i32, foreground: bool) -> Self {
+    pub fn new(func: CoroutineFunc, arg: usize, mut stack_size: i32, foreground: bool) -> Self {
         // only support fixed stack size for now
         assert_eq!(stack_size, 0);
         if stack_size == 0 {
@@ -91,7 +91,7 @@ pub unsafe extern "C" fn thread_create(
     joinable: boolean_t,
     new_runtime: boolean_t,
 ) -> u64 {
-    let coroutine = UzfsCoroutineFuture::new(thread_func.unwrap(), arg as u64, stksize, false);
+    let coroutine = UzfsCoroutineFuture::new(thread_func.unwrap(), arg as usize, stksize, false);
     let task_id = coroutine.task_id;
 
     if new_runtime != 0 {
