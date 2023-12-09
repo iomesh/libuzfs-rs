@@ -7,9 +7,7 @@ use std::os::raw::{c_char, c_void};
 use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
 use uzfs_sys::async_sys::*;
-use uzfs_sys::bindings::{
-    self as sys, libuzfs_kvset_option_t, uzfs_inode_attr_t, uzfs_object_attr_t,
-};
+use uzfs_sys::bindings::{self as sys, uzfs_inode_attr_t, uzfs_object_attr_t};
 use uzfs_sys::coroutine::UzfsCoroutineFuture;
 
 pub const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
@@ -68,8 +66,9 @@ pub enum DatasetType {
 }
 
 pub enum KvSetOption {
-    HighPriority = sys::libuzfs_kvset_option_t_HIGH_PRIORITY as isize,
-    LowPriority = sys::libuzfs_kvset_option_t_LOW_PRIORITY as isize,
+    None = 0,
+    HighPriority = 1 << 0,
+    NeedLog = 1 << 1,
 }
 
 pub struct Dataset {
@@ -698,14 +697,14 @@ impl Dataset {
         ino_hdl: usize,
         name: P,
         value: &[u8],
-        option: KvSetOption,
+        option: i32,
     ) -> Result<u64> {
         let cname = name.into_cstr();
         let mut arg = LibuzfsSetKvAttrArg {
             dhp: self.dhp,
             ino_hdl,
             name: cname.as_ref().as_ptr(),
-            option: option as libuzfs_kvset_option_t,
+            option,
             value: value.as_ptr() as *const c_char,
             size: value.len() as u64,
             err: 0,
@@ -1010,7 +1009,12 @@ mod tests {
             let last_txg = ds.get_last_synced_txg().unwrap();
 
             txg = ds
-                .set_kvattr(sb_ino_hdl, key, value.as_bytes(), KvSetOption::HighPriority)
+                .set_kvattr(
+                    sb_ino_hdl,
+                    key,
+                    value.as_bytes(),
+                    KvSetOption::HighPriority as i32,
+                )
                 .await
                 .unwrap();
             println!("{txg} > {last_txg}");
@@ -1102,7 +1106,7 @@ mod tests {
                     file_ino_hdl,
                     key,
                     value.as_bytes(),
-                    KvSetOption::HighPriority,
+                    KvSetOption::HighPriority as i32,
                 )
                 .await
                 .unwrap();
@@ -1237,9 +1241,14 @@ mod tests {
                 let value_size: usize = 256;
                 value.resize_with(value_size, Default::default);
 
-                ds.set_kvattr(ino_hdl, key.as_str(), &value, KvSetOption::HighPriority)
-                    .await
-                    .unwrap();
+                ds.set_kvattr(
+                    ino_hdl,
+                    key.as_str(),
+                    &value,
+                    KvSetOption::HighPriority as i32,
+                )
+                .await
+                .unwrap();
                 assert_eq!(ds.get_kvattr(ino_hdl, &key).await.unwrap(), value);
             }
 
@@ -1636,7 +1645,7 @@ mod tests {
                             kvs.remove(&key).unwrap();
                         } else {
                             ds_cloned
-                                .set_kvattr(ino_hdl, &key, &value, KvSetOption::HighPriority)
+                                .set_kvattr(ino_hdl, &key, &value, KvSetOption::HighPriority as i32)
                                 .await
                                 .unwrap();
                             kvs.insert(key, value);

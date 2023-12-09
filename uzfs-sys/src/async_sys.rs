@@ -657,7 +657,7 @@ pub struct LibuzfsSetKvAttrArg {
     pub name: *const c_char,
     pub value: *const c_char,
     pub size: u64,
-    pub option: libuzfs_kvset_option_t,
+    pub option: i32,
 
     pub err: i32,
     pub txg: u64,
