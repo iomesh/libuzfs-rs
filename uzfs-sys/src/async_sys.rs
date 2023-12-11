@@ -676,7 +676,7 @@ pub unsafe extern "C" fn libuzfs_set_kvattr_c(arg: *mut c_void) {
         arg.value,
         arg.size,
         &mut arg.txg,
-        arg.option,
+        0,
     );
 }
 
