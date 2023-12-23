@@ -27,8 +27,11 @@ rand = "0.8.5"
 cstr-argument = "0.1"
 uzfs-sys = { path = "uzfs-sys", version = "0.1.0" }
 tempfile = "3.3.0"
+prometheus-client = { git = "https://github.com/iomesh/prometheus_client_rust.git", tag = "v0.22.0-1"}
 tokio.workspace = true
 once_cell.workspace = true
+strum = "0.24"
+strum_macros = "0.24"
 
 [dev-dependencies]
 rand.workspace = true
