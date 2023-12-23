@@ -1,3 +1,4 @@
+pub mod metrics;
 use cstr_argument::CStrArgument;
 use io::Result;
 use once_cell::sync::OnceCell;
@@ -9,6 +10,7 @@ use tokio::sync::Mutex;
 use uzfs_sys::async_sys::*;
 use uzfs_sys::bindings::{self as sys, uzfs_inode_attr_t, uzfs_object_attr_t};
 use uzfs_sys::coroutine::UzfsCoroutineFuture;
+use metrics::{Metrics, Method};
 
 pub const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
 
@@ -73,6 +75,7 @@ pub struct Dataset {
     dhp: *mut sys::libuzfs_dataset_handle_t,
     zhp: *mut sys::libuzfs_zpool_handle_t,
     poolname: CString,
+    pub metrics: Metrics,
 }
 
 impl Dataset {
@@ -114,6 +117,8 @@ impl Dataset {
 
         UzfsCoroutineFuture::new(libuzfs_dataset_init_c, arg_u64, 0, true).await;
 
+        let metrics = Metrics::new();
+
         if arg.ret != 0 {
             Err(io::Error::from_raw_os_error(arg.ret))
         } else if arg.dhp.is_null() || arg.zhp.is_null() {
@@ -123,6 +128,7 @@ impl Dataset {
                 dhp: arg.dhp,
                 zhp: arg.zhp,
                 poolname,
+                metrics,
             })
         }
     }
@@ -368,6 +374,7 @@ impl Dataset {
     }
 
     pub async fn read_object(&self, obj: u64, offset: u64, size: u64) -> Result<Vec<u8>> {
+        let _guard = self.metrics.record(Method::ReadObject, size as usize);
         let mut arg = LibuzfsReadObjectArg {
             dhp: self.dhp,
             obj,
@@ -390,6 +397,7 @@ impl Dataset {
 
     // TODO(hping): add unit tests to verify sync write works well in crash scenario
     pub async fn write_object(&self, obj: u64, offset: u64, sync: bool, data: &[u8]) -> Result<()> {
+        let _guard = self.metrics.record(Method::WriteObject, data.len());
         let mut arg = LibuzfsWriteObjectArg {
             dhp: self.dhp,
             obj,
@@ -556,6 +564,7 @@ impl Dataset {
     }
 
     pub async fn get_attr(&self, ino: u64) -> Result<InodeAttr> {
+        let _guard = self.metrics.record(Method::GetAttr, 0);
         let mut attr = InodeAttr::default();
         attr.reserved.reserve(MAX_RESERVED_SIZE);
 
