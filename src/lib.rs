@@ -983,7 +983,7 @@ mod tests {
             let hdl = unsafe { sys::libuzfs_zpool_open(poolname.into_cstr().as_ptr()) };
             assert!(hdl.is_null());
 
-            for _ in 0..10 {
+            for _ in 0..100 {
                 Dataset::init(
                     dsname,
                     &uzfs_test_env.get_dev_path().unwrap(),
