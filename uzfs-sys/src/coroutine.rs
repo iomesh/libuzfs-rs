@@ -16,8 +16,6 @@ static uzfs_runtime: OnceCell<Runtime> = OnceCell::new();
 // start from 1 to pass null pointer check
 static current_task_id: AtomicU64 = AtomicU64::new(1);
 
-const STACK_SIZE_DEFAULT: i32 = 1 << 20;
-
 pub struct UzfsCoroutineFuture {
     uc: *mut uzfs_coroutine_t,
     pub task_id: u64,
@@ -27,21 +25,10 @@ type CoroutineFunc = unsafe extern "C" fn(arg: *mut c_void);
 
 impl UzfsCoroutineFuture {
     // FIXME(sundengyu): pin arg to the address of arg to prevent future swap
-    pub fn new(func: CoroutineFunc, arg: u64, mut stack_size: i32, foreground: bool) -> Self {
-        // only support fixed stack size for now
-        assert_eq!(stack_size, 0);
-        if stack_size == 0 {
-            stack_size = STACK_SIZE_DEFAULT;
-        }
+    pub fn new(func: CoroutineFunc, arg: usize, foreground: bool) -> Self {
         let task_id = current_task_id.fetch_add(1, Ordering::Relaxed);
         let uc = unsafe {
-            libuzfs_new_coroutine(
-                stack_size,
-                Some(func),
-                arg as *mut c_void,
-                task_id,
-                foreground as u32,
-            )
+            libuzfs_new_coroutine(Some(func), arg as *mut c_void, task_id, foreground as u32)
         };
         UzfsCoroutineFuture { uc, task_id }
     }
@@ -87,11 +74,11 @@ unsafe impl Sync for UzfsCoroutineFuture {}
 pub unsafe extern "C" fn thread_create(
     thread_func: Option<unsafe extern "C" fn(arg1: *mut ::std::os::raw::c_void)>,
     arg: *mut c_void,
-    stksize: c_int,
+    _stksize: c_int,
     joinable: boolean_t,
     new_runtime: boolean_t,
 ) -> u64 {
-    let coroutine = UzfsCoroutineFuture::new(thread_func.unwrap(), arg as u64, stksize, false);
+    let coroutine = UzfsCoroutineFuture::new(thread_func.unwrap(), arg as usize, false);
     let task_id = coroutine.task_id;
 
     if new_runtime != 0 {
