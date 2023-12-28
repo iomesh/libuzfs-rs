@@ -32,7 +32,7 @@ pub async fn uzfs_env_init() {
     let mut guard = UZFS_INIT_REF.get_or_init(|| Mutex::new(0)).lock().await;
 
     if *guard == 0 {
-        UzfsCoroutineFuture::new(libuzfs_init_c, 0, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_init_c, 0, true).await;
     }
 
     *guard += 1;
@@ -49,7 +49,7 @@ pub fn uzfs_set_zpool_cache_path<P: CStrArgument>(path: P) {
 pub async fn uzfs_env_fini() {
     let mut guard = UZFS_INIT_REF.get().unwrap().lock().await;
     if *guard == 1 {
-        UzfsCoroutineFuture::new(libuzfs_fini_c, 0, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_fini_c, 0, true).await;
     }
     *guard -= 1;
 }
@@ -111,9 +111,9 @@ impl Dataset {
             zhp: std::ptr::null_mut(),
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsDatasetInitArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsDatasetInitArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_dataset_init_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_dataset_init_c, arg_usize, true).await;
 
         if arg.ret != 0 {
             Err(io::Error::from_raw_os_error(arg.ret))
@@ -134,9 +134,9 @@ impl Dataset {
             ret: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsDatasetExpandArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsDatasetExpandArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_dataset_expand_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_dataset_expand_c, arg_usize, true).await;
 
         if arg.ret == 0 {
             Ok(())
@@ -167,9 +167,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsZapCreateArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsZapCreateArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_zap_create_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_zap_create_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok((arg.obj, arg.txg))
@@ -186,9 +186,9 @@ impl Dataset {
             list: Vec::new(),
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsZapListArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsZapListArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_zap_list_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_zap_list_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.list)
@@ -210,9 +210,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsZapUpdateArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsZapUpdateArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_zap_update_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_zap_update_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -241,9 +241,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsZapUpdateArg as *mut c_void as u64;
+        let arg_usize = &mut arg as *mut LibuzfsZapUpdateArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_zap_update_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_zap_update_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -262,9 +262,9 @@ impl Dataset {
             txg: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsZapRemoveArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsZapRemoveArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_zap_remove_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_zap_remove_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -282,9 +282,9 @@ impl Dataset {
             gen: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsCreateObjectsArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsCreateObjectsArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_objects_create_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_objects_create_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok((arg.objs, arg.gen))
@@ -301,9 +301,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsDeleteObjectArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsDeleteObjectArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_delete_object_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_delete_object_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(())
@@ -313,8 +313,8 @@ impl Dataset {
     }
 
     pub async fn wait_log_commit(&self) {
-        let arg_u64 = self.dhp as u64;
-        UzfsCoroutineFuture::new(libuzfs_wait_log_commit_c, arg_u64, 0, true).await;
+        let arg_usize = self.dhp as usize;
+        UzfsCoroutineFuture::new(libuzfs_wait_log_commit_c, arg_usize, true).await;
     }
 
     pub async fn get_object_attr(&self, obj: u64) -> Result<uzfs_object_attr_t> {
@@ -325,9 +325,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsGetObjectAttrArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsGetObjectAttrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_get_object_attr_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_get_object_attr_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.attr)
@@ -342,9 +342,9 @@ impl Dataset {
             num_objs: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsListObjectArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsListObjectArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_list_object_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_list_object_c, arg_usize, true).await;
 
         Ok(arg.num_objs)
     }
@@ -357,9 +357,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsStatObjectArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsStatObjectArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_stat_object_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_stat_object_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.doi)
@@ -378,9 +378,9 @@ impl Dataset {
             data: Vec::<u8>::with_capacity(size as usize),
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsReadObjectArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsReadObjectArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_read_object_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_read_object_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.data)
@@ -401,9 +401,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsWriteObjectArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsWriteObjectArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_write_object_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_write_object_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(())
@@ -416,9 +416,9 @@ impl Dataset {
     pub async fn sync_object(&self, obj: u64) {
         let mut arg = LibuzfsSyncObjectArg { dhp: self.dhp, obj };
 
-        let arg_u64 = &mut arg as *mut LibuzfsSyncObjectArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsSyncObjectArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_sync_object_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_sync_object_c, arg_usize, true).await;
     }
 
     pub async fn truncate_object(&self, obj: u64, offset: u64, size: u64) -> Result<()> {
@@ -430,9 +430,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsTruncateObjectArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsTruncateObjectArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_truncate_object_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_truncate_object_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(())
@@ -450,9 +450,9 @@ impl Dataset {
             avail_objs: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsDatasetSpaceArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsDatasetSpaceArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_dataset_space_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_dataset_space_c, arg_usize, true).await;
 
         (
             arg.refd_bytes,
@@ -470,9 +470,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsFindHoleArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsFindHoleArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_object_next_hole_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_object_next_hole_c, arg_usize, true).await;
 
         match arg.err {
             0 => Ok(arg.off < offset + size),
@@ -506,9 +506,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsCreateInode as u64;
+        let arg_usize = &mut arg as *mut LibuzfsCreateInode as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_create_inode_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_create_inode_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok((arg.ino, arg.txg))
@@ -525,9 +525,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsClaimInodeArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsClaimInodeArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_claim_inode_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_claim_inode_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(())
@@ -545,9 +545,9 @@ impl Dataset {
             txg: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsDeleteInode as u64;
+        let arg_usize = &mut arg as *mut LibuzfsDeleteInode as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_delete_inode_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_delete_inode_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -569,9 +569,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsGetAttrArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsGetAttrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_inode_getattr_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_inode_getattr_c, arg_usize, true).await;
 
         if arg.err == 0 {
             unsafe { attr.reserved.set_len(arg.size as usize) };
@@ -594,9 +594,9 @@ impl Dataset {
             txg: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsSetAttrArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsSetAttrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_set_attr_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_set_attr_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -615,9 +615,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsGetKvattrArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsGetKvattrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_inode_get_kvattr_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_inode_get_kvattr_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.data)
@@ -645,9 +645,9 @@ impl Dataset {
             txg: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsSetKvAttrArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsSetKvAttrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_set_kvattr_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_set_kvattr_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -666,9 +666,9 @@ impl Dataset {
             txg: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsRemoveKvattrArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsRemoveKvattrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_remove_kvattr_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_remove_kvattr_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -685,9 +685,9 @@ impl Dataset {
             names: Vec::new(),
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsListKvAttrsArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsListKvAttrsArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_list_kvattrs_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_list_kvattrs_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.names)
@@ -712,9 +712,9 @@ impl Dataset {
             txg: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsCreateDentryArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsCreateDentryArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_create_dentry_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_create_dentry_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -733,9 +733,9 @@ impl Dataset {
             txg: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsDeleteDentryArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsDeleteDentryArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_delete_entry_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_delete_entry_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -754,9 +754,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsLookupDentryArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsLookupDentryArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_lookup_dentry_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_lookup_dentry_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.ino)
@@ -781,9 +781,9 @@ impl Dataset {
             num: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsIterateDentryArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsIterateDentryArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_iterate_dentry_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_iterate_dentry_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok((arg.data, arg.num))
@@ -798,8 +798,8 @@ impl Dataset {
     }
 
     pub async fn wait_synced(&self) -> Result<()> {
-        let arg_u64 = self.dhp as u64;
-        UzfsCoroutineFuture::new(libuzfs_wait_synced_c, arg_u64, 0, true).await;
+        let arg_usize = self.dhp as usize;
+        UzfsCoroutineFuture::new(libuzfs_wait_synced_c, arg_usize, true).await;
         Ok(())
     }
 
@@ -811,9 +811,9 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_u64 = &mut arg as *mut LibuzfsDatasetFiniArg as u64;
+        let arg_usize = &mut arg as *mut LibuzfsDatasetFiniArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_dataset_fini_c, arg_u64, 0, true).await;
+        UzfsCoroutineFuture::new(libuzfs_dataset_fini_c, arg_usize, true).await;
 
         if arg.err != 0 {
             Err(io::Error::from_raw_os_error(arg.err))
