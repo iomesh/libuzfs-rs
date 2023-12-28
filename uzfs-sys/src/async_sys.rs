@@ -638,7 +638,7 @@ pub struct LibuzfsSetKvAttrArg {
     pub name: *const c_char,
     pub value: *const c_char,
     pub size: u64,
-    pub flag: libuzfs_kvset_option_t,
+    pub option: u32,
 
     pub err: i32,
     pub txg: u64,
@@ -657,7 +657,7 @@ pub unsafe extern "C" fn libuzfs_set_kvattr_c(arg: *mut c_void) {
         arg.value,
         arg.size,
         &mut arg.txg,
-        arg.flag,
+        arg.option,
     );
 }
 
