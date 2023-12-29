@@ -908,9 +908,10 @@ mod tests {
         let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
 
         {
-            let hdl = unsafe { sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr()) };
+            let mut err = 0;
+            let hdl = unsafe { sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr(), &mut err) };
             assert!(hdl.is_null());
-            let hdl = unsafe { sys::libuzfs_zpool_open(poolname.into_cstr().as_ptr()) };
+            let hdl = unsafe { sys::libuzfs_zpool_open(poolname.into_cstr().as_ptr(), &mut err) };
             assert!(hdl.is_null());
 
             for _ in 0..10 {
@@ -1047,9 +1048,10 @@ mod tests {
         }
 
         {
-            let hdl = unsafe { sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr()) };
+            let mut err = 0;
+            let hdl = unsafe { sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr(), &mut err) };
             assert!(hdl.is_null());
-            let hdl = unsafe { sys::libuzfs_zpool_open(poolname.into_cstr().as_ptr()) };
+            let hdl = unsafe { sys::libuzfs_zpool_open(poolname.into_cstr().as_ptr(), &mut err) };
             assert!(hdl.is_null());
             let ds = Dataset::init(
                 dsname,

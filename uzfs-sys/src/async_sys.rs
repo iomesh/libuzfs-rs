@@ -1,8 +1,6 @@
 use crate::bindings::*;
 use crate::coroutine::*;
-
 use std::ffi::CStr;
-use std::io::{Error, ErrorKind};
 use std::os::raw::{c_char, c_void};
 
 const MAX_POOL_NAME_SIZE: i32 = 32;
@@ -45,28 +43,22 @@ pub unsafe extern "C" fn libuzfs_dataset_init_c(arg: *mut c_void) {
 
     // import failed, create zpool if not found
     if arg.ret != 0 {
-        assert!(arg.ret > 0);
-        match Error::from_raw_os_error(arg.ret).kind() {
-            ErrorKind::NotFound => {
+        match arg.ret {
+            libc::ENOENT => {
                 arg.ret = libuzfs_zpool_create(
                     arg.pool_name,
                     arg.dev_path,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
                 );
-
-                if arg.ret == 0
-                    || Error::from_raw_os_error(arg.ret).kind() == ErrorKind::AlreadyExists
-                {
+                if arg.ret == 0 {
                     arg.ret = libuzfs_dataset_create(arg.dsname);
-                    if Error::from_raw_os_error(arg.ret).kind() == ErrorKind::AlreadyExists {
-                        arg.ret = 0;
-                    }
                 }
 
                 if arg.ret != 0 {
                     return;
                 }
+                assert_ne!(arg.ret, libc::EEXIST);
             }
             _ => {
                 return;
@@ -79,19 +71,36 @@ pub unsafe extern "C" fn libuzfs_dataset_init_c(arg: *mut c_void) {
         assert_eq!(c_str.to_str().unwrap(), stored_pool_name);
     }
 
-    arg.ret = libuzfs_dataset_set_props(arg.dsname, arg.dnodesize);
-    if arg.ret != 0 {
-        return;
-    }
-
-    arg.zhp = libuzfs_zpool_open(arg.pool_name);
+    arg.zhp = libuzfs_zpool_open(arg.pool_name, &mut arg.ret);
     if !arg.zhp.is_null() {
-        arg.dhp = libuzfs_dataset_open(arg.dsname);
-        if arg.dhp.is_null() {
-            libuzfs_zpool_close(arg.zhp);
-            arg.zhp = std::ptr::null_mut();
+        assert_eq!(arg.ret, 0);
+        arg.dhp = libuzfs_dataset_open(arg.dsname, &mut arg.ret);
+        if arg.dhp.is_null() && arg.ret == libc::ENOENT {
+            arg.ret = libuzfs_dataset_create(arg.dsname);
+            assert_ne!(arg.ret, libc::EEXIST);
+            if arg.ret == 0 {
+                arg.dhp = libuzfs_dataset_open(arg.dsname, &mut arg.ret);
+            }
+        }
+
+        if !arg.dhp.is_null() {
+            arg.ret = libuzfs_dataset_set_props(arg.dsname, arg.dnodesize);
+        }
+
+        if arg.ret == 0 {
+            return;
         }
     }
+
+    if !arg.dhp.is_null() {
+        libuzfs_dataset_close(arg.dhp);
+    }
+
+    if !arg.zhp.is_null() {
+        libuzfs_zpool_close(arg.zhp);
+    }
+
+    assert_eq!(libuzfs_zpool_export(arg.pool_name), 0);
 }
 
 pub struct LibuzfsDatasetFiniArg {
@@ -161,7 +170,7 @@ pub unsafe extern "C" fn libuzfs_zap_list_c(arg: *mut c_void) {
     let iter = libuzfs_new_zap_iterator(arg.dhp, arg.obj, &mut arg.err);
 
     if iter.is_null() {
-        if Error::from_raw_os_error(arg.err).kind() == ErrorKind::NotFound {
+        if arg.err == libc::ENOENT {
             arg.err = 0;
         }
         return;
@@ -193,7 +202,7 @@ pub unsafe extern "C" fn libuzfs_zap_list_c(arg: *mut c_void) {
 
         arg.err = libuzfs_zap_iterator_advance(iter);
         if arg.err != 0 {
-            if Error::from_raw_os_error(arg.err).kind() == ErrorKind::NotFound {
+            if arg.err == libc::ENOENT {
                 arg.err = 0;
             }
             break;
