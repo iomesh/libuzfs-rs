@@ -40,6 +40,11 @@ fn main() {
         .allowlist_function("libuzfs_.*")
         .allowlist_var("dmu_ot.*")
         .allowlist_type("DMU_OT.*")
+        .allowlist_function("co_rw_lock_.*")
+        .allowlist_function("co_cond_.*")
+        .allowlist_function("co_mutex_.*")
+        .allowlist_function("coroutine_.*")
+        .allowlist_file("coroutine.h")
         .derive_default(true)
         .generate()
         .expect("Unable to generate bindings");
