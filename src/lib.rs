@@ -13,8 +13,8 @@ use uzfs_sys::coroutine::*;
 pub const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
 
 static UZFS_INIT_REF: OnceCell<Mutex<u32>> = OnceCell::new();
-const MAX_RESERVED_SIZE: usize = 512;
-const UZFS_DNODESIZE_META: u32 = 4096;
+const MAX_RESERVED_SIZE: usize = 192;
+const UZFS_DNODESIZE_META: u32 = 1024;
 // zero UZFS_DNODESIZE_DATA to use default dnodesize
 const UZFS_DNODESIZE_DATA: u32 = 0;
 
