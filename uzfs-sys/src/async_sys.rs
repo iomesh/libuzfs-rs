@@ -177,13 +177,15 @@ pub unsafe extern "C" fn libuzfs_zap_list_c(arg: *mut c_void) {
     }
 
     loop {
-        let mut name = vec![0; MAX_NAME_SIZE];
+        let mut name = Vec::<u8>::with_capacity(MAX_NAME_SIZE + 1);
         let rc =
             libuzfs_zap_iterator_name(iter, name.as_mut_ptr() as *mut c_char, MAX_NAME_SIZE as u64);
         assert!(rc > 0);
-        name.resize_with(rc as usize, Default::default);
+        name.set_len(rc as usize);
+        // make name end with '\0'
+        name.push(0);
         let value_size = libuzfs_zap_iterator_value_size(iter);
-        let mut value = vec![0; value_size as usize];
+        let mut value = Vec::<u8>::with_capacity(value_size as usize);
         arg.err = libuzfs_zap_lookup(
             arg.dhp,
             arg.obj,
@@ -192,6 +194,8 @@ pub unsafe extern "C" fn libuzfs_zap_list_c(arg: *mut c_void) {
             value_size,
             value.as_mut_ptr() as *mut c_void,
         );
+        value.set_len(value_size as usize);
+        name.pop();
 
         if arg.err != 0 {
             break;
@@ -615,7 +619,7 @@ unsafe impl Sync for LibuzfsGetKvattrArg {}
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_inode_get_kvattr_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsGetKvattrArg);
-    arg.data = vec![0; MAX_KVATTR_VALUE_SIZE];
+    arg.data = Vec::<u8>::with_capacity(MAX_KVATTR_VALUE_SIZE);
     let rc = libuzfs_inode_get_kvattr(
         arg.dhp,
         arg.ino,
@@ -628,7 +632,7 @@ pub unsafe extern "C" fn libuzfs_inode_get_kvattr_c(arg: *mut c_void) {
         arg.err = -rc as i32;
     } else {
         arg.err = 0;
-        arg.data.truncate(rc as usize);
+        arg.data.set_len(rc as usize);
     }
 }
 
@@ -700,14 +704,14 @@ pub unsafe extern "C" fn libuzfs_list_kvattrs_c(arg: *mut c_void) {
     }
 
     loop {
-        let mut buf = vec![0; MAX_NAME_SIZE];
+        let mut buf = Vec::<u8>::with_capacity(MAX_NAME_SIZE);
         let rc =
             libuzfs_next_kvattr_name(iter, buf.as_mut_ptr() as *mut c_char, MAX_NAME_SIZE as i32);
         assert!(rc >= 0);
         if rc == 0 {
             break;
         }
-        buf.truncate(rc as usize);
+        buf.set_len(rc as usize);
         arg.names.push(String::from_utf8(buf).unwrap());
     }
 
