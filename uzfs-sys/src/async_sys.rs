@@ -151,7 +151,12 @@ unsafe impl Sync for LibuzfsZapCreateArg {}
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_zap_create_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsZapCreateArg);
-    arg.err = libuzfs_zap_create(arg.dhp, &mut arg.obj, &mut arg.txg);
+    arg.err = libuzfs_inode_create(
+        arg.dhp,
+        &mut arg.obj,
+        libuzfs_inode_type_t_INODE_DIR,
+        &mut arg.txg,
+    );
 }
 
 pub struct LibuzfsZapListArg {
