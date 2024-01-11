@@ -46,9 +46,6 @@ impl UzfsCoroutineFuture {
 
         #[cfg(debug_assertions)]
         let record_backtrace = if backtrace {
-            if let Some(add_creation_pos_func) = add_creation_pos.get() {
-                add_creation_pos_func(task_id, UzfsCoroutineFuture::get_creation_pos(foreground));
-            }
             Some(UzfsCoroutineFuture::record_backtrace as unsafe extern "C" fn(u64))
         } else {
             None
@@ -63,6 +60,17 @@ impl UzfsCoroutineFuture {
                 record_backtrace,
             )
         };
+
+        #[cfg(debug_assertions)]
+        if backtrace {
+            if let Some(add_creation_pos_func) = add_creation_pos.get() {
+                add_creation_pos_func(
+                    task_id,
+                    UzfsCoroutineFuture::get_creation_pos(foreground, uc as usize),
+                );
+            }
+        }
+
         UzfsCoroutineFuture {
             uc,
             task_id,
@@ -85,7 +93,7 @@ impl UzfsCoroutineFuture {
 
     #[inline]
     #[cfg(debug_assertions)]
-    fn get_creation_pos(foreground: bool) -> String {
+    fn get_creation_pos(foreground: bool, coroutine_ptr: usize) -> String {
         let mut continue_trace = true;
         let mut pos = String::new();
         backtrace::trace(|frame| {
@@ -104,7 +112,7 @@ impl UzfsCoroutineFuture {
                     }
 
                     let (filename, lineno) = UzfsCoroutineFuture::parse_frame_symbol(symbol);
-                    pos = format!("{name} {filename}:{lineno}");
+                    pos = format!("{coroutine_ptr} {name} {filename}:{lineno}");
                 }
 
                 if (foreground && name.contains("UzfsCoroutineFuture::new"))
