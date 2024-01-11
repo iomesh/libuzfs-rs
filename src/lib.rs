@@ -816,6 +816,26 @@ impl Dataset {
         Ok(())
     }
 
+    pub async fn check_valid(&self, ino: u64, gen: u64) -> Result<()> {
+        let mut arg = LibuzfsInodeCheckValidArg {
+            dhp: self.dhp,
+            ino,
+            gen,
+
+            err: 0,
+        };
+
+        let arg_usize = &mut arg as *mut LibuzfsInodeCheckValidArg as usize;
+
+        UzfsCoroutineFuture::new(libuzfs_inode_check_valid_c, arg_usize, true, false).await;
+
+        if arg.err == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(arg.err))
+        }
+    }
+
     pub async fn close(&self) -> Result<()> {
         let mut arg = LibuzfsDatasetFiniArg {
             dhp: self.dhp,
@@ -891,6 +911,7 @@ mod tests {
     use rand::Rng;
     use serial_test::serial;
     use std::collections::HashMap;
+    use std::io::ErrorKind;
     use std::sync::atomic::AtomicU16;
     use std::sync::Arc;
     use std::time::Duration;
@@ -901,7 +922,7 @@ mod tests {
     #[serial]
     async fn uzfs_test() {
         let rwobj;
-        let gen;
+        let mut gen;
         let sb_ino;
         let tmp_ino;
         let tmp_name = "tmp_dir";
@@ -970,7 +991,10 @@ mod tests {
             assert_eq!(value_read.as_slice(), value.as_bytes());
             ds.wait_synced().await.unwrap();
 
-            (tmp_ino, _) = ds.create_inode(InodeType::DIR).await.unwrap();
+            (tmp_ino, gen) = ds.create_inode(InodeType::DIR).await.unwrap();
+            ds.check_valid(tmp_ino, gen).await.unwrap();
+            let err = ds.check_valid(tmp_ino, gen + 1).await.unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::NotFound);
 
             txg = ds.create_dentry(sb_ino, tmp_name, tmp_ino).await.unwrap();
             ds.wait_synced().await.unwrap();

@@ -817,3 +817,20 @@ pub unsafe extern "C" fn libuzfs_wait_synced_c(arg: *mut c_void) {
     let dhp = arg as *mut libuzfs_dataset_handle_t;
     libuzfs_wait_synced(dhp);
 }
+
+pub struct LibuzfsInodeCheckValidArg {
+    pub dhp: *mut libuzfs_dataset_handle_t,
+    pub ino: u64,
+    pub gen: u64,
+
+    pub err: i32,
+}
+
+unsafe impl Send for LibuzfsInodeCheckValidArg {}
+unsafe impl Sync for LibuzfsInodeCheckValidArg {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_inode_check_valid_c(arg: *mut c_void) {
+    let arg = (arg as *mut LibuzfsInodeCheckValidArg).as_mut().unwrap();
+    arg.err = libuzfs_inode_check_valid(arg.dhp, arg.ino, arg.gen);
+}
