@@ -293,6 +293,7 @@ impl Dataset {
     }
 
     pub async fn create_objects(&self, num_objs: usize) -> Result<(Vec<u64>, u64)> {
+        let _guard = self.metrics.record(Method::CreateObjects, num_objs);
         let mut arg = LibuzfsCreateObjectsArg {
             dhp: self.dhp,
             num_objs,
@@ -314,6 +315,7 @@ impl Dataset {
 
     // delete_object won't wait until synced, wait_log_commit is needed if you want wait sync
     pub async fn delete_object(&self, obj: u64) -> Result<()> {
+        let _guard = self.metrics.record(Method::DeleteObject, 0);
         let mut arg = LibuzfsDeleteObjectArg {
             dhp: self.dhp,
             obj,
@@ -332,11 +334,13 @@ impl Dataset {
     }
 
     pub async fn wait_log_commit(&self) {
+        let _guard = self.metrics.record(Method::WaitLogCommit, 0);
         let arg_usize = self.dhp as usize;
         UzfsCoroutineFuture::new(libuzfs_wait_log_commit_c, arg_usize, true, false).await;
     }
 
     pub async fn get_object_attr(&self, obj: u64) -> Result<uzfs_object_attr_t> {
+        let _guard = self.metrics.record(Method::GetObjectAttr, 0);
         let mut arg = LibuzfsGetObjectAttrArg {
             dhp: self.dhp,
             obj,
@@ -435,6 +439,7 @@ impl Dataset {
 
     // TODO(hping): add ut
     pub async fn sync_object(&self, obj: u64) {
+        let _guard = self.metrics.record(Method::SyncObject, 0);
         let mut arg = LibuzfsSyncObjectArg { dhp: self.dhp, obj };
 
         let arg_usize = &mut arg as *mut LibuzfsSyncObjectArg as usize;
@@ -519,6 +524,7 @@ impl Dataset {
     }
 
     pub async fn create_inode(&self, inode_type: InodeType) -> Result<(u64, u64)> {
+        let _guard = self.metrics.record(Method::CreateInode, 0);
         let mut arg = LibuzfsCreateInode {
             dhp: self.dhp,
             inode_type: inode_type as u32,
@@ -558,6 +564,7 @@ impl Dataset {
     }
 
     pub async fn delete_inode(&self, ino: u64, inode_type: InodeType) -> Result<u64> {
+        let _guard = self.metrics.record(Method::DeleteInode, 0);
         let mut arg = LibuzfsDeleteInode {
             dhp: self.dhp,
             ino,
@@ -606,6 +613,7 @@ impl Dataset {
     }
 
     pub async fn set_attr(&self, ino: u64, reserved: &[u8]) -> Result<u64> {
+        let _guard = self.metrics.record(Method::SetAttr, 0);
         assert!(reserved.len() <= MAX_RESERVED_SIZE);
         let mut arg = LibuzfsSetAttrArg {
             dhp: self.dhp,
@@ -628,6 +636,7 @@ impl Dataset {
     }
 
     pub async fn get_kvattr<P: CStrArgument>(&self, ino: u64, name: P) -> Result<Vec<u8>> {
+        let _guard = self.metrics.record(Method::GetKvattr, 0);
         let cname = name.into_cstr();
         let mut arg = LibuzfsGetKvattrArg {
             dhp: self.dhp,
@@ -655,6 +664,7 @@ impl Dataset {
         value: &[u8],
         option: u32,
     ) -> Result<u64> {
+        let _guard = self.metrics.record(Method::SetKvattr, 0);
         let cname = name.into_cstr();
         let mut arg = LibuzfsSetKvAttrArg {
             dhp: self.dhp,
@@ -724,6 +734,7 @@ impl Dataset {
         name: P,
         value: u64,
     ) -> Result<u64> {
+        let _guard = self.metrics.record(Method::CreateDentry, 0);
         let cname = name.into_cstr();
         let mut arg = LibuzfsCreateDentryArg {
             dhp: self.dhp,
@@ -746,6 +757,7 @@ impl Dataset {
     }
 
     pub async fn delete_dentry<P: CStrArgument>(&self, pino: u64, name: P) -> Result<u64> {
+        let _guard = self.metrics.record(Method::DeleteDentry, 0);
         let cname = name.into_cstr();
         let mut arg = LibuzfsDeleteDentryArg {
             dhp: self.dhp,
@@ -767,6 +779,7 @@ impl Dataset {
     }
 
     pub async fn lookup_dentry<P: CStrArgument>(&self, pino: u64, name: P) -> Result<u64> {
+        let _guard = self.metrics.record(Method::LookupDentry, 0);
         let cname = name.into_cstr();
         let mut arg = LibuzfsLookupDentryArg {
             dhp: self.dhp,
@@ -793,6 +806,7 @@ impl Dataset {
         whence: u64,
         size: u32,
     ) -> Result<(Vec<u8>, u32)> {
+        let _guard = self.metrics.record(Method::IterateDentry, 0);
         let mut arg = LibuzfsIterateDentryArg {
             dhp: self.dhp,
             pino,
@@ -820,6 +834,7 @@ impl Dataset {
     }
 
     pub async fn wait_synced(&self) -> Result<()> {
+        let _guard = self.metrics.record(Method::WaitSynced, 0);
         let arg_usize = self.dhp as usize;
         UzfsCoroutineFuture::new(libuzfs_wait_synced_c, arg_usize, true, false).await;
         Ok(())
