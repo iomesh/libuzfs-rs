@@ -10,9 +10,24 @@ use strum_macros::EnumIter;
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue, EnumIter, Display)]
 pub enum Method {
+    CreateObjects,
+    DeleteObject,
+    WaitLogCommit,
+    GetObjectAttr,
     ReadObject,
     WriteObject,
+    SyncObject,
+    CreateInode,
+    DeleteInode,
     GetAttr,
+    SetAttr,
+    GetKvattr,
+    SetKvattr,
+    CreateDentry,
+    DeleteDentry,
+    LookupDentry,
+    IterateDentry,
+    WaitSynced,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
