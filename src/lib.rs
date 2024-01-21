@@ -1550,7 +1550,7 @@ mod tests {
                     let mut reserved: Vec<u8> = Vec::new();
                     {
                         let mut rng = rand::thread_rng();
-                        reserved.resize_with(rng.gen_range(0..MAX_RESERVED_SIZE), || rng.gen());
+                        reserved.resize_with(MAX_RESERVED_SIZE, || rng.gen());
                     }
                     ds_cloned.set_attr(ino, &reserved).await.unwrap();
 
