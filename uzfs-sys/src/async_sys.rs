@@ -534,6 +534,7 @@ pub struct LibuzfsClaimInodeArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
     pub inode_type: libuzfs_inode_type_t,
     pub ino: u64,
+    pub gen: u64,
 
     pub err: i32,
 }
@@ -544,7 +545,7 @@ unsafe impl Sync for LibuzfsClaimInodeArg {}
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_claim_inode_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsClaimInodeArg);
-    arg.err = libuzfs_inode_claim(arg.dhp, arg.ino, arg.inode_type);
+    arg.err = libuzfs_inode_claim(arg.dhp, arg.ino, arg.gen, arg.inode_type);
 }
 
 pub struct LibuzfsDeleteInode {

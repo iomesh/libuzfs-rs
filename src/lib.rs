@@ -544,11 +544,12 @@ impl Dataset {
         }
     }
 
-    pub async fn claim_inode(&self, ino: u64, inode_type: InodeType) -> Result<()> {
+    pub async fn claim_inode(&self, ino: u64, gen: u64, inode_type: InodeType) -> Result<()> {
         let mut arg = LibuzfsClaimInodeArg {
             dhp: self.dhp,
             inode_type: inode_type as u32,
             ino,
+            gen,
             err: 0,
         };
 
@@ -1247,6 +1248,26 @@ mod tests {
             .await
             .unwrap();
 
+            let claim_ino = ds.create_inode(InodeType::DIR).await.unwrap().0;
+            ds.delete_inode(claim_ino, InodeType::DIR).await.unwrap();
+            ds.wait_synced().await.unwrap();
+
+            ds.claim_inode(claim_ino, 123456, InodeType::DIR)
+                .await
+                .unwrap();
+            ds.check_valid(claim_ino, 123456).await.unwrap();
+            ds.close().await.unwrap();
+        }
+
+        {
+            let ds = Dataset::init(
+                dsname,
+                uzfs_test_env.get_dev_path().unwrap().as_str(),
+                DatasetType::Meta,
+            )
+            .await
+            .unwrap();
+
             (ino, _) = ds.create_inode(InodeType::DIR).await.unwrap();
 
             ds.wait_synced().await.unwrap();
@@ -1263,13 +1284,13 @@ mod tests {
             .unwrap();
 
             // test claim when inode exists
-            ds.claim_inode(ino, InodeType::DIR).await.unwrap();
+            ds.claim_inode(ino, 0, InodeType::DIR).await.unwrap();
 
             ds.delete_inode(ino, InodeType::DIR).await.unwrap();
             ds.wait_synced().await.unwrap();
 
             // test claim when inode doesn't exist
-            ds.claim_inode(ino, InodeType::DIR).await.unwrap();
+            ds.claim_inode(ino, 0, InodeType::DIR).await.unwrap();
             ds.close().await.unwrap();
         }
 
