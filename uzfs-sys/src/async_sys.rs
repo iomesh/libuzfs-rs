@@ -137,28 +137,6 @@ pub unsafe extern "C" fn libuzfs_dataset_expand_c(arg: *mut c_void) {
     arg.ret = libuzfs_dataset_expand(arg.dhp);
 }
 
-pub struct LibuzfsZapCreateArg {
-    pub dhp: *mut libuzfs_dataset_handle_t,
-
-    pub obj: u64,
-    pub txg: u64,
-    pub err: i32,
-}
-
-unsafe impl Send for LibuzfsZapCreateArg {}
-unsafe impl Sync for LibuzfsZapCreateArg {}
-
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn libuzfs_zap_create_c(arg: *mut c_void) {
-    let arg = &mut *(arg as *mut LibuzfsZapCreateArg);
-    arg.err = libuzfs_inode_create(
-        arg.dhp,
-        &mut arg.obj,
-        libuzfs_inode_type_t_INODE_DIR,
-        &mut arg.txg,
-    );
-}
-
 pub struct LibuzfsZapListArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
     pub obj: u64,

@@ -179,22 +179,11 @@ impl Dataset {
     }
 
     pub async fn zap_create(&self) -> Result<(u64, u64)> {
-        let mut arg = LibuzfsZapCreateArg {
-            dhp: self.dhp,
-            obj: 0,
-            txg: 0,
-            err: 0,
-        };
+        self.create_inode(InodeType::DIR).await
+    }
 
-        let arg_usize = &mut arg as *mut LibuzfsZapCreateArg as usize;
-
-        UzfsCoroutineFuture::new(libuzfs_zap_create_c, arg_usize, true, false).await;
-
-        if arg.err == 0 {
-            Ok((arg.obj, arg.txg))
-        } else {
-            Err(io::Error::from_raw_os_error(arg.err))
-        }
+    pub async fn zap_claim(&self, ino: u64, gen: u64) -> Result<()> {
+        self.claim_inode(ino, gen, InodeType::DIR).await
     }
 
     pub async fn zap_list(&self, zap_obj: u64) -> Result<Vec<(String, Vec<u8>)>> {
@@ -995,8 +984,6 @@ mod tests {
             .await
             .unwrap();
 
-            println!("used space: {:?}", ds.space().await);
-
             sb_ino = ds.get_superblock_ino().unwrap();
             let last_txg = ds.get_last_synced_txg().unwrap();
 
@@ -1009,7 +996,6 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            println!("{txg} > {last_txg}");
             assert!(txg > last_txg);
 
             let value_read = ds.get_kvattr(sb_ino, key).await.unwrap();
@@ -1097,7 +1083,6 @@ mod tests {
             assert_eq!(value_read.as_slice(), value.as_bytes());
 
             assert_eq!(ds.list_object().await.unwrap(), num + 3);
-            println!("used space: {:?}", ds.space().await);
 
             let obj = ds.create_objects(1).await.unwrap().0[0];
             let size = 1 << 18;
@@ -1250,8 +1235,10 @@ mod tests {
 
             let claim_ino = ds.create_inode(InodeType::DIR).await.unwrap().0;
             ds.delete_inode(claim_ino, InodeType::DIR).await.unwrap();
-            ds.wait_synced().await.unwrap();
-
+            ds.claim_inode(claim_ino, 123456, InodeType::DIR)
+                .await
+                .unwrap();
+            ds.delete_inode(claim_ino, InodeType::DIR).await.unwrap();
             ds.claim_inode(claim_ino, 123456, InodeType::DIR)
                 .await
                 .unwrap();
@@ -1329,7 +1316,6 @@ mod tests {
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
-            println!("remover exited");
         });
 
         let mut adder_handles = vec![];
@@ -1344,7 +1330,6 @@ mod tests {
                         .await
                         .unwrap();
                 }
-                println!("adder exited");
             }));
         }
 
@@ -1382,8 +1367,11 @@ mod tests {
                 let mut offset = 0;
                 let obj = ds_clone.create_objects(1).await.unwrap().0[0];
                 while offset < size {
-                    while let Err(err) = ds_clone.write_object(obj, offset, false, &buf).await {
-                        println!("write error: ({offset}, {block_size}), {err}");
+                    while ds_clone
+                        .write_object(obj, offset, false, &buf)
+                        .await
+                        .is_err()
+                    {
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                     offset += block_size as u64;
@@ -1400,7 +1388,6 @@ mod tests {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 cur_size += incr_size;
                 uzfs_test_env.set_dev_size(cur_size);
-                println!("new size: {cur_size}");
                 ds_expander.expand().await.unwrap();
             }
             uzfs_test_env
@@ -1571,7 +1558,7 @@ mod tests {
                     let mut reserved: Vec<u8> = Vec::new();
                     {
                         let mut rng = rand::thread_rng();
-                        reserved.resize_with(rng.gen_range(0..MAX_RESERVED_SIZE), || rng.gen());
+                        reserved.resize_with(MAX_RESERVED_SIZE, || rng.gen());
                     }
                     ds_cloned.set_attr(ino, &reserved).await.unwrap();
 
