@@ -7,9 +7,38 @@ const MAX_POOL_NAME_SIZE: i32 = 32;
 const MAX_NAME_SIZE: usize = 256;
 const MAX_KVATTR_VALUE_SIZE: usize = 8192;
 
+unsafe extern "C" fn print_backtrace() {
+    let mut depth = 0;
+    backtrace::trace(|frame| {
+        backtrace::resolve_frame(frame, |symbol| {
+            let name = match symbol.name() {
+                Some(name) => name.as_str().unwrap(),
+                None => "",
+            };
+
+            let file_name = match symbol.filename() {
+                Some(path) => path.to_str().unwrap(),
+                None => "",
+            };
+
+            let line = symbol.lineno().unwrap_or(0);
+
+            println!("#{depth}  {file_name}:{line}:{name}");
+            depth += 1;
+        });
+
+        true // keep going to the next frame
+    });
+}
+
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_init_c(_: *mut c_void) {
-    libuzfs_init(Some(thread_create), Some(thread_exit), Some(thread_join));
+    libuzfs_init(
+        Some(thread_create),
+        Some(thread_exit),
+        Some(thread_join),
+        Some(print_backtrace),
+    );
 }
 
 #[allow(clippy::missing_safety_doc)]
