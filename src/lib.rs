@@ -251,7 +251,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsZapUpdateArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_zap_update_c, arg_usize, true, false).await;
+        UzfsCoroutineFuture::run_as_thread(libuzfs_zap_update_c, arg_usize, false);
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -272,7 +272,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsZapRemoveArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_zap_remove_c, arg_usize, true, false).await;
+        UzfsCoroutineFuture::run_as_thread(libuzfs_zap_remove_c, arg_usize, false);
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -339,7 +339,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsGetObjectAttrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_get_object_attr_c, arg_usize, true, false).await;
+        UzfsCoroutineFuture::run_as_thread(libuzfs_get_object_attr_c, arg_usize, false);
 
         if arg.err == 0 {
             Ok(arg.attr)
@@ -524,7 +524,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsCreateInode as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_create_inode_c, arg_usize, true, false).await;
+        UzfsCoroutineFuture::run_as_thread(libuzfs_create_inode_c, arg_usize, false);
 
         if arg.err == 0 {
             Ok((arg.ino, arg.txg))
@@ -544,7 +544,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsClaimInodeArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_claim_inode_c, arg_usize, true, false).await;
+        UzfsCoroutineFuture::run_as_thread(libuzfs_claim_inode_c, arg_usize, false);
 
         if arg.err == 0 {
             Ok(())
@@ -565,7 +565,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsDeleteInode as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_delete_inode_c, arg_usize, true, false).await;
+        UzfsCoroutineFuture::run_as_thread(libuzfs_delete_inode_c, arg_usize, false);
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -590,7 +590,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsGetAttrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_inode_getattr_c, arg_usize, true, false).await;
+        UzfsCoroutineFuture::run_as_thread(libuzfs_inode_getattr_c, arg_usize, false);
 
         if arg.err == 0 {
             unsafe { attr.reserved.set_len(arg.size as usize) };
@@ -616,7 +616,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsSetAttrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_set_attr_c, arg_usize, true, false).await;
+        UzfsCoroutineFuture::run_as_thread(libuzfs_set_attr_c, arg_usize, false);
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -638,7 +638,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsGetKvattrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_inode_get_kvattr_c, arg_usize, true, false).await;
+        UzfsCoroutineFuture::run_as_thread(libuzfs_inode_get_kvattr_c, arg_usize, false);
 
         if arg.err == 0 {
             Ok(arg.data)
@@ -669,7 +669,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsSetKvAttrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_set_kvattr_c, arg_usize, true, false).await;
+        UzfsCoroutineFuture::run_as_thread(libuzfs_set_kvattr_c, arg_usize, false);
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -690,7 +690,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsRemoveKvattrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_remove_kvattr_c, arg_usize, true, false).await;
+        UzfsCoroutineFuture::run_as_thread(libuzfs_remove_kvattr_c, arg_usize, false);
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -709,7 +709,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsListKvAttrsArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_list_kvattrs_c, arg_usize, true, false).await;
+        UzfsCoroutineFuture::run_as_thread(libuzfs_list_kvattrs_c, arg_usize, false);
 
         if arg.err == 0 {
             Ok(arg.names)
@@ -737,7 +737,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsCreateDentryArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_create_dentry_c, arg_usize, true, false).await;
+        UzfsCoroutineFuture::run_as_thread(libuzfs_create_dentry_c, arg_usize, false);
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -759,7 +759,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsDeleteDentryArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_delete_entry_c, arg_usize, true, false).await;
+        UzfsCoroutineFuture::run_as_thread(libuzfs_delete_entry_c, arg_usize, false);
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -781,7 +781,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsLookupDentryArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_lookup_dentry_c, arg_usize, true, false).await;
+        UzfsCoroutineFuture::run_as_thread(libuzfs_lookup_dentry_c, arg_usize, false);
 
         if arg.err == 0 {
             Ok(arg.ino)
@@ -809,7 +809,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsIterateDentryArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_iterate_dentry_c, arg_usize, true, false).await;
+        UzfsCoroutineFuture::run_as_thread(libuzfs_iterate_dentry_c, arg_usize, false);
 
         if arg.err == 0 {
             Ok((arg.data, arg.num))
@@ -841,7 +841,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsInodeCheckValidArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_inode_check_valid_c, arg_usize, true, false).await;
+        UzfsCoroutineFuture::run_as_thread(libuzfs_inode_check_valid_c, arg_usize, false);
 
         if arg.err == 0 {
             Ok(())

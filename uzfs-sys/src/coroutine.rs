@@ -107,7 +107,8 @@ impl UzfsCoroutineFuture {
                     pos = format!("{name} {filename}:{lineno}");
                 }
 
-                if (foreground && name.contains("UzfsCoroutineFuture::new"))
+                if (foreground
+                    && (name.contains("UzfsCoroutineFuture") || name.contains("Dataset")))
                     || (!foreground && name.eq("zk_thread_create"))
                 {
                     continue_trace = false;
@@ -149,6 +150,26 @@ impl UzfsCoroutineFuture {
             });
             add_backtrace_func(task_id, bt_string);
         }
+    }
+
+    #[inline]
+    pub fn run_as_thread(func: CoroutineFunc, arg: usize, backtrace: bool) {
+        let task_id = current_task_id.fetch_add(1, Ordering::Relaxed);
+
+        #[cfg(not(debug_assertions))]
+        let record_backtrace = None;
+
+        #[cfg(debug_assertions)]
+        let record_backtrace = if backtrace {
+            if let Some(add_creation_pos_func) = add_creation_pos.get() {
+                add_creation_pos_func(task_id, UzfsCoroutineFuture::get_creation_pos(true));
+            }
+            Some(UzfsCoroutineFuture::record_backtrace as unsafe extern "C" fn(u64))
+        } else {
+            None
+        };
+
+        unsafe { libuzfs_run_in_thread(Some(func), arg as *mut c_void, task_id, record_backtrace) };
     }
 }
 
