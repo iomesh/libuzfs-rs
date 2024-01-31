@@ -9,6 +9,8 @@ const MAX_KVATTR_VALUE_SIZE: usize = 8192;
 
 unsafe extern "C" fn print_backtrace() {
     let mut depth = 0;
+    let mut start_print =false;
+    let mut cur = 0;
     backtrace::trace(|frame| {
         backtrace::resolve_frame(frame, |symbol| {
             let name = match symbol.name() {
@@ -23,11 +25,18 @@ unsafe extern "C" fn print_backtrace() {
 
             let line = symbol.lineno().unwrap_or(0);
 
-            println!("#{depth}  {file_name}:{line}:{name}");
+	    if start_print {
+		println!("#{depth}  {file_name}:{line}:{name}");
+		cur += 1;
+	    }
             depth += 1;
+
+	    if name.contains("print_backtrace") {
+		start_print = true;
+	    }
         });
 
-        true // keep going to the next frame
+        cur < 10 // keep going to the next frame
     });
 }
 
