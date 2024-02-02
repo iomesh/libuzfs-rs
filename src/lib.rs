@@ -1238,6 +1238,7 @@ mod tests {
             ds.claim_inode(claim_ino, 123456, InodeType::DIR)
                 .await
                 .unwrap();
+            ds.create_dentry(claim_ino, "name", 0).await.unwrap();
             ds.delete_inode(claim_ino, InodeType::DIR).await.unwrap();
             ds.claim_inode(claim_ino, 123456, InodeType::DIR)
                 .await
