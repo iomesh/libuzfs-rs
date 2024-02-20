@@ -156,7 +156,7 @@ impl Future for UzfsCoroutineFuture {
     type Output = ();
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let waker = Box::into_raw(Box::new(cx.waker().clone()));
-        let res = unsafe {
+        let run_state = unsafe {
             libuzfs_run_coroutine(
                 self.uc,
                 Some(UzfsCoroutineFuture::wake),
@@ -164,13 +164,22 @@ impl Future for UzfsCoroutineFuture {
             )
         };
 
-        if res != 0 {
-            Poll::Pending
-        } else {
-            // when pending, its the callee's duty to free the waker
-            // so we should free the waker when poll returns ready
-            let _ = unsafe { Box::from_raw(waker) };
-            Poll::Ready(())
+        match run_state {
+            run_state_RUN_STATE_PENDING => Poll::Pending,
+            run_state_RUN_STATE_YIELDED => {
+                // this waker is not useful anymore
+                let _ = unsafe { Box::from_raw(waker) };
+                // use better way like context::defer to yield
+                let _ = Box::pin(tokio::task::yield_now()).poll_unpin(cx);
+                Poll::Pending
+            }
+            run_state_RUN_STATE_DONE => {
+                // when pending, its the callee's duty to free the waker
+                // so we should free the waker when poll returns ready
+                let _ = unsafe { Box::from_raw(waker) };
+                Poll::Ready(())
+            }
+            _ => panic!("{run_state} not expected"),
         }
     }
 }
@@ -223,7 +232,12 @@ pub unsafe extern "C" fn thread_create(
         }
     } else {
         let handle = uzfs_runtime
-            .get_or_init(|| tokio::runtime::Builder::new_multi_thread().build().unwrap())
+            .get_or_init(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .thread_name("uzfs-background")
+                    .build()
+                    .unwrap()
+            })
             .spawn(coroutine);
 
         if joinable != 0 {
