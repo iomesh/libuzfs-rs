@@ -39,3 +39,4 @@ petgraph = "0.6.3"
 serial_test.workspace = true
 dashmap.workspace = true
 tokio-test.workspace = true
+nix = { version = "0.27.1", features = ["process"] }

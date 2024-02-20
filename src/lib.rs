@@ -919,6 +919,10 @@ mod tests {
     use crate::MAX_RESERVED_SIZE;
     use cstr_argument::CStrArgument;
     use dashmap::DashMap;
+    use nix::sys::wait::waitpid;
+    use nix::sys::wait::WaitStatus;
+    use nix::unistd::fork;
+    use nix::unistd::ForkResult;
     use petgraph::algo::is_cyclic_directed;
     use petgraph::prelude::DiGraph;
     use rand::distributions::Alphanumeric;
@@ -926,6 +930,7 @@ mod tests {
     use serial_test::serial;
     use std::collections::HashMap;
     use std::io::ErrorKind;
+    use std::process::exit;
     use std::sync::atomic::AtomicU16;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1627,5 +1632,109 @@ mod tests {
 
         ds.close().await.unwrap();
         uzfs_env_fini().await;
+    }
+
+    #[ignore]
+    #[test]
+    fn uzfs_sync_test() {
+        let mut obj = 0;
+        let dev_path = "/tmp/uzfs.img";
+        let _ = std::fs::remove_file(dev_path);
+        let mut stored_data = Vec::<u64>::new();
+        for i in 0..100 {
+            // smallest write block is 16K
+            // file is divided by several 256K blocks
+            let file_blocks = rand::thread_rng().gen_range(64..=128);
+            let mut write_data = Vec::new();
+            if i < 99 {
+                for _ in 0..file_blocks {
+                    let mut write_blocks_remained = 16;
+                    while write_blocks_remained > 0 {
+                        let blocks = rand::thread_rng().gen_range(1..=write_blocks_remained);
+                        write_data.push(blocks);
+                        write_blocks_remained -= blocks;
+                    }
+                }
+                write_data.push(2);
+            }
+
+            match unsafe { fork() } {
+                Ok(ForkResult::Parent { child, .. }) => {
+                    let status = waitpid(child, None).unwrap();
+                    if let WaitStatus::Exited(_, res) = status {
+                        obj = res as u64;
+                    } else {
+                        panic!("{status:?} not expected");
+                    }
+                }
+                Ok(ForkResult::Child) => {
+                    let rt = tokio::runtime::Builder::new_multi_thread().build().unwrap();
+                    let obj = rt.block_on(async move {
+                        let dsname = "uzfs-test-pool/ds";
+                        if obj == 0 {
+                            let mut options = std::fs::OpenOptions::new();
+                            options
+                                .write(true)
+                                .create(true)
+                                .open(dev_path)
+                                .unwrap()
+                                .set_len(512 << 20)
+                                .unwrap();
+                        }
+                        uzfs_env_init().await;
+                        let ds = Arc::new(
+                            Dataset::init(dsname, dev_path, DatasetType::Data)
+                                .await
+                                .unwrap(),
+                        );
+
+                        if obj == 0 {
+                            obj = ds.create_objects(1).await.unwrap().0[0];
+                        }
+
+                        // check data written before
+                        let mut offset = 0;
+                        for (i, len) in stored_data.into_iter().enumerate() {
+                            let size = len << 14;
+                            for ele in ds.read_object(obj, offset, size).await.unwrap() {
+                                assert_eq!(ele, i as u8);
+                            }
+                            offset += size;
+                        }
+                        assert_eq!(ds.get_object_attr(obj).await.unwrap().size, offset);
+                        ds.truncate_object(obj, 0, 0).await.unwrap();
+
+                        let mut writer_handles =
+                            Vec::<JoinHandle<()>>::with_capacity(write_data.len());
+                        offset = 0;
+                        for (i, len) in write_data.into_iter().enumerate() {
+                            let ds_cloned = ds.clone();
+                            let size = len << 14;
+                            writer_handles.push(tokio::task::spawn(async move {
+                                let data = vec![i as u8; size as usize];
+                                ds_cloned
+                                    .write_object(obj, offset, true, &data)
+                                    .await
+                                    .unwrap();
+                            }));
+                            offset += size;
+                        }
+
+                        for handle in writer_handles {
+                            handle.await.unwrap();
+                        }
+
+                        assert_eq!(ds.get_object_attr(obj).await.unwrap().size, offset);
+                        obj
+                    });
+                    exit(obj as i32);
+                }
+                Err(err) => panic!("unexpected error: {err}"),
+            }
+
+            stored_data = write_data;
+        }
+
+        let _ = std::fs::remove_file(dev_path);
     }
 }
