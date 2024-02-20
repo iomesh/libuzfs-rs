@@ -160,7 +160,7 @@ mod tests {
                 break;
             }
 
-            coroutine_wake_and_yield();
+            coroutine_sched_yield();
         }
     }
 
@@ -178,7 +178,7 @@ mod tests {
                 break;
             }
 
-            coroutine_wake_and_yield();
+            coroutine_sched_yield();
         }
     }
 
