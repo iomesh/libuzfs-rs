@@ -9,7 +9,7 @@ use std::os::raw::{c_char, c_void};
 use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
 use uzfs_sys::async_sys::*;
-use uzfs_sys::bindings::{self as sys, uzfs_inode_attr_t, uzfs_object_attr_t};
+use uzfs_sys::bindings::{self as sys, iovec, uzfs_inode_attr_t, uzfs_object_attr_t};
 use uzfs_sys::coroutine::*;
 
 pub const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
@@ -403,14 +403,26 @@ impl Dataset {
     }
 
     // TODO(hping): add unit tests to verify sync write works well in crash scenario
-    pub async fn write_object(&self, obj: u64, offset: u64, sync: bool, data: &[u8]) -> Result<()> {
+    pub async fn write_object(
+        &self,
+        obj: u64,
+        offset: u64,
+        sync: bool,
+        data: Vec<&[u8]>,
+    ) -> Result<()> {
         let _guard = self.metrics.record(Method::WriteObject, data.len());
+        let iovs = data
+            .iter()
+            .map(|v| iovec {
+                iov_base: v.as_ptr() as *mut c_void,
+                iov_len: v.len() as u64,
+            })
+            .collect();
         let mut arg = LibuzfsWriteObjectArg {
             dhp: self.dhp,
             obj,
             offset,
-            size: data.len() as u64,
-            data: data.as_ptr() as *const i8,
+            iovs,
             sync,
             err: 0,
         };
@@ -1033,7 +1045,7 @@ mod tests {
 
             let data = s.as_bytes();
             let size = s.len() as u64;
-            ds.write_object(rwobj, 0, true, data).await.unwrap();
+            ds.write_object(rwobj, 0, true, vec![data]).await.unwrap();
             assert_eq!(ds.get_object_attr(rwobj).await.unwrap().size, size);
             assert_eq!(ds.read_object(rwobj, 0, size).await.unwrap(), data);
             assert_eq!(ds.read_object(rwobj, 0, size + 10).await.unwrap(), data);
@@ -1093,8 +1105,8 @@ mod tests {
             let size = 1 << 18;
             let mut data = Vec::<u8>::with_capacity(size);
             data.resize(size, 1);
-            ds.write_object(obj, 0, false, &data).await.unwrap();
-            ds.write_object(obj, (size * 2) as u64, false, &data)
+            ds.write_object(obj, 0, false, vec![&data]).await.unwrap();
+            ds.write_object(obj, (size * 2) as u64, false, vec![&data])
                 .await
                 .unwrap();
             ds.wait_synced().await.unwrap();
@@ -1374,7 +1386,7 @@ mod tests {
                 let obj = ds_clone.create_objects(1).await.unwrap().0[0];
                 while offset < size {
                     while ds_clone
-                        .write_object(obj, offset, false, &buf)
+                        .write_object(obj, offset, false, vec![&buf])
                         .await
                         .is_err()
                     {
@@ -1454,7 +1466,7 @@ mod tests {
                     buf_u16.resize(write_size, my_version);
                     let buf_u8 = unsafe { buf_u16.align_to::<u8>().1 };
                     ds_clone
-                        .write_object(obj, offset as u64 * 2, false, buf_u8)
+                        .write_object(obj, offset as u64 * 2, false, vec![buf_u8])
                         .await
                         .unwrap();
                 }
@@ -1713,7 +1725,7 @@ mod tests {
                             writer_handles.push(tokio::task::spawn(async move {
                                 let data = vec![i as u8; size as usize];
                                 ds_cloned
-                                    .write_object(obj, offset, true, &data)
+                                    .write_object(obj, offset, true, vec![&data])
                                     .await
                                     .unwrap();
                             }));
