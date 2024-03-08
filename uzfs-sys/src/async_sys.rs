@@ -422,8 +422,7 @@ pub struct LibuzfsWriteObjectArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
     pub obj: u64,
     pub offset: u64,
-    pub size: u64,
-    pub data: *const c_char,
+    pub iovs: Vec<iovec>,
     pub sync: bool,
 
     pub err: i32,
@@ -440,8 +439,8 @@ pub unsafe extern "C" fn libuzfs_write_object_c(arg: *mut c_void) {
         arg.dhp,
         arg.obj,
         arg.offset,
-        arg.size,
-        arg.data,
+        arg.iovs.as_mut_ptr(),
+        arg.iovs.len() as i32,
         arg.sync as u32,
     );
 }
