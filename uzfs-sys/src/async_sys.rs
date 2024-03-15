@@ -103,17 +103,13 @@ pub unsafe extern "C" fn libuzfs_dataset_init_c(arg: *mut c_void) {
     arg.zhp = libuzfs_zpool_open(arg.pool_name, &mut arg.ret);
     if !arg.zhp.is_null() {
         assert_eq!(arg.ret, 0);
-        arg.dhp = libuzfs_dataset_open(arg.dsname, &mut arg.ret);
+        arg.dhp = libuzfs_dataset_open(arg.dsname, &mut arg.ret, arg.dnodesize as u64);
         if arg.dhp.is_null() && arg.ret == libc::ENOENT {
             arg.ret = libuzfs_dataset_create(arg.dsname);
             assert_ne!(arg.ret, libc::EEXIST);
             if arg.ret == 0 {
-                arg.dhp = libuzfs_dataset_open(arg.dsname, &mut arg.ret);
+                arg.dhp = libuzfs_dataset_open(arg.dsname, &mut arg.ret, arg.dnodesize as u64);
             }
-        }
-
-        if !arg.dhp.is_null() {
-            arg.ret = libuzfs_dataset_set_props(arg.dsname, arg.dnodesize);
         }
 
         if arg.ret == 0 {

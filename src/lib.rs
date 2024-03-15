@@ -17,8 +17,7 @@ pub const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
 static UZFS_INIT_REF: OnceCell<Mutex<u32>> = OnceCell::new();
 const MAX_RESERVED_SIZE: usize = 192;
 const UZFS_DNODESIZE_META: u32 = 1024;
-// zero UZFS_DNODESIZE_DATA to use default dnodesize
-const UZFS_DNODESIZE_DATA: u32 = 0;
+const UZFS_DNODESIZE_DATA: u32 = 512;
 
 #[derive(Default)]
 pub struct InodeAttr {
@@ -975,7 +974,8 @@ mod tests {
 
         {
             let mut err = 0;
-            let hdl = unsafe { sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr(), &mut err) };
+            let hdl =
+                unsafe { sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr(), &mut err, 1024) };
             assert!(hdl.is_null());
             let hdl = unsafe { sys::libuzfs_zpool_open(poolname.into_cstr().as_ptr(), &mut err) };
             assert!(hdl.is_null());
@@ -1124,7 +1124,8 @@ mod tests {
 
         {
             let mut err = 0;
-            let hdl = unsafe { sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr(), &mut err) };
+            let hdl =
+                unsafe { sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr(), &mut err, 1024) };
             assert!(hdl.is_null());
             let hdl = unsafe { sys::libuzfs_zpool_open(poolname.into_cstr().as_ptr(), &mut err) };
             assert!(hdl.is_null());
