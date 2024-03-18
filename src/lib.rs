@@ -9,7 +9,9 @@ use std::os::raw::{c_char, c_void};
 use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
 use uzfs_sys::async_sys::*;
-use uzfs_sys::bindings::{self as sys, iovec, uzfs_inode_attr_t, uzfs_object_attr_t};
+use uzfs_sys::bindings::{
+    self as sys, dataset_statistics_t, iovec, uzfs_inode_attr_t, uzfs_object_attr_t,
+};
 use uzfs_sys::coroutine::*;
 
 pub const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
@@ -467,25 +469,17 @@ impl Dataset {
         }
     }
 
-    pub async fn space(&self) -> (u64, u64, u64, u64) {
+    pub async fn space(&self) -> dataset_statistics_t {
         let mut arg = LibuzfsDatasetSpaceArg {
             dhp: self.dhp,
-            refd_bytes: 0,
-            avail_bytes: 0,
-            used_objs: 0,
-            avail_objs: 0,
+            statistics: dataset_statistics_t::default(),
         };
 
         let arg_usize = &mut arg as *mut LibuzfsDatasetSpaceArg as usize;
 
         UzfsCoroutineFuture::new(libuzfs_dataset_space_c, arg_usize, true, false).await;
 
-        (
-            arg.refd_bytes,
-            arg.avail_bytes,
-            arg.used_objs,
-            arg.avail_objs,
-        )
+        arg.statistics
     }
 
     pub async fn object_has_hole_in_range(&self, obj: u64, offset: u64, size: u64) -> Result<bool> {
@@ -1018,6 +1012,8 @@ mod tests {
             let value_read = ds.get_kvattr(sb_ino, key).await.unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
             ds.wait_synced().await.unwrap();
+
+            println!("{:?}", ds.space().await);
 
             (tmp_ino, gen) = ds.create_inode(InodeType::DIR).await.unwrap();
             ds.check_valid(tmp_ino, gen).await.unwrap();

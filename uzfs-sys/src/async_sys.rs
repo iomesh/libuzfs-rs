@@ -476,10 +476,7 @@ pub unsafe extern "C" fn libuzfs_truncate_object_c(arg: *mut c_void) {
 pub struct LibuzfsDatasetSpaceArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
 
-    pub refd_bytes: u64,
-    pub avail_bytes: u64,
-    pub used_objs: u64,
-    pub avail_objs: u64,
+    pub statistics: dataset_statistics_t,
 }
 
 unsafe impl Send for LibuzfsDatasetSpaceArg {}
@@ -488,13 +485,7 @@ unsafe impl Sync for LibuzfsDatasetSpaceArg {}
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_dataset_space_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsDatasetSpaceArg);
-    libuzfs_dataset_space(
-        arg.dhp,
-        &mut arg.refd_bytes,
-        &mut arg.avail_bytes,
-        &mut arg.used_objs,
-        &mut arg.avail_objs,
-    );
+    libuzfs_dataset_space(arg.dhp, &mut arg.statistics);
 }
 
 pub struct LibuzfsFindHoleArg {
