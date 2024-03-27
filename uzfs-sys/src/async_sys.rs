@@ -51,6 +51,7 @@ pub struct LibuzfsDatasetInitArg {
     pub dev_path: *const c_char,
     pub pool_name: *const c_char,
     pub dnodesize: u32,
+    pub max_blksize: u32,
 
     pub ret: i32,
     pub dhp: *mut libuzfs_dataset_handle_t,
@@ -103,12 +104,13 @@ pub unsafe extern "C" fn libuzfs_dataset_init_c(arg: *mut c_void) {
     arg.zhp = libuzfs_zpool_open(arg.pool_name, &mut arg.ret);
     if !arg.zhp.is_null() {
         assert_eq!(arg.ret, 0);
-        arg.dhp = libuzfs_dataset_open(arg.dsname, &mut arg.ret, arg.dnodesize as u64);
+        arg.dhp = libuzfs_dataset_open(arg.dsname, &mut arg.ret, arg.dnodesize, arg.max_blksize);
         if arg.dhp.is_null() && arg.ret == libc::ENOENT {
             arg.ret = libuzfs_dataset_create(arg.dsname);
             assert_ne!(arg.ret, libc::EEXIST);
             if arg.ret == 0 {
-                arg.dhp = libuzfs_dataset_open(arg.dsname, &mut arg.ret, arg.dnodesize as u64);
+                arg.dhp =
+                    libuzfs_dataset_open(arg.dsname, &mut arg.ret, arg.dnodesize, arg.max_blksize);
             }
         }
 

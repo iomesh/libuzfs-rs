@@ -105,7 +105,10 @@ impl Dataset {
         dsname: P,
         dev_path: P,
         dstype: DatasetType,
+        max_blksize: u32,
     ) -> Result<Self> {
+        assert!(max_blksize == 0 || (max_blksize & (max_blksize - 1)) == 0);
+
         let dsname = dsname.into_cstr();
         let poolname = Self::dsname_to_poolname(&dsname)?;
         let dev_path_c = dev_path.into_cstr();
@@ -120,6 +123,7 @@ impl Dataset {
             dev_path: dev_path_c.as_ref().as_ptr(),
             pool_name: poolname.as_ptr() as *const c_char,
             dnodesize,
+            max_blksize,
 
             ret: 0,
             dhp: std::ptr::null_mut(),
@@ -974,8 +978,9 @@ mod tests {
 
         {
             let mut err = 0;
-            let hdl =
-                unsafe { sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr(), &mut err, 1024) };
+            let hdl = unsafe {
+                sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr(), &mut err, 1024, 4096)
+            };
             assert!(hdl.is_null());
             let hdl = unsafe { sys::libuzfs_zpool_open(poolname.into_cstr().as_ptr(), &mut err) };
             assert!(hdl.is_null());
@@ -985,6 +990,7 @@ mod tests {
                     dsname,
                     &uzfs_test_env.get_dev_path().unwrap(),
                     DatasetType::Meta,
+                    4096,
                 )
                 .await
                 .unwrap()
@@ -997,6 +1003,7 @@ mod tests {
                 dsname,
                 uzfs_test_env.get_dev_path().unwrap().as_str(),
                 DatasetType::Meta,
+                0,
             )
             .await
             .unwrap();
@@ -1124,8 +1131,9 @@ mod tests {
 
         {
             let mut err = 0;
-            let hdl =
-                unsafe { sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr(), &mut err, 1024) };
+            let hdl = unsafe {
+                sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr(), &mut err, 1024, 4096)
+            };
             assert!(hdl.is_null());
             let hdl = unsafe { sys::libuzfs_zpool_open(poolname.into_cstr().as_ptr(), &mut err) };
             assert!(hdl.is_null());
@@ -1133,6 +1141,7 @@ mod tests {
                 dsname,
                 uzfs_test_env.get_dev_path().unwrap().as_str(),
                 DatasetType::Meta,
+                4096,
             )
             .await
             .unwrap();
@@ -1195,6 +1204,7 @@ mod tests {
                 dsname,
                 uzfs_test_env.get_dev_path().unwrap().as_str(),
                 DatasetType::Meta,
+                4096,
             )
             .await
             .unwrap();
@@ -1247,6 +1257,7 @@ mod tests {
                 dsname,
                 uzfs_test_env.get_dev_path().unwrap().as_str(),
                 DatasetType::Meta,
+                4096,
             )
             .await
             .unwrap();
@@ -1270,6 +1281,7 @@ mod tests {
                 dsname,
                 uzfs_test_env.get_dev_path().unwrap().as_str(),
                 DatasetType::Meta,
+                4096,
             )
             .await
             .unwrap();
@@ -1285,6 +1297,7 @@ mod tests {
                 dsname,
                 uzfs_test_env.get_dev_path().unwrap().as_str(),
                 DatasetType::Meta,
+                4096,
             )
             .await
             .unwrap();
@@ -1315,6 +1328,7 @@ mod tests {
                 dsname,
                 uzfs_test_env.get_dev_path().unwrap().as_str(),
                 DatasetType::Meta,
+                4096,
             )
             .await
             .unwrap(),
@@ -1370,7 +1384,7 @@ mod tests {
 
         let dev_path = uzfs_test_env.get_dev_path().unwrap();
         let ds = Arc::new(
-            Dataset::init(dsname, &dev_path, DatasetType::Data)
+            Dataset::init(dsname, &dev_path, DatasetType::Data, 4096)
                 .await
                 .unwrap(),
         );
@@ -1434,6 +1448,7 @@ mod tests {
                 dsname,
                 uzfs_test_env.get_dev_path().unwrap().as_str(),
                 DatasetType::Data,
+                4096,
             )
             .await
             .unwrap(),
@@ -1550,6 +1565,7 @@ mod tests {
                 dsname,
                 uzfs_test_env.get_dev_path().unwrap().as_str(),
                 DatasetType::Meta,
+                4096,
             )
             .await
             .unwrap(),
@@ -1647,6 +1663,120 @@ mod tests {
         uzfs_env_fini().await;
     }
 
+    async fn test_reduce_max(dsname: &str, dev_path: &str) {
+        let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 4096)
+            .await
+            .unwrap();
+        let objs = ds.create_objects(4).await.unwrap().0;
+        // original max > blksize of obj0 > reduced max, but is not power of 2
+        let data0 = vec![1; 3 << 9];
+        ds.write_object(objs[0], 0, false, vec![&data0])
+            .await
+            .unwrap();
+        let obj_attr0 = ds.get_object_attr(objs[0]).await.unwrap();
+        assert_eq!(obj_attr0.blksize, data0.len() as u32);
+        // original max > blksize of obj1 > reduced max, is power of 2
+        let data1 = vec![1; 4 << 9];
+        ds.write_object(objs[1], 0, false, vec![&data1])
+            .await
+            .unwrap();
+        let blksize1 = ds.get_object_attr(objs[1]).await.unwrap().blksize;
+        assert_eq!(blksize1, data1.len() as u32);
+        // blksize of obj2 > original max > reduced max
+        let data2 = vec![1; 9 << 9];
+        ds.write_object(objs[2], 0, false, vec![&data2])
+            .await
+            .unwrap();
+        let blksize2 = ds.get_object_attr(objs[2]).await.unwrap().blksize;
+        assert_eq!(blksize2, 4096);
+        // original max > reduced max > blksize of obj3
+        let data3 = vec![1; 1 << 9];
+        ds.write_object(objs[3], 0, false, vec![&data3])
+            .await
+            .unwrap();
+        assert_eq!(
+            ds.get_object_attr(objs[3]).await.unwrap().blksize,
+            data3.len() as u32
+        );
+        ds.close().await.unwrap();
+
+        let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 1024)
+            .await
+            .unwrap();
+        ds.write_object(objs[0], data0.len() as u64, false, vec![&data0])
+            .await
+            .unwrap();
+        assert_eq!(ds.get_object_attr(objs[0]).await.unwrap().blksize, 2048);
+        ds.write_object(objs[1], data1.len() as u64, false, vec![&data1])
+            .await
+            .unwrap();
+        assert_eq!(ds.get_object_attr(objs[1]).await.unwrap().blksize, blksize1);
+        ds.write_object(objs[2], data2.len() as u64, false, vec![&data2])
+            .await
+            .unwrap();
+        assert_eq!(ds.get_object_attr(objs[2]).await.unwrap().blksize, blksize2);
+        ds.write_object(objs[3], 0, false, vec![&data2])
+            .await
+            .unwrap();
+        assert_eq!(ds.get_object_attr(objs[3]).await.unwrap().blksize, 1024);
+        ds.close().await.unwrap();
+    }
+
+    async fn test_increase_max(dsname: &str, dev_path: &str) {
+        let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 1024)
+            .await
+            .unwrap();
+        let objs = ds.create_objects(3).await.unwrap().0;
+        // blksize of obj0 > increased max > original max
+        let data0 = vec![1; 9 << 9];
+        ds.write_object(objs[0], 0, false, vec![&data0])
+            .await
+            .unwrap();
+        assert_eq!(ds.get_object_attr(objs[0]).await.unwrap().blksize, 1024);
+        // increased max > blksize of obj1 > original max
+        let data1 = vec![1; 3 << 9];
+        ds.write_object(objs[1], 0, false, vec![&data1])
+            .await
+            .unwrap();
+        assert_eq!(ds.get_object_attr(objs[1]).await.unwrap().blksize, 1024);
+        // increased max > orignal max > blksize of obj2
+        let data2 = vec![1; 1 << 9];
+        ds.write_object(objs[2], 0, false, vec![&data2])
+            .await
+            .unwrap();
+        assert_eq!(ds.get_object_attr(objs[2]).await.unwrap().blksize, 512);
+        ds.close().await.unwrap();
+
+        let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 4096)
+            .await
+            .unwrap();
+        ds.write_object(objs[0], data0.len() as u64, false, vec![&data0])
+            .await
+            .unwrap();
+        assert_eq!(ds.get_object_attr(objs[0]).await.unwrap().blksize, 1024);
+        ds.write_object(objs[1], data1.len() as u64, false, vec![&data1])
+            .await
+            .unwrap();
+        assert_eq!(ds.get_object_attr(objs[1]).await.unwrap().blksize, 1024);
+        ds.write_object(objs[2], data2.len() as u64, false, vec![&data0])
+            .await
+            .unwrap();
+        assert_eq!(ds.get_object_attr(objs[2]).await.unwrap().blksize, 4096);
+        ds.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn uzfs_block_test() {
+        let dsname = "uzfs-test-pool/ds";
+        let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+        let dev_path = uzfs_test_env.get_dev_path().unwrap();
+        uzfs_env_init().await;
+        test_reduce_max(dsname, &dev_path).await;
+        test_increase_max(dsname, &dev_path).await;
+        uzfs_env_fini().await;
+    }
+
     #[ignore]
     #[test]
     fn uzfs_sync_test() {
@@ -1696,7 +1826,7 @@ mod tests {
                         }
                         uzfs_env_init().await;
                         let ds = Arc::new(
-                            Dataset::init(dsname, dev_path, DatasetType::Data)
+                            Dataset::init(dsname, dev_path, DatasetType::Data, 4096)
                                 .await
                                 .unwrap(),
                         );
