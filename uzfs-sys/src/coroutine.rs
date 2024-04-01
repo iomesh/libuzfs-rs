@@ -10,10 +10,9 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     task::{Context, Poll, Waker},
 };
-use tokio::runtime::Runtime;
+use tokio::runtime::{Handle, Runtime};
 
 static id_task_handle_map: OnceCell<DashMap<u64, tokio::task::JoinHandle<()>>> = OnceCell::new();
-static id_runtime_map: OnceCell<DashMap<u64, std::thread::JoinHandle<()>>> = OnceCell::new();
 static uzfs_runtime: OnceCell<Runtime> = OnceCell::new();
 // start from 1 to pass null pointer check
 static current_task_id: AtomicU64 = AtomicU64::new(1);
@@ -209,42 +208,28 @@ pub unsafe extern "C" fn thread_create(
     arg: *mut c_void,
     _stksize: c_int,
     joinable: boolean_t,
-    new_runtime: boolean_t,
+    blocking: boolean_t,
 ) -> u64 {
     let coroutine = UzfsCoroutineFuture::new(thread_func.unwrap(), arg as usize, false, false);
     let task_id = coroutine.task_id;
+    let rt = uzfs_runtime.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .thread_name("uzfs-background")
+            .enable_all()
+            .build()
+            .unwrap()
+    });
 
-    if new_runtime != 0 {
-        let handle = std::thread::Builder::new()
-            .name("sep_runtime".into())
-            .spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .build()
-                    .unwrap();
-                rt.block_on(coroutine);
-            })
-            .unwrap();
-
-        if joinable != 0 {
-            id_runtime_map
-                .get_or_init(DashMap::new)
-                .insert(task_id, handle);
-        }
+    let handle = if blocking != 0 {
+        rt.spawn_blocking(move || Handle::current().block_on(coroutine))
     } else {
-        let handle = uzfs_runtime
-            .get_or_init(|| {
-                tokio::runtime::Builder::new_multi_thread()
-                    .thread_name("uzfs-background")
-                    .build()
-                    .unwrap()
-            })
-            .spawn(coroutine);
+        rt.spawn(coroutine)
+    };
 
-        if joinable != 0 {
-            id_task_handle_map
-                .get_or_init(DashMap::new)
-                .insert(task_id, handle);
-        }
+    if joinable != 0 {
+        id_task_handle_map
+            .get_or_init(DashMap::new)
+            .insert(task_id, handle);
     }
 
     task_id
@@ -257,26 +242,21 @@ pub unsafe extern "C" fn thread_exit() {
 
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn thread_join(task_id: u64) {
-    if let Some(map) = id_task_handle_map.get() {
-        if let Some(pair) = map.remove(&task_id) {
-            let mut handle = pair.1;
-            loop {
-                let arg = libuzfs_current_coroutine_arg();
-                let mut waker = Box::from_raw(arg as *mut Waker);
-                let context = &mut Context::from_waker(waker.as_mut());
-                match handle.poll_unpin(context) {
-                    Poll::Pending => libuzfs_coroutine_yield(),
-                    Poll::Ready(_) => {
-                        // leak this waker to reuse it
-                        assert_eq!(Box::into_raw(waker), arg as *mut Waker);
-                        break;
-                    }
+    if let Some(pair) = id_task_handle_map.get().unwrap().remove(&task_id) {
+        let mut handle = pair.1;
+        loop {
+            let arg = libuzfs_current_coroutine_arg();
+            let mut waker = Box::from_raw(arg as *mut Waker);
+            let context = &mut Context::from_waker(waker.as_mut());
+            match handle.poll_unpin(context) {
+                Poll::Pending => libuzfs_coroutine_yield(),
+                Poll::Ready(_) => {
+                    // leak this waker to reuse it
+                    assert_eq!(Box::into_raw(waker), arg as *mut Waker);
+                    break;
                 }
             }
-            return;
         }
+        return;
     }
-
-    let handle = id_runtime_map.get().unwrap().remove(&task_id).unwrap().1;
-    handle.join().unwrap();
 }
