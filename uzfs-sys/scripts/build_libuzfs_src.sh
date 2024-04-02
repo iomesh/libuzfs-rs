@@ -6,13 +6,13 @@ TOP_SRCDIR=$1
 ENABLE_DEBUG=$2
 
 ZFS_DIR=${TOP_SRCDIR}/zfs
-ZFS_TAG=uzfs-1.0.0-rc14
+ZFS_TAG=fix-truncate
 ZFS_PKG=zfs-${ZFS_TAG}
 ZFS_ZIP=${ZFS_PKG}.zip
 INSTALL_DIR=${TOP_SRCDIR}/install
 LIBUZFS=${INSTALL_DIR}/lib/libuzfs.a
 DOWNLOAD_DIR=${TOP_SRCDIR}/download
-DOWNLOAD_URL=https://github.com/iomesh/zfs/archive/refs/tags/${ZFS_TAG}.zip
+DOWNLOAD_URL=https://github.com/iomesh/zfs/archive/refs/heads/${ZFS_TAG}.zip
 LIBUZFS_PC=${INSTALL_DIR}/lib/pkgconfig/libuzfs.pc
 
 download_src() {
