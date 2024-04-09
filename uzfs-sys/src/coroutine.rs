@@ -29,12 +29,24 @@ pub static remove_creation_pos: OnceCell<fn(u64)> = OnceCell::new();
 #[cfg(debug_assertions)]
 const MAX_BACKTRACE_DEPTH: u32 = 20;
 
+#[derive(PartialEq, Eq, Debug)]
+enum CoroutineState {
+    Runnable,
+    Pending,
+    Done,
+}
+
+struct WakeArg {
+    state: CoroutineState,
+    waker: Option<Waker>,
+}
+
 pub struct UzfsCoroutineFuture {
     uc: *mut uzfs_coroutine_t,
     pub task_id: u64,
     #[cfg(debug_assertions)]
     backtrace: bool,
-    waker: Box<Mutex<Option<Waker>>>,
+    waker_arg: Box<Mutex<WakeArg>>,
 }
 
 type CoroutineFunc = unsafe extern "C" fn(arg: *mut c_void);
@@ -58,7 +70,10 @@ impl UzfsCoroutineFuture {
             None
         };
 
-        let mut waker = Box::new(Mutex::new(None));
+        let mut waker_arg = Box::new(Mutex::new(WakeArg {
+            state: CoroutineState::Runnable,
+            waker: None,
+        }));
 
         let uc = unsafe {
             libuzfs_new_coroutine(
@@ -68,7 +83,7 @@ impl UzfsCoroutineFuture {
                 foreground as u32,
                 record_backtrace,
                 Some(UzfsCoroutineFuture::wake),
-                waker.as_mut() as *mut _ as *mut c_void,
+                waker_arg.as_mut() as *mut _ as *mut c_void,
             )
         };
 
@@ -77,7 +92,7 @@ impl UzfsCoroutineFuture {
             task_id,
             #[cfg(debug_assertions)]
             backtrace,
-            waker,
+            waker_arg,
         }
     }
 
@@ -128,9 +143,12 @@ impl UzfsCoroutineFuture {
         pos
     }
 
-    unsafe extern "C" fn wake(waker: *mut c_void) {
-        let waker = &*(waker as *const Mutex<Option<Waker>>);
-        waker.lock().unwrap().as_ref().unwrap().wake_by_ref();
+    unsafe extern "C" fn wake(waker_arg: *mut c_void) {
+        let waker_arg = &*(waker_arg as *const Mutex<WakeArg>);
+        let mut waker_arg = waker_arg.lock().unwrap();
+        assert_eq!(waker_arg.state, CoroutineState::Pending);
+        waker_arg.state = CoroutineState::Runnable;
+        waker_arg.waker.as_ref().unwrap().wake_by_ref();
     }
 
     #[cfg(debug_assertions)]
@@ -167,26 +185,38 @@ impl Future for UzfsCoroutineFuture {
     type Output = ();
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let self_ref = self.as_ref();
-        let mut waker = self_ref.waker.lock().unwrap();
-        if waker
+        let mut waker_arg = self_ref.waker_arg.lock().unwrap();
+        match waker_arg.state {
+            CoroutineState::Runnable => (),
+            CoroutineState::Pending => return Poll::Pending,
+            CoroutineState::Done => return Poll::Ready(()),
+        }
+
+        if waker_arg
+            .waker
             .as_ref()
             .map(|waker| !waker.will_wake(cx.waker()))
             .unwrap_or(true)
         {
-            waker.replace(cx.waker().clone());
+            waker_arg.waker.replace(cx.waker().clone());
         }
-        drop(waker);
 
         let run_state = unsafe { libuzfs_run_coroutine(self.uc) };
 
         match run_state {
-            run_state_RUN_STATE_PENDING => Poll::Pending,
+            run_state_RUN_STATE_PENDING => {
+                waker_arg.state = CoroutineState::Pending;
+                Poll::Pending
+            }
             run_state_RUN_STATE_YIELDED => {
                 // use better way like context::defer to yield
                 let _ = Box::pin(tokio::task::yield_now()).poll_unpin(cx);
                 Poll::Pending
             }
-            run_state_RUN_STATE_DONE => Poll::Ready(()),
+            run_state_RUN_STATE_DONE => {
+                waker_arg.state = CoroutineState::Done;
+                Poll::Ready(())
+            }
             _ => panic!("{run_state} not expected"),
         }
     }
@@ -269,19 +299,16 @@ pub unsafe extern "C" fn thread_join(task_id: u64) {
         if let Some(pair) = map.remove(&task_id) {
             let mut handle = pair.1;
             loop {
-                let arg = &*(libuzfs_current_coroutine_arg() as *const Mutex<Option<Waker>>);
-                let mut waker = arg.lock().unwrap().take().unwrap();
+                let arg = &*(libuzfs_current_coroutine_arg() as *const Mutex<WakeArg>);
+                let mut arg = arg.lock().unwrap();
 
-                let context = &mut Context::from_waker(&mut waker);
-                match handle.poll_unpin(context) {
-                    Poll::Pending => libuzfs_coroutine_yield(),
-                    Poll::Ready(_) => {
-                        let mut arg = arg.lock().unwrap();
-                        if arg.is_none() {
-                            arg.replace(waker);
-                        }
-                        break;
+                let mut context = Context::from_waker(arg.waker.as_mut().unwrap());
+                match handle.poll_unpin(&mut context) {
+                    Poll::Pending => {
+                        drop(arg);
+                        libuzfs_coroutine_yield();
                     }
+                    Poll::Ready(_) => break,
                 }
             }
             return;
