@@ -7,7 +7,10 @@ use once_cell::sync::OnceCell;
 use std::{
     os::raw::{c_int, c_void},
     pin::Pin,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
     task::{Context, Poll, Waker},
 };
 use tokio::runtime::Runtime;
@@ -31,6 +34,7 @@ pub struct UzfsCoroutineFuture {
     pub task_id: u64,
     #[cfg(debug_assertions)]
     backtrace: bool,
+    waker: Box<Mutex<Option<Waker>>>,
 }
 
 type CoroutineFunc = unsafe extern "C" fn(arg: *mut c_void);
@@ -54,6 +58,8 @@ impl UzfsCoroutineFuture {
             None
         };
 
+        let mut waker = Box::new(Mutex::new(None));
+
         let uc = unsafe {
             libuzfs_new_coroutine(
                 Some(func),
@@ -61,13 +67,17 @@ impl UzfsCoroutineFuture {
                 task_id,
                 foreground as u32,
                 record_backtrace,
+                Some(UzfsCoroutineFuture::wake),
+                waker.as_mut() as *mut _ as *mut c_void,
             )
         };
+
         UzfsCoroutineFuture {
             uc,
             task_id,
             #[cfg(debug_assertions)]
             backtrace,
+            waker,
         }
     }
 
@@ -118,8 +128,9 @@ impl UzfsCoroutineFuture {
         pos
     }
 
-    unsafe extern "C" fn wake(arg: *mut c_void) {
-        Box::from_raw(arg as *mut Waker).wake();
+    unsafe extern "C" fn wake(waker: *mut c_void) {
+        let waker = &*(waker as *const Mutex<Option<Waker>>);
+        waker.lock().unwrap().as_ref().unwrap().wake_by_ref();
     }
 
     #[cfg(debug_assertions)]
@@ -155,30 +166,27 @@ impl UzfsCoroutineFuture {
 impl Future for UzfsCoroutineFuture {
     type Output = ();
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let waker = Box::into_raw(Box::new(cx.waker().clone()));
-        let run_state = unsafe {
-            libuzfs_run_coroutine(
-                self.uc,
-                Some(UzfsCoroutineFuture::wake),
-                waker as *mut c_void,
-            )
-        };
+        let self_ref = self.as_ref();
+        let mut waker = self_ref.waker.lock().unwrap();
+        if waker
+            .as_ref()
+            .map(|waker| !waker.will_wake(cx.waker()))
+            .unwrap_or(true)
+        {
+            waker.replace(cx.waker().clone());
+        }
+        drop(waker);
+
+        let run_state = unsafe { libuzfs_run_coroutine(self.uc) };
 
         match run_state {
             run_state_RUN_STATE_PENDING => Poll::Pending,
             run_state_RUN_STATE_YIELDED => {
-                // this waker is not useful anymore
-                let _ = unsafe { Box::from_raw(waker) };
                 // use better way like context::defer to yield
                 let _ = Box::pin(tokio::task::yield_now()).poll_unpin(cx);
                 Poll::Pending
             }
-            run_state_RUN_STATE_DONE => {
-                // when pending, its the callee's duty to free the waker
-                // so we should free the waker when poll returns ready
-                let _ = unsafe { Box::from_raw(waker) };
-                Poll::Ready(())
-            }
+            run_state_RUN_STATE_DONE => Poll::Ready(()),
             _ => panic!("{run_state} not expected"),
         }
     }
@@ -261,14 +269,17 @@ pub unsafe extern "C" fn thread_join(task_id: u64) {
         if let Some(pair) = map.remove(&task_id) {
             let mut handle = pair.1;
             loop {
-                let arg = libuzfs_current_coroutine_arg();
-                let mut waker = Box::from_raw(arg as *mut Waker);
-                let context = &mut Context::from_waker(waker.as_mut());
+                let arg = &*(libuzfs_current_coroutine_arg() as *const Mutex<Option<Waker>>);
+                let mut waker = arg.lock().unwrap().take().unwrap();
+
+                let context = &mut Context::from_waker(&mut waker);
                 match handle.poll_unpin(context) {
                     Poll::Pending => libuzfs_coroutine_yield(),
                     Poll::Ready(_) => {
-                        // leak this waker to reuse it
-                        assert_eq!(Box::into_raw(waker), arg as *mut Waker);
+                        let mut arg = arg.lock().unwrap();
+                        if arg.is_none() {
+                            arg.replace(waker);
+                        }
                         break;
                     }
                 }
