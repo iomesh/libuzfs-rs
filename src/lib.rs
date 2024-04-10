@@ -1826,7 +1826,7 @@ mod tests {
                         }
                         uzfs_env_init().await;
                         let ds = Arc::new(
-                            Dataset::init(dsname, dev_path, DatasetType::Data, 4096)
+                            Dataset::init(dsname, dev_path, DatasetType::Data, 262144)
                                 .await
                                 .unwrap(),
                         );
@@ -1839,8 +1839,16 @@ mod tests {
                         let mut offset = 0;
                         for (i, len) in stored_data.into_iter().enumerate() {
                             let size = len << 14;
-                            for ele in ds.read_object(obj, offset, size).await.unwrap() {
-                                assert_eq!(ele, i as u8);
+                            for (idx, ele) in ds
+                                .read_object(obj, offset, size)
+                                .await
+                                .unwrap()
+                                .into_iter()
+                                .enumerate()
+                            {
+                                if ele != i as u8 {
+                                    panic!("offset: {offset}, size: {size}, idx: {idx}");
+                                }
                             }
                             offset += size;
                         }
@@ -1855,6 +1863,7 @@ mod tests {
                             let size = len << 14;
                             writer_handles.push(tokio::task::spawn(async move {
                                 let data = vec![i as u8; size as usize];
+                                println!("offset: {offset}, size: {size}, data: {i}");
                                 ds_cloned
                                     .write_object(obj, offset, true, vec![&data])
                                     .await
