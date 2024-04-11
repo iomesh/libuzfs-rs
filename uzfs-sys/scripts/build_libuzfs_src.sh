@@ -6,7 +6,7 @@ TOP_SRCDIR=$1
 ENABLE_DEBUG=$2
 
 ZFS_DIR=${TOP_SRCDIR}/zfs
-ZFS_TAG=fix-double-poll
+ZFS_TAG=fix-double-poll3
 ZFS_PKG=zfs-${ZFS_TAG}
 ZFS_ZIP=${ZFS_PKG}.zip
 INSTALL_DIR=${TOP_SRCDIR}/install

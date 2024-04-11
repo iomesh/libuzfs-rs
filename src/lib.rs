@@ -1784,14 +1784,14 @@ mod tests {
         let dev_path = "/tmp/uzfs.img";
         let _ = std::fs::remove_file(dev_path);
         let mut stored_data = Vec::<u64>::new();
-        for i in 0..100 {
-            // smallest write block is 16K
+        for i in 0..1000 {
+            // smallest write block is 8K
             // file is divided by several 256K blocks
-            let file_blocks = rand::thread_rng().gen_range(64..=128);
+            let file_blocks = rand::thread_rng().gen_range(128..=256);
             let mut write_data = Vec::new();
-            if i < 99 {
+            if i < 999 {
                 for _ in 0..file_blocks {
-                    let mut write_blocks_remained = 16;
+                    let mut write_blocks_remained = 32;
                     while write_blocks_remained > 0 {
                         let blocks = rand::thread_rng().gen_range(1..=write_blocks_remained);
                         write_data.push(blocks);
@@ -1838,7 +1838,7 @@ mod tests {
                         // check data written before
                         let mut offset = 0;
                         for (i, len) in stored_data.into_iter().enumerate() {
-                            let size = len << 14;
+                            let size = len << 13;
                             for (idx, ele) in ds
                                 .read_object(obj, offset, size)
                                 .await
@@ -1847,23 +1847,24 @@ mod tests {
                                 .enumerate()
                             {
                                 if ele != i as u8 {
-                                    panic!("offset: {offset}, size: {size}, idx: {idx}");
+                                    panic!("off: {offset}, size: {size}, idx: {idx}, {ele} != {i}");
                                 }
                             }
                             offset += size;
                         }
                         assert_eq!(ds.get_object_attr(obj).await.unwrap().size, offset);
                         ds.truncate_object(obj, 0, 0).await.unwrap();
+                        ds.wait_synced().await.unwrap();
 
                         let mut writer_handles =
                             Vec::<JoinHandle<()>>::with_capacity(write_data.len());
                         offset = 0;
                         for (i, len) in write_data.into_iter().enumerate() {
                             let ds_cloned = ds.clone();
-                            let size = len << 14;
+                            let size = len << 13;
                             writer_handles.push(tokio::task::spawn(async move {
                                 let data = vec![i as u8; size as usize];
-                                println!("offset: {offset}, size: {size}, data: {i}");
+                                println!("off: {offset}, size: {size}, data: {i}");
                                 ds_cloned
                                     .write_object(obj, offset, true, vec![&data])
                                     .await
