@@ -1893,4 +1893,45 @@ mod tests {
 
         let _ = std::fs::remove_file(dev_path);
     }
+
+    #[tokio::test]
+    #[serial]
+    async fn uzfs_write_read_test() {
+        let dsname = "uzfs-test-pool/ds";
+        let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+        let dev_path = uzfs_test_env.get_dev_path().unwrap();
+        uzfs_env_init().await;
+
+        let concurrency = 64;
+        let mut handles = Vec::with_capacity(concurrency);
+        let ds = Arc::new(
+            Dataset::init(dsname, &dev_path, DatasetType::Data, 65536)
+                .await
+                .unwrap(),
+        );
+
+        for _ in 0..10000 {
+            let obj = ds.create_objects(1).await.unwrap().0[0];
+            let blksize = 16 << 10;
+            for i in 0..concurrency {
+                let ds = ds.clone();
+                let offset = blksize * i;
+                handles.push(async move {
+                    let data: Vec<_> = (0..blksize).map(|_| rand::thread_rng().gen()).collect();
+                    ds.write_object(obj, offset as u64, false, vec![&data])
+                        .await
+                        .unwrap();
+                    let read = ds
+                        .read_object(obj, offset as u64, blksize as u64)
+                        .await
+                        .unwrap();
+                    assert!(read == data);
+                });
+            }
+            ds.delete_object(obj).await.unwrap();
+        }
+
+        ds.close().await.unwrap();
+        uzfs_env_fini().await;
+    }
 }
