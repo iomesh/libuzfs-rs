@@ -945,6 +945,7 @@ mod tests {
     use serial_test::serial;
     use std::collections::HashMap;
     use std::io::ErrorKind;
+    use std::process::abort;
     use std::process::exit;
     use std::sync::atomic::AtomicU16;
     use std::sync::Arc;
@@ -1807,7 +1808,8 @@ mod tests {
                     if let WaitStatus::Exited(_, res) = status {
                         obj = res as u64;
                     } else {
-                        panic!("{status:?} not expected");
+                        println!("{status:?} not expected");
+                        abort();
                     }
                 }
                 Ok(ForkResult::Child) => {
@@ -1821,12 +1823,12 @@ mod tests {
                                 .create(true)
                                 .open(dev_path)
                                 .unwrap()
-                                .set_len(512 << 20)
+                                .set_len(128 << 20)
                                 .unwrap();
                         }
                         uzfs_env_init().await;
                         let ds = Arc::new(
-                            Dataset::init(dsname, dev_path, DatasetType::Data, 4096)
+                            Dataset::init(dsname, dev_path, DatasetType::Data, 262144)
                                 .await
                                 .unwrap(),
                         );
@@ -1839,8 +1841,19 @@ mod tests {
                         let mut offset = 0;
                         for (i, len) in stored_data.into_iter().enumerate() {
                             let size = len << 14;
-                            for ele in ds.read_object(obj, offset, size).await.unwrap() {
-                                assert_eq!(ele, i as u8);
+                            for (idx, ele) in ds
+                                .read_object(obj, offset, size)
+                                .await
+                                .unwrap()
+                                .into_iter()
+                                .enumerate()
+                            {
+                                if ele != i as u8 {
+                                    println!(
+                                        "offset: {offset}, size: {size}, idx: {idx}, {ele} != {i}"
+                                    );
+                                    abort();
+                                }
                             }
                             offset += size;
                         }

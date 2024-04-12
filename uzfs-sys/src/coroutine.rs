@@ -2,12 +2,15 @@ use crate::bindings::*;
 #[cfg(debug_assertions)]
 use backtrace::Symbol;
 use dashmap::DashMap;
-use futures::{Future, FutureExt};
+use futures::Future;
 use once_cell::sync::OnceCell;
 use std::{
     os::raw::{c_int, c_void},
     pin::Pin,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
     task::{Context, Poll, Waker},
 };
 use tokio::runtime::Runtime;
@@ -26,11 +29,24 @@ pub static remove_creation_pos: OnceCell<fn(u64)> = OnceCell::new();
 #[cfg(debug_assertions)]
 const MAX_BACKTRACE_DEPTH: u32 = 20;
 
+#[derive(PartialEq, Eq, Debug)]
+enum CoroutineState {
+    Runnable,
+    Pending,
+    Done,
+}
+
+struct WakeArg {
+    state: CoroutineState,
+    waker: Option<Waker>,
+}
+
 pub struct UzfsCoroutineFuture {
     uc: *mut uzfs_coroutine_t,
     pub task_id: u64,
     #[cfg(debug_assertions)]
     backtrace: bool,
+    waker_arg: Box<Mutex<WakeArg>>,
 }
 
 type CoroutineFunc = unsafe extern "C" fn(arg: *mut c_void);
@@ -54,6 +70,11 @@ impl UzfsCoroutineFuture {
             None
         };
 
+        let mut waker_arg = Box::new(Mutex::new(WakeArg {
+            state: CoroutineState::Runnable,
+            waker: None,
+        }));
+
         let uc = unsafe {
             libuzfs_new_coroutine(
                 Some(func),
@@ -61,13 +82,17 @@ impl UzfsCoroutineFuture {
                 task_id,
                 foreground as u32,
                 record_backtrace,
+                Some(UzfsCoroutineFuture::wake),
+                waker_arg.as_mut() as *mut _ as *mut c_void,
             )
         };
+
         UzfsCoroutineFuture {
             uc,
             task_id,
             #[cfg(debug_assertions)]
             backtrace,
+            waker_arg,
         }
     }
 
@@ -118,8 +143,12 @@ impl UzfsCoroutineFuture {
         pos
     }
 
-    unsafe extern "C" fn wake(arg: *mut c_void) {
-        Box::from_raw(arg as *mut Waker).wake();
+    unsafe extern "C" fn wake(waker_arg: *mut c_void) {
+        let waker_arg = &*(waker_arg as *const Mutex<WakeArg>);
+        let mut waker_arg = waker_arg.lock().unwrap();
+        assert_eq!(waker_arg.state, CoroutineState::Pending);
+        waker_arg.state = CoroutineState::Runnable;
+        waker_arg.waker.as_ref().unwrap().wake_by_ref();
     }
 
     #[cfg(debug_assertions)]
@@ -155,31 +184,43 @@ impl UzfsCoroutineFuture {
 impl Future for UzfsCoroutineFuture {
     type Output = ();
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let waker = Box::into_raw(Box::new(cx.waker().clone()));
-        let run_state = unsafe {
-            libuzfs_run_coroutine(
-                self.uc,
-                Some(UzfsCoroutineFuture::wake),
-                waker as *mut c_void,
-            )
-        };
+        let self_ref = self.as_ref();
+        // TODO(sundengyu): make sure this won't result in dead lock
+        let mut waker_arg = self_ref.waker_arg.lock().unwrap();
 
-        match run_state {
-            run_state_RUN_STATE_PENDING => Poll::Pending,
+        if waker_arg
+            .waker
+            .as_ref()
+            .map(|waker| !waker.will_wake(cx.waker()))
+            .unwrap_or(true)
+        {
+            waker_arg.waker.replace(cx.waker().clone());
+        }
+
+        // check state after waker replacing to make waker is latest
+        match waker_arg.state {
+            CoroutineState::Runnable => (),
+            CoroutineState::Pending => return Poll::Pending,
+            CoroutineState::Done => return Poll::Ready(()),
+        }
+
+        match unsafe { libuzfs_run_coroutine(self.uc) } {
+            run_state_RUN_STATE_PENDING => {
+                waker_arg.state = CoroutineState::Pending;
+                Poll::Pending
+            }
             run_state_RUN_STATE_YIELDED => {
-                // this waker is not useful anymore
-                let _ = unsafe { Box::from_raw(waker) };
                 // use better way like context::defer to yield
-                let _ = Box::pin(tokio::task::yield_now()).poll_unpin(cx);
+                let fut = tokio::task::yield_now();
+                tokio::pin!(fut);
+                let _ = fut.poll(cx);
                 Poll::Pending
             }
             run_state_RUN_STATE_DONE => {
-                // when pending, its the callee's duty to free the waker
-                // so we should free the waker when poll returns ready
-                let _ = unsafe { Box::from_raw(waker) };
+                waker_arg.state = CoroutineState::Done;
                 Poll::Ready(())
             }
-            _ => panic!("{run_state} not expected"),
+            other => panic!("{other} not expected"),
         }
     }
 }
@@ -258,22 +299,8 @@ pub unsafe extern "C" fn thread_exit() {
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn thread_join(task_id: u64) {
     if let Some(map) = id_task_handle_map.get() {
-        if let Some(pair) = map.remove(&task_id) {
-            let mut handle = pair.1;
-            loop {
-                let arg = libuzfs_current_coroutine_arg();
-                let mut waker = Box::from_raw(arg as *mut Waker);
-                let context = &mut Context::from_waker(waker.as_mut());
-                match handle.poll_unpin(context) {
-                    Poll::Pending => libuzfs_coroutine_yield(),
-                    Poll::Ready(_) => {
-                        // leak this waker to reuse it
-                        assert_eq!(Box::into_raw(waker), arg as *mut Waker);
-                        break;
-                    }
-                }
-            }
-            return;
+        if map.remove(&task_id).is_some() {
+            panic!("async join not supported !!!");
         }
     }
 
