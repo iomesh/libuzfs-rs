@@ -1785,12 +1785,12 @@ mod tests {
         let dev_path = "/tmp/uzfs.img";
         let _ = std::fs::remove_file(dev_path);
         let mut stored_data = Vec::<u64>::new();
-        for i in 0..100 {
+        for i in 0..10000 {
             // smallest write block is 16K
             // file is divided by several 256K blocks
             let file_blocks = rand::thread_rng().gen_range(64..=128);
             let mut write_data = Vec::new();
-            if i < 99 {
+            if i < 9999 {
                 for _ in 0..file_blocks {
                     let mut write_blocks_remained = 16;
                     while write_blocks_remained > 0 {
