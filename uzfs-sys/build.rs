@@ -13,8 +13,11 @@ fn main() {
         "yes"
     };
 
+    let enable_asan = env::var("ENABLE_ASAN").unwrap_or("no".to_owned());
+
     Command::new("make")
         .env("ENABLE_DEBUG", enable_debug)
+        .env("ENABLE_ASAN", enable_asan)
         .args(["-C", root.to_str().unwrap(), "build_libuzfs_src"])
         .status()
         .expect("failed to make libuzfs");

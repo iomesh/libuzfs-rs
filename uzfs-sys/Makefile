@@ -4,7 +4,7 @@ scripts_dir=${top_srcdir}/scripts
 all: build_libuzfs_src build
 
 build_libuzfs_src:
-	@bash ${scripts_dir}/build_libuzfs_src.sh ${top_srcdir} ${ENABLE_DEBUG}
+	@bash ${scripts_dir}/build_libuzfs_src.sh ${top_srcdir} ${ENABLE_DEBUG} ${ENABLE_ASAN}
 
 clean_libuzfs_src:
 	@bash ${scripts_dir}/clean_libuzfs_src.sh ${top_srcdir}
