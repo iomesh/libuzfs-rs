@@ -40,7 +40,6 @@ pub fn set_coroutine_backtrace_funcs(
     remove_creation_pos.get_or_init(|| remove_cp);
 }
 
-#[inline]
 pub async fn uzfs_env_init() {
     let _ = std::fs::remove_file(DEFAULT_CACHE_FILE);
     let mut guard = UZFS_INIT_REF.get_or_init(|| Mutex::new(0)).lock().await;
@@ -59,7 +58,14 @@ pub fn uzfs_set_zpool_cache_path<P: CStrArgument>(path: P) {
     }
 }
 
-#[inline]
+pub fn enable_debug_msg() {
+    unsafe { sys::libuzfs_enable_debug_msg() };
+}
+
+pub fn disable_debug_msg() {
+    unsafe { sys::libuzfs_disable_debug_msg() };
+}
+
 pub async fn uzfs_env_fini() {
     let mut guard = UZFS_INIT_REF.get().unwrap().lock().await;
     if *guard == 1 {
