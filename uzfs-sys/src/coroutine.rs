@@ -29,7 +29,7 @@ pub static remove_creation_pos: OnceCell<fn(u64)> = OnceCell::new();
 #[cfg(debug_assertions)]
 const MAX_BACKTRACE_DEPTH: u32 = 20;
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
 enum CoroutineState {
     Runnable,
     Pending,
@@ -220,13 +220,23 @@ impl Future for UzfsCoroutineFuture {
                 waker_arg.state = CoroutineState::Done;
                 Poll::Ready(())
             }
-            other => panic!("{other} not expected"),
+            other => unreachable!("{other} not expected"),
         }
     }
 }
 
 impl Drop for UzfsCoroutineFuture {
     fn drop(&mut self) {
+        let state = self.waker_arg.lock().unwrap().state;
+        if state != CoroutineState::Done {
+            panic!(
+                "coroutine {} dropped before it is ready, current state: {state:?}",
+                self.task_id
+            );
+        }
+        unsafe { assert_eq!((*self.uc).pending, 0) };
+        unsafe { assert_eq!((*self.uc).yielded, 0) };
+
         #[cfg(debug_assertions)]
         if self.backtrace {
             if let Some(remove_backtrace_func) = remove_backtrace.get() {
