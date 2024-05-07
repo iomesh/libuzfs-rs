@@ -9,7 +9,7 @@ use std::os::raw::{c_char, c_void};
 use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
 use uzfs_sys::async_sys::*;
-use uzfs_sys::bindings::{self as sys, iovec, uzfs_inode_attr_t, uzfs_object_attr_t};
+use uzfs_sys::bindings::{self as sys, iovec, timespec, uzfs_inode_attr_t, uzfs_object_attr_t};
 use uzfs_sys::coroutine::*;
 
 pub const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
@@ -871,6 +871,24 @@ impl Dataset {
         }
     }
 
+    pub async fn set_object_mtime_synced(&self, obj: u64, mtime: timespec) -> Result<()> {
+        let mut arg = LibuzfsObjectSetMtimeArg {
+            dhp: self.dhp,
+            obj,
+            mtime,
+            err: 0,
+        };
+
+        let arg_usize = &mut arg as *mut LibuzfsObjectSetMtimeArg as usize;
+        UzfsCoroutineFuture::new(libuzfs_object_set_mtime_synced, arg_usize, true, false).await;
+
+        if arg.err == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(arg.err))
+        }
+    }
+
     pub async fn close(&self) -> Result<()> {
         let mut arg = LibuzfsDatasetFiniArg {
             dhp: self.dhp,
@@ -958,6 +976,7 @@ mod tests {
     use std::time::Duration;
     use tokio::task::JoinHandle;
     use uzfs_sys::bindings as sys;
+    use uzfs_sys::bindings::timespec;
 
     #[tokio::test(flavor = "multi_thread")]
     #[serial]
@@ -1791,6 +1810,9 @@ mod tests {
         let dev_path = "/tmp/uzfs.img";
         let _ = std::fs::remove_file(dev_path);
         let mut stored_data = Vec::<u64>::new();
+        let key = "ababaa";
+        let mut stored_value: Vec<u8> = Vec::new();
+        let mut stored_mtime = timespec::default();
         for i in 0..100 {
             // smallest write block is 16K
             // file is divided by several 256K blocks
@@ -1807,6 +1829,12 @@ mod tests {
                 }
                 write_data.push(2);
             }
+            let mut rng = rand::thread_rng();
+            let value: Vec<u8> = (0..64).map(|_| rng.gen()).collect();
+            let mtime = timespec {
+                tv_sec: rng.gen(),
+                tv_nsec: rng.gen(),
+            };
 
             match unsafe { fork() } {
                 Ok(ForkResult::Parent { child, .. }) => {
@@ -1841,6 +1869,12 @@ mod tests {
 
                         if obj == 0 {
                             obj = ds.create_objects(1).await.unwrap().0[0];
+                        } else {
+                            let read_mtime = ds.get_object_attr(obj).await.unwrap().mtime;
+                            assert_eq!(read_mtime.tv_sec, stored_mtime.tv_sec);
+                            assert_eq!(read_mtime.tv_nsec, stored_mtime.tv_nsec);
+                            let v = ds.get_kvattr(obj, key).await.unwrap();
+                            assert_eq!(v, stored_value);
                         }
 
                         // check data written before
@@ -1886,6 +1920,11 @@ mod tests {
                             handle.await.unwrap();
                         }
 
+                        ds.set_kvattr(obj, key, &value, KvSetOption::NeedLog as u32)
+                            .await
+                            .unwrap();
+                        ds.set_object_mtime_synced(obj, mtime).await.unwrap();
+
                         assert_eq!(ds.get_object_attr(obj).await.unwrap().size, offset);
                         obj
                     });
@@ -1895,6 +1934,8 @@ mod tests {
             }
 
             stored_data = write_data;
+            stored_value = value;
+            stored_mtime = mtime;
         }
 
         let _ = std::fs::remove_file(dev_path);
