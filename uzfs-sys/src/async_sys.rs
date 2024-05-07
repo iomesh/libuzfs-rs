@@ -839,3 +839,25 @@ pub unsafe extern "C" fn libuzfs_inode_check_valid_c(arg: *mut c_void) {
     let arg = (arg as *mut LibuzfsInodeCheckValidArg).as_mut().unwrap();
     arg.err = libuzfs_inode_check_valid(arg.dhp, arg.ino, arg.gen);
 }
+
+pub struct LibuzfsObjectSetMtimeArg {
+    pub dhp: *mut libuzfs_dataset_handle_t,
+    pub obj: u64,
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
+
+    pub err: i32,
+}
+
+unsafe impl Send for LibuzfsObjectSetMtimeArg {}
+unsafe impl Sync for LibuzfsObjectSetMtimeArg {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_object_set_mtime(arg: *mut c_void) {
+    let arg = &mut *(arg as *mut LibuzfsObjectSetMtimeArg);
+    let mtime = timespec {
+        tv_sec: arg.tv_sec,
+        tv_nsec: arg.tv_nsec,
+    };
+    arg.err = libuzfs_object_setmtime(arg.dhp, arg.obj, &mtime, false as u32);
+}
