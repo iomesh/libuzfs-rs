@@ -1,7 +1,6 @@
 Cargo.lock
 target
 src/bindings.rs
-zfs
 download
 install
 libuzfs.pc

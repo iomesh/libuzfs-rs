@@ -18,7 +18,7 @@ fn main() {
     Command::new("make")
         .env("ENABLE_DEBUG", enable_debug)
         .env("ENABLE_ASAN", enable_asan)
-        .args(["build_libuzfs_src"])
+        .args(["-C", root.to_str().unwrap(), "build_libuzfs_src"])
         .status()
         .expect("failed to make libuzfs");
 
