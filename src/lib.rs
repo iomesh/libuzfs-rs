@@ -112,6 +112,7 @@ impl Dataset {
         dev_path: P,
         dstype: DatasetType,
         max_blksize: u32,
+        already_formatted: bool,
     ) -> Result<Self> {
         assert!(max_blksize == 0 || (max_blksize & (max_blksize - 1)) == 0);
 
@@ -130,6 +131,7 @@ impl Dataset {
             pool_name: poolname.as_ptr() as *const c_char,
             dnodesize,
             max_blksize,
+            already_formatted,
 
             ret: 0,
             dhp: std::ptr::null_mut(),
@@ -174,17 +176,8 @@ impl Dataset {
     }
 
     // this function should never block
-    pub fn get_superblock_ino(&self) -> Result<u64> {
-        let mut obj: u64 = 0;
-        let obj_ptr: *mut u64 = &mut obj;
-
-        let err = unsafe { sys::libuzfs_dataset_get_superblock_ino(self.dhp, obj_ptr) };
-
-        if err == 0 {
-            Ok(obj)
-        } else {
-            Err(io::Error::from_raw_os_error(err))
-        }
+    pub fn get_superblock_ino(&self) -> u64 {
+        unsafe { sys::libuzfs_dataset_get_superblock_ino(self.dhp) }
     }
 
     pub async fn zap_create(&self) -> Result<(u64, u64)> {
@@ -839,9 +832,8 @@ impl Dataset {
         }
     }
 
-    pub fn get_last_synced_txg(&self) -> Result<u64> {
-        let txg = unsafe { sys::libuzfs_get_last_synced_txg(self.dhp) };
-        Ok(txg)
+    pub fn get_last_synced_txg(&self) -> u64 {
+        unsafe { sys::libuzfs_get_last_synced_txg(self.dhp) }
     }
 
     pub async fn wait_synced(&self) -> Result<()> {
@@ -1012,12 +1004,26 @@ mod tests {
             let hdl = unsafe { sys::libuzfs_zpool_open(poolname.into_cstr().as_ptr(), &mut err) };
             assert!(hdl.is_null());
 
+            Dataset::init(
+                dsname,
+                &uzfs_test_env.get_dev_path().unwrap(),
+                DatasetType::Meta,
+                4096,
+                false,
+            )
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+
             for _ in 0..10 {
                 Dataset::init(
                     dsname,
                     &uzfs_test_env.get_dev_path().unwrap(),
                     DatasetType::Meta,
                     4096,
+                    false,
                 )
                 .await
                 .unwrap()
@@ -1031,12 +1037,13 @@ mod tests {
                 uzfs_test_env.get_dev_path().unwrap().as_str(),
                 DatasetType::Meta,
                 0,
+                false,
             )
             .await
             .unwrap();
 
-            sb_ino = ds.get_superblock_ino().unwrap();
-            let last_txg = ds.get_last_synced_txg().unwrap();
+            sb_ino = ds.get_superblock_ino();
+            let last_txg = ds.get_last_synced_txg();
 
             txg = ds
                 .set_kvattr(
@@ -1060,7 +1067,7 @@ mod tests {
 
             txg = ds.create_dentry(sb_ino, tmp_name, tmp_ino).await.unwrap();
             ds.wait_synced().await.unwrap();
-            assert!(ds.get_last_synced_txg().unwrap() >= txg);
+            assert!(ds.get_last_synced_txg() >= txg);
 
             let tmp_dentry_data_read = ds.lookup_dentry(sb_ino, tmp_name).await.unwrap();
             assert_eq!(tmp_ino, tmp_dentry_data_read);
@@ -1106,7 +1113,7 @@ mod tests {
             let dentry_data_read = ds.lookup_dentry(dir_ino, file_name).await.unwrap();
             assert_eq!(file_ino, dentry_data_read);
             ds.wait_synced().await.unwrap();
-            assert!(ds.get_last_synced_txg().unwrap() >= txg);
+            assert!(ds.get_last_synced_txg() >= txg);
 
             let (_, dentry_num) = ds.iterate_dentry(dir_ino, 0, 4096).await.unwrap();
 
@@ -1169,14 +1176,15 @@ mod tests {
                 uzfs_test_env.get_dev_path().unwrap().as_str(),
                 DatasetType::Meta,
                 4096,
+                false,
             )
             .await
             .unwrap();
 
-            assert!(ds.get_last_synced_txg().unwrap() >= txg);
+            assert!(ds.get_last_synced_txg() >= txg);
             assert_eq!(ds.list_object().await.unwrap(), num + 3);
 
-            assert_eq!(ds.get_superblock_ino().unwrap(), sb_ino);
+            assert_eq!(ds.get_superblock_ino(), sb_ino);
 
             let value_read = ds.get_kvattr(sb_ino, key).await.unwrap();
             assert_eq!(value_read.as_slice(), value.as_bytes());
@@ -1215,12 +1223,12 @@ mod tests {
 
             txg = ds.remove_kvattr(file_ino, key).await.unwrap();
             ds.wait_synced().await.unwrap();
-            assert!(ds.get_last_synced_txg().unwrap() >= txg);
+            assert!(ds.get_last_synced_txg() >= txg);
 
             _ = ds.delete_inode(dir_ino, InodeType::DIR).await.unwrap();
             txg = ds.delete_inode(file_ino, InodeType::FILE).await.unwrap();
             ds.wait_synced().await.unwrap();
-            assert!(ds.get_last_synced_txg().unwrap() >= txg);
+            assert!(ds.get_last_synced_txg() >= txg);
 
             assert_eq!(ds.list_object().await.unwrap(), num);
             ds.close().await.unwrap();
@@ -1232,6 +1240,7 @@ mod tests {
                 uzfs_test_env.get_dev_path().unwrap().as_str(),
                 DatasetType::Meta,
                 4096,
+                false,
             )
             .await
             .unwrap();
@@ -1285,6 +1294,7 @@ mod tests {
                 uzfs_test_env.get_dev_path().unwrap().as_str(),
                 DatasetType::Meta,
                 4096,
+                false,
             )
             .await
             .unwrap();
@@ -1309,6 +1319,7 @@ mod tests {
                 uzfs_test_env.get_dev_path().unwrap().as_str(),
                 DatasetType::Meta,
                 4096,
+                false,
             )
             .await
             .unwrap();
@@ -1325,6 +1336,7 @@ mod tests {
                 uzfs_test_env.get_dev_path().unwrap().as_str(),
                 DatasetType::Meta,
                 4096,
+                false,
             )
             .await
             .unwrap();
@@ -1356,6 +1368,7 @@ mod tests {
                 uzfs_test_env.get_dev_path().unwrap().as_str(),
                 DatasetType::Meta,
                 4096,
+                false,
             )
             .await
             .unwrap(),
@@ -1411,7 +1424,7 @@ mod tests {
 
         let dev_path = uzfs_test_env.get_dev_path().unwrap();
         let ds = Arc::new(
-            Dataset::init(dsname, &dev_path, DatasetType::Data, 4096)
+            Dataset::init(dsname, &dev_path, DatasetType::Data, 4096, false)
                 .await
                 .unwrap(),
         );
@@ -1476,6 +1489,7 @@ mod tests {
                 uzfs_test_env.get_dev_path().unwrap().as_str(),
                 DatasetType::Data,
                 4096,
+                false,
             )
             .await
             .unwrap(),
@@ -1593,6 +1607,7 @@ mod tests {
                 uzfs_test_env.get_dev_path().unwrap().as_str(),
                 DatasetType::Meta,
                 4096,
+                false,
             )
             .await
             .unwrap(),
@@ -1691,7 +1706,7 @@ mod tests {
     }
 
     async fn test_reduce_max(dsname: &str, dev_path: &str) {
-        let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 4096)
+        let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 4096, false)
             .await
             .unwrap();
         let objs = ds.create_objects(4).await.unwrap().0;
@@ -1727,7 +1742,7 @@ mod tests {
         );
         ds.close().await.unwrap();
 
-        let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 1024)
+        let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 1024, false)
             .await
             .unwrap();
         ds.write_object(objs[0], data0.len() as u64, false, vec![&data0])
@@ -1750,7 +1765,7 @@ mod tests {
     }
 
     async fn test_increase_max(dsname: &str, dev_path: &str) {
-        let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 1024)
+        let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 1024, false)
             .await
             .unwrap();
         let objs = ds.create_objects(3).await.unwrap().0;
@@ -1774,7 +1789,7 @@ mod tests {
         assert_eq!(ds.get_object_attr(objs[2]).await.unwrap().blksize, 512);
         ds.close().await.unwrap();
 
-        let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 4096)
+        let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 4096, false)
             .await
             .unwrap();
         ds.write_object(objs[0], data0.len() as u64, false, vec![&data0])
@@ -1863,7 +1878,7 @@ mod tests {
                         }
                         uzfs_env_init().await;
                         let ds = Arc::new(
-                            Dataset::init(dsname, dev_path, DatasetType::Data, 262144)
+                            Dataset::init(dsname, dev_path, DatasetType::Data, 262144, false)
                                 .await
                                 .unwrap(),
                         );
@@ -1958,7 +1973,7 @@ mod tests {
         let concurrency = 64;
         let mut handles = Vec::with_capacity(concurrency);
         let ds = Arc::new(
-            Dataset::init(dsname, &dev_path, DatasetType::Data, 65536)
+            Dataset::init(dsname, &dev_path, DatasetType::Data, 65536, false)
                 .await
                 .unwrap(),
         );
