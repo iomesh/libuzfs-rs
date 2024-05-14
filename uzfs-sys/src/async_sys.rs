@@ -52,6 +52,7 @@ pub struct LibuzfsDatasetInitArg {
     pub pool_name: *const c_char,
     pub dnodesize: u32,
     pub max_blksize: u32,
+    pub already_formatted: bool,
 
     pub ret: i32,
     pub dhp: *mut libuzfs_dataset_handle_t,
@@ -71,41 +72,37 @@ pub unsafe extern "C" fn libuzfs_dataset_init_c(arg: *mut c_void) {
         MAX_POOL_NAME_SIZE,
     );
 
-    // import failed, create zpool if not found
-    if arg.ret != 0 {
-        match arg.ret {
-            libc::ENOENT => {
-                arg.ret = libuzfs_zpool_create(
-                    arg.pool_name,
-                    arg.dev_path,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
-                if arg.ret == 0 {
-                    arg.ret = libuzfs_dataset_create(arg.dsname);
-                }
-
-                if arg.ret != 0 {
-                    return;
-                }
-                assert_ne!(arg.ret, libc::EEXIST);
-            }
-            _ => {
-                return;
-            }
-        }
-    } else {
+    if arg.ret == 0 {
         stored_pool_name.retain(|c| *c != 0);
         let stored_pool_name = std::str::from_utf8(&stored_pool_name).unwrap();
         let c_str = CStr::from_ptr(arg.pool_name);
         assert_eq!(c_str.to_str().unwrap(), stored_pool_name);
     }
 
+    // only when already_formatted is false and no labels on disk can we format
+    // this device, this is for data integrety
+    if arg.ret == libc::ENOENT && !arg.already_formatted {
+        arg.ret = libuzfs_zpool_create(
+            arg.pool_name,
+            arg.dev_path,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        if arg.ret == 0 {
+            arg.ret = libuzfs_dataset_create(arg.dsname);
+        }
+        assert_ne!(arg.ret, libc::EEXIST);
+    }
+
+    if arg.ret != 0 {
+        return;
+    }
+
     arg.zhp = libuzfs_zpool_open(arg.pool_name, &mut arg.ret);
     if !arg.zhp.is_null() {
         assert_eq!(arg.ret, 0);
         arg.dhp = libuzfs_dataset_open(arg.dsname, &mut arg.ret, arg.dnodesize, arg.max_blksize);
-        if arg.dhp.is_null() && arg.ret == libc::ENOENT {
+        if arg.dhp.is_null() && arg.ret == libc::ENOENT && !arg.already_formatted {
             arg.ret = libuzfs_dataset_create(arg.dsname);
             assert_ne!(arg.ret, libc::EEXIST);
             if arg.ret == 0 {
