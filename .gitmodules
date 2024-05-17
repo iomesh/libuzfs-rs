@@ -1,0 +1,3 @@
+[submodule "zfs"]
+	path = zfs
+	url = git@github.com:iomesh/zfs.git

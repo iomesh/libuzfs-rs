@@ -15,16 +15,16 @@ use std::{
 };
 use tokio::runtime::Runtime;
 
-static id_task_handle_map: OnceCell<DashMap<u64, tokio::task::JoinHandle<()>>> = OnceCell::new();
-static id_runtime_map: OnceCell<DashMap<u64, std::thread::JoinHandle<()>>> = OnceCell::new();
-static uzfs_runtime: OnceCell<Runtime> = OnceCell::new();
+static ID_TASK_HANDLE_MAP: OnceCell<DashMap<u64, tokio::task::JoinHandle<()>>> = OnceCell::new();
+static ID_RUNTIME_MAP: OnceCell<DashMap<u64, std::thread::JoinHandle<()>>> = OnceCell::new();
+static UZFS_RUNTIME: OnceCell<Runtime> = OnceCell::new();
 // start from 1 to pass null pointer check
-static current_task_id: AtomicU64 = AtomicU64::new(1);
+static CURRENT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
-pub static add_backtrace: OnceCell<fn(u64, String)> = OnceCell::new();
-pub static remove_backtrace: OnceCell<fn(u64)> = OnceCell::new();
-pub static add_creation_pos: OnceCell<fn(u64, String)> = OnceCell::new();
-pub static remove_creation_pos: OnceCell<fn(u64)> = OnceCell::new();
+pub static ADD_BACKTRACE: OnceCell<fn(u64, String)> = OnceCell::new();
+pub static REMOVE_BACKTRACE: OnceCell<fn(u64)> = OnceCell::new();
+pub static ADD_CREATION_POS: OnceCell<fn(u64, String)> = OnceCell::new();
+pub static REMOVE_CREATION_POS: OnceCell<fn(u64)> = OnceCell::new();
 
 #[cfg(debug_assertions)]
 const MAX_BACKTRACE_DEPTH: u32 = 20;
@@ -55,14 +55,14 @@ impl UzfsCoroutineFuture {
     // FIXME(sundengyu): pin arg to the address of arg to prevent future swap
     #[allow(unused_variables)]
     pub fn new(func: CoroutineFunc, arg: usize, foreground: bool, backtrace: bool) -> Self {
-        let task_id = current_task_id.fetch_add(1, Ordering::Relaxed);
+        let task_id = CURRENT_TASK_ID.fetch_add(1, Ordering::Relaxed);
 
         #[cfg(not(debug_assertions))]
         let record_backtrace = None;
 
         #[cfg(debug_assertions)]
         let record_backtrace = if backtrace {
-            if let Some(add_creation_pos_func) = add_creation_pos.get() {
+            if let Some(add_creation_pos_func) = ADD_CREATION_POS.get() {
                 add_creation_pos_func(task_id, UzfsCoroutineFuture::get_creation_pos(foreground));
             }
             Some(UzfsCoroutineFuture::record_backtrace as unsafe extern "C" fn(u64))
@@ -154,7 +154,7 @@ impl UzfsCoroutineFuture {
     #[cfg(debug_assertions)]
     unsafe extern "C" fn record_backtrace(task_id: u64) {
         use std::fmt::Write;
-        if let Some(add_backtrace_func) = add_backtrace.get() {
+        if let Some(add_backtrace_func) = ADD_BACKTRACE.get() {
             let mut bt_string = String::from("");
             let mut depth = 0;
             let mut begin_record = false;
@@ -205,10 +205,12 @@ impl Future for UzfsCoroutineFuture {
         }
 
         match unsafe { libuzfs_run_coroutine(self.uc) } {
+            #[allow(non_upper_case_globals)]
             run_state_RUN_STATE_PENDING => {
                 waker_arg.state = CoroutineState::Pending;
                 Poll::Pending
             }
+            #[allow(non_upper_case_globals)]
             run_state_RUN_STATE_YIELDED => {
                 // use better way like context::defer to yield
                 let fut = tokio::task::yield_now();
@@ -216,6 +218,7 @@ impl Future for UzfsCoroutineFuture {
                 let _ = fut.poll(cx);
                 Poll::Pending
             }
+            #[allow(non_upper_case_globals)]
             run_state_RUN_STATE_DONE => {
                 waker_arg.state = CoroutineState::Done;
                 Poll::Ready(())
@@ -239,10 +242,10 @@ impl Drop for UzfsCoroutineFuture {
 
         #[cfg(debug_assertions)]
         if self.backtrace {
-            if let Some(remove_backtrace_func) = remove_backtrace.get() {
+            if let Some(remove_backtrace_func) = REMOVE_BACKTRACE.get() {
                 remove_backtrace_func(self.task_id);
             }
-            if let Some(remove_creation_pos_func) = remove_creation_pos.get() {
+            if let Some(remove_creation_pos_func) = REMOVE_CREATION_POS.get() {
                 remove_creation_pos_func(self.task_id);
             }
         }
@@ -277,12 +280,12 @@ pub unsafe extern "C" fn thread_create(
             .unwrap();
 
         if joinable != 0 {
-            id_runtime_map
+            ID_RUNTIME_MAP
                 .get_or_init(DashMap::new)
                 .insert(task_id, handle);
         }
     } else {
-        let handle = uzfs_runtime
+        let handle = UZFS_RUNTIME
             .get_or_init(|| {
                 tokio::runtime::Builder::new_multi_thread()
                     .thread_name("uzfs-background")
@@ -292,7 +295,7 @@ pub unsafe extern "C" fn thread_create(
             .spawn(coroutine);
 
         if joinable != 0 {
-            id_task_handle_map
+            ID_TASK_HANDLE_MAP
                 .get_or_init(DashMap::new)
                 .insert(task_id, handle);
         }
@@ -308,12 +311,12 @@ pub unsafe extern "C" fn thread_exit() {
 
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn thread_join(task_id: u64) {
-    if let Some(map) = id_task_handle_map.get() {
+    if let Some(map) = ID_TASK_HANDLE_MAP.get() {
         if map.remove(&task_id).is_some() {
             panic!("async join not supported !!!");
         }
     }
 
-    let handle = id_runtime_map.get().unwrap().remove(&task_id).unwrap().1;
+    let handle = ID_RUNTIME_MAP.get().unwrap().remove(&task_id).unwrap().1;
     handle.join().unwrap();
 }
