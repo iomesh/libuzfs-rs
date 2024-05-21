@@ -32,6 +32,7 @@ tokio.workspace = true
 once_cell.workspace = true
 strum = "0.24"
 strum_macros = "0.24"
+nix = { version = "0.27.1", features = ["process"] }
 
 [dev-dependencies]
 rand.workspace = true
