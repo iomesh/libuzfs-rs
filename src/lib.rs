@@ -9,7 +9,9 @@ use std::os::raw::{c_char, c_void};
 use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
 use uzfs_sys::async_sys::*;
-use uzfs_sys::bindings::{self as sys, iovec, uzfs_inode_attr_t, uzfs_object_attr_t};
+use uzfs_sys::bindings::{
+    self as sys, iovec, libuzfs_set_fail_percent, uzfs_inode_attr_t, uzfs_object_attr_t,
+};
 use uzfs_sys::coroutine::*;
 
 pub const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
@@ -38,6 +40,10 @@ pub fn set_coroutine_backtrace_funcs(
     remove_backtrace.get_or_init(|| remove_bt);
     add_creation_pos.get_or_init(|| add_cp);
     remove_creation_pos.get_or_init(|| remove_cp);
+}
+
+pub fn set_fail_percent(fp: i32) {
+    unsafe { libuzfs_set_fail_percent(fp) };
 }
 
 pub async fn uzfs_env_init() {
