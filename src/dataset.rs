@@ -49,6 +49,10 @@ pub async fn uzfs_env_init() {
     *guard += 1;
 }
 
+pub fn set_fail_percent(fp: i32) {
+    unsafe { sys::libuzfs_set_fail_percent(fp) };
+}
+
 #[inline]
 pub fn uzfs_set_zpool_cache_path<P: CStrArgument>(path: P) {
     unsafe {
