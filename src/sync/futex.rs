@@ -54,14 +54,16 @@ impl WaiterList {
 
     #[inline]
     unsafe fn push_back(&mut self, node: &mut WaiterNode) {
-        assert_eq!(libc::pthread_spin_lock(&mut self.lock), 0);
         node.node.next = null_mut();
-        node.node.prev = self.tail as *mut ListNode;
-        self.tail = &mut node.node as *mut ListNode as *mut libc::c_void;
+        node.node.prev = self.tail as *mut _;
+        let addr = &mut node.node as *mut _;
+        if let Some(tail) = (self.tail as *mut ListNode).as_mut() {
+            tail.next = addr;
+        }
+        self.tail = addr as *mut libc::c_void;
         if self.head.is_null() {
             self.head = self.tail;
         }
-        unsafe { assert_eq!(libc::pthread_spin_unlock(&mut self.lock), 0) };
     }
 
     #[inline]
@@ -73,9 +75,8 @@ impl WaiterList {
                 self.tail = null_mut();
             }
             let waiter = &*(self.head.byte_sub(offset_of!(WaiterNode, node)) as *mut WaiterNode);
-            waiter.waker.lock().unwrap().take().unwrap().wake_by_ref();
-
             self.head = waiter.node.next as *mut libc::c_void;
+            waiter.waker.lock().unwrap().take().unwrap().wake_by_ref();
 
             true
         }
@@ -83,30 +84,43 @@ impl WaiterList {
 
     #[inline]
     unsafe fn remove(&mut self, node: &mut ListNode) {
+        if self.head == node as *mut _ as *mut libc::c_void {
+            self.head = node.next as *mut libc::c_void;
+        }
+        if self.tail == node as *mut _ as *mut libc::c_void {
+            self.tail = node.prev as *mut libc::c_void;
+        }
+
         if let Some(prev) = node.prev.as_mut() {
             prev.next = node.next;
         }
         if let Some(next) = node.next.as_mut() {
             next.prev = node.prev;
         }
-        if self.head == self.tail {
-            self.head = null_mut();
-            self.tail = null_mut();
-        }
     }
 
     #[inline]
     unsafe fn wake_one(&mut self) -> bool {
-        assert_eq!(libc::pthread_spin_lock(&mut self.lock), 0);
+        self.lock();
         let res = self.pop_and_wake_front();
-        unsafe { assert_eq!(libc::pthread_spin_unlock(&mut self.lock), 0) };
+        self.unlock();
         res
     }
 
     #[inline]
     unsafe fn wake_all(&mut self) {
-        assert_eq!(libc::pthread_spin_lock(&mut self.lock), 0);
+        self.lock();
         while self.pop_and_wake_front() {}
+        self.unlock();
+    }
+
+    #[inline]
+    unsafe fn lock(&mut self) {
+        unsafe { assert_eq!(libc::pthread_spin_lock(&mut self.lock), 0) };
+    }
+
+    #[inline]
+    unsafe fn unlock(&mut self) {
         unsafe { assert_eq!(libc::pthread_spin_unlock(&mut self.lock), 0) };
     }
 }
@@ -129,15 +143,10 @@ impl Future for FutexWaiter<'_> {
                 return Poll::Ready(libc::EWOULDBLOCK);
             }
 
-            unsafe { assert_eq!(libc::pthread_spin_lock(&mut self_mut.futex.waiters.lock), 0) };
+            unsafe { self_mut.futex.waiters.lock() };
             let cur_val = self_mut.futex.value().load(Ordering::Relaxed);
             if cur_val != self_mut.expected_value {
-                unsafe {
-                    assert_eq!(
-                        libc::pthread_spin_unlock(&mut self_mut.futex.waiters.lock),
-                        0
-                    )
-                };
+                unsafe { self_mut.futex.waiters.unlock() };
                 return Poll::Ready(libc::EWOULDBLOCK);
             }
 
@@ -150,12 +159,7 @@ impl Future for FutexWaiter<'_> {
                 .replace(cx.waker().clone())
                 .is_none());
             unsafe { self_mut.futex.waiters.push_back(&mut self_mut.node) };
-            unsafe {
-                assert_eq!(
-                    libc::pthread_spin_unlock(&mut self_mut.futex.waiters.lock),
-                    0
-                )
-            };
+            unsafe { self_mut.futex.waiters.unlock() };
             Poll::Pending
         } else {
             let mut waker = self_mut.node.waker.lock().unwrap();
@@ -178,15 +182,13 @@ impl Future for FutexWaiter<'_> {
 impl Drop for FutexWaiter<'_> {
     fn drop(&mut self) {
         if self.queued {
-            unsafe { assert_eq!(libc::pthread_spin_lock(&mut self.futex.waiters.lock), 0) };
+            unsafe { self.futex.waiters.lock() };
             let waker = self.node.waker.lock().unwrap();
             if waker.is_some() {
                 drop(waker);
                 unsafe { self.futex.waiters.remove(&mut self.node.node) };
-            } else {
-                unsafe { self.futex.waiters.wake_one() };
             }
-            unsafe { assert_eq!(libc::pthread_spin_unlock(&mut self.futex.waiters.lock), 0) };
+            unsafe { self.futex.waiters.unlock() };
         }
     }
 }
@@ -268,5 +270,41 @@ impl Futex {
             }
         }
         assert_eq!(libc::pthread_spin_destroy(&mut self.waiters.lock), 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::bindings::sys::Futex;
+    use futures::{task::noop_waker, Future};
+    use std::task::Context;
+
+    #[test]
+    fn futex_test() {
+        let mut futex = Futex::new(1);
+        let futex_ptr = &mut futex as *mut Futex;
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let waiter = unsafe { (*futex_ptr).wait(1) };
+        tokio::pin!(waiter);
+        assert!(waiter.poll(&mut cx).is_pending());
+        unsafe { assert!((*futex_ptr).wake_one()) };
+
+        {
+            let waiter = unsafe { (*futex_ptr).wait(1) };
+            tokio::pin!(waiter);
+            assert!(waiter.poll(&mut cx).is_pending());
+        }
+        unsafe { assert!(!(*futex_ptr).wake_one()) };
+
+        {
+            let waiter = unsafe { (*futex_ptr).wait(1) };
+            tokio::pin!(waiter);
+            assert!(waiter.poll(&mut cx).is_pending());
+            unsafe { assert!((*futex_ptr).wake_one()) };
+        }
+        unsafe { assert!(!(*futex_ptr).wake_one()) };
     }
 }

@@ -46,7 +46,6 @@ struct TaskQueue {
 
 impl TaskQueue {
     fn new(max_inflight: usize, new_rt: bool) -> Self {
-        TASKQ_KEY.get_or_init(|| COROUTINE_KEY.fetch_add(1, Relaxed));
         Self {
             tasks: Arc::new(DashMap::new()),
             inflight_limit: Arc::new(Semaphore::new(max_inflight)),
@@ -69,13 +68,12 @@ impl TaskQueue {
     ) -> u64 {
         self.inflight_limit.acquire().await.unwrap().forget();
 
-        let mut coroutine = AsyncCoroutine::new(func.unwrap(), arg as usize);
+        let mut coroutine = AsyncCoroutine::new(func.unwrap(), arg as usize, false);
         coroutine.set_specific(
-            *TASKQ_KEY.get().unwrap(),
+            *TASKQ_KEY.get_or_init(|| COROUTINE_KEY.fetch_add(1, Relaxed)),
             self as *const _ as *mut libc::c_void,
         );
 
-        // coroutine.set_specific(k, v)
         let id = coroutine.id;
         if let Some(taskq_ent) = taskq_ent {
             unsafe { *(taskq_ent as *mut u64) = id };
@@ -106,9 +104,10 @@ impl TaskQueue {
                 let taskq_ent = unsafe { AtomicU64::from_ptr(taskq_ent as *mut u64) };
                 taskq_ent.compare_exchange(id, 0, Relaxed, Relaxed).unwrap();
             }
+
+            let ent = ent.tasks.remove(&id).unwrap().1;
             ent.stop_notify.notify_one();
             ent.inflight_limit.add_permits(1);
-            ent.tasks.remove(&id);
         };
 
         if let Some(ref rt) = self.rt {
@@ -230,7 +229,8 @@ pub unsafe extern "C" fn taskq_init_ent(ent: *mut u64) {
 
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn taskq_destroy(taskq: *mut libc::c_void) {
-    let _ = Box::from_raw(taskq as *mut TaskQueue);
+    let taskq = Box::from_raw(taskq as *mut TaskQueue);
+    AsyncCoroutine::tls_coroutine().poll_until_ready(taskq.wait_all_outstanding());
 }
 
 #[allow(clippy::missing_safety_doc)]

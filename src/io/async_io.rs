@@ -35,8 +35,8 @@ unsafe fn io_submit(io_ctx: aio_context_t, iocbs: &[iocb]) -> Result<(), Error> 
         let ret = libc::syscall(
             libc::SYS_io_submit,
             io_ctx,
-            iocb_ptrs.len() as libc::c_long,
-            iocb_ptrs.as_ptr(),
+            iocb_ptrs.len() - nsubmitted,
+            iocb_ptrs.as_ptr().add(nsubmitted),
         );
         if ret > 0 {
             nsubmitted += ret as usize;

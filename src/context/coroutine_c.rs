@@ -62,7 +62,7 @@ pub unsafe extern "C" fn thread_create(
     arg: *mut c_void,
     state: i32,
 ) -> u64 {
-    let coroutine = AsyncCoroutine::new(thread_func.unwrap(), arg as usize);
+    let coroutine = AsyncCoroutine::new(thread_func.unwrap(), arg as usize, false);
     let id = coroutine.id;
     let fut = coroutine.fuse();
     let blocking = (state & TS_NEW_RUNTIME) != 0;

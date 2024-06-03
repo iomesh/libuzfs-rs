@@ -21,12 +21,12 @@ impl CondVar {
     }
 
     #[allow(clippy::missing_safety_doc)]
-    pub unsafe fn wait(&mut self, mutex: NonNull<co_mutex_t>) {
+    pub unsafe fn wait(&mut self, mutex: NonNull<Mutex>) {
         self.wait_optional_timeout(mutex, None);
     }
 
     #[allow(clippy::missing_safety_doc)]
-    pub unsafe fn wait_timeout(&mut self, mutex: NonNull<co_mutex_t>, duration: Duration) -> bool {
+    pub unsafe fn wait_timeout(&mut self, mutex: NonNull<Mutex>, duration: Duration) -> bool {
         self.wait_optional_timeout(mutex, Some(duration))
     }
 

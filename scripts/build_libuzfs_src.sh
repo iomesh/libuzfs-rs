@@ -11,9 +11,9 @@ INSTALL_DIR=${TOP_SRCDIR}/install
 LIBUZFS=${INSTALL_DIR}/lib/libuzfs.a
 LIBUZFS_PC=${INSTALL_DIR}/lib/pkgconfig/libuzfs.pc
 
-CFLAGS="-fPIC -O2 -ftls-model=initial-exec -fno-omit-frame-pointer -g"
+CFLAGS="-fPIC -O2 -ftls-model=initial-exec -g"
 if [ "${ENABLE_DEBUG}" = "yes" ]; then
-    CFLAGS="-fPIC -fno-omit-frame-pointer"
+    CFLAGS="-fPIC"
 fi;
 
 build_libuzfs_lib() {

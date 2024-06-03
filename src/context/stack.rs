@@ -1,5 +1,4 @@
 use libc::c_void;
-use once_cell::sync::OnceCell;
 use std::cell::RefCell;
 use std::{
     io::Error,
@@ -10,11 +9,13 @@ use std::{
 };
 
 static STACK_ID: AtomicU32 = AtomicU32::new(1);
+const MAX_STACK_ID: u64 = 256 << 10;
 
-pub(crate) struct Stack {
-    pub(crate) stack_bottom: *mut c_void,
+#[derive(Debug)]
+pub(super) struct Stack {
+    pub(super) stack_bottom: *mut c_void,
     // high 32 bit means version, lower 32 bits are id
-    pub(crate) stack_id: u64,
+    pub(super) stack_id: u64,
     stack_size: usize,
 }
 
@@ -36,9 +37,11 @@ impl Stack {
             Err(Error::last_os_error())
         } else {
             assert!(mem as usize % page_size == 0);
+            let stack_id = STACK_ID.fetch_add(1, Ordering::Relaxed) as u64;
+            assert!(stack_id < MAX_STACK_ID);
             Ok(Self {
                 stack_bottom: mem.byte_add(stack_size),
-                stack_id: (STACK_ID.fetch_add(1, Ordering::Relaxed) as u64) << 32,
+                stack_id,
                 stack_size,
             })
         }
@@ -61,13 +64,15 @@ impl Drop for Stack {
 struct StackPool {
     capacity: usize,
     stacks: Vec<Stack>,
+    global: bool,
 }
 
 impl StackPool {
-    fn new(capacity: usize) -> Self {
+    const fn new(capacity: usize, global: bool) -> Self {
         Self {
             capacity,
-            stacks: Vec::with_capacity(capacity),
+            stacks: Vec::new(),
+            global,
         }
     }
 
@@ -75,32 +80,47 @@ impl StackPool {
         self.stacks.pop()
     }
 
-    fn return_stack(&mut self, mut stack: Stack) -> Result<(), Stack> {
+    fn return_stack(&mut self, mut stack: Stack, id_increment: u64) -> Result<(), Stack> {
         if self.stacks.len() >= self.capacity {
             Err(stack)
         } else {
-            stack.stack_id += 1;
+            stack.stack_id += id_increment;
             self.stacks.push(stack);
             Ok(())
         }
     }
+
+    fn return_multi(&mut self, stacks: &mut Vec<Stack>) {
+	assert!(self.global);
+	assert!(self.stacks.len() + stacks.len() <= self.capacity);
+	self.stacks.append(stacks);
+    }
 }
 
-static GLOBAL_STACK_POOL: OnceCell<Mutex<StackPool>> = OnceCell::new();
+impl Drop for StackPool {
+    fn drop(&mut self) {
+        if !self.global {
+            GLOBAL_STACK_POOL
+                .lock()
+                .unwrap()
+                .return_multi(&mut self.stacks);
+        }
+    }
+}
+
+static GLOBAL_STACK_POOL: Mutex<StackPool> =
+    Mutex::new(StackPool::new(MAX_STACK_ID as usize, true));
 
 thread_local! {
-    static TLS_STACK_POOL: RefCell<StackPool> = RefCell::new(StackPool::new(1000));
+    static TLS_STACK_POOL: RefCell<StackPool> = const { RefCell::new(StackPool::new(128, false)) };
 }
 
 #[inline]
-pub(crate) fn fetch_or_alloc_stack(stack_size: usize) -> Stack {
+pub(super) fn fetch_or_alloc_stack(stack_size: usize) -> Stack {
     let stack = match TLS_STACK_POOL.with_borrow_mut(|tls_pool| tls_pool.fetch_stack()) {
         Some(stack) => stack,
         None => {
-            let mut global_pool = GLOBAL_STACK_POOL
-                .get_or_init(|| Mutex::new(StackPool::new(10000)))
-                .lock()
-                .unwrap();
+            let mut global_pool = GLOBAL_STACK_POOL.lock().unwrap();
             match global_pool.fetch_stack() {
                 Some(stack) => stack,
                 None => unsafe { Stack::new(stack_size).unwrap() },
@@ -114,10 +134,11 @@ pub(crate) fn fetch_or_alloc_stack(stack_size: usize) -> Stack {
 }
 
 #[inline]
-pub(crate) fn return_or_release_stack(stack: Stack) {
-    let res = TLS_STACK_POOL.with_borrow_mut(|tls_pool| tls_pool.return_stack(stack));
+pub(super) fn return_or_release_stack(stack: Stack, inc_id: bool) {
+    let id_increment = inc_id as u64 * MAX_STACK_ID;
+    let res = TLS_STACK_POOL.with_borrow_mut(|tls_pool| tls_pool.return_stack(stack, id_increment));
     if let Err(stack) = res {
-        let mut global_pool = GLOBAL_STACK_POOL.get().unwrap().lock().unwrap();
-        let _ = global_pool.return_stack(stack);
+        let mut global_pool = GLOBAL_STACK_POOL.lock().unwrap();
+        global_pool.return_stack(stack, id_increment).unwrap();
     }
 }
