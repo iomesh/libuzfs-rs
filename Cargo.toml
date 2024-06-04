@@ -10,8 +10,6 @@ crate-type = ["staticlib", "rlib"]
 members = ["uzfs-sys"]
 
 [build-dependencies]
-bindgen = "0.60"
-pkg-config = "0.3"
 uzfs-sys = { path = "uzfs-sys", version = "0.1.0" }
 
 [workspace.dependencies]

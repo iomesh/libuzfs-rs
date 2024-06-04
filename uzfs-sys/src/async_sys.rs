@@ -185,8 +185,7 @@ pub unsafe extern "C" fn libuzfs_zap_list_c(arg: *mut c_void) {
 
     loop {
         let mut name = Vec::<u8>::with_capacity(MAX_NAME_SIZE + 1);
-        let rc =
-            libuzfs_zap_iterator_name(iter, name.as_mut_ptr() as *mut c_char, MAX_NAME_SIZE as u64);
+        let rc = libuzfs_zap_iterator_name(iter, name.as_mut_ptr() as *mut c_char, MAX_NAME_SIZE);
         assert!(rc > 0);
         name.set_len(rc as usize);
         // make name end with '\0'
@@ -198,7 +197,7 @@ pub unsafe extern "C" fn libuzfs_zap_list_c(arg: *mut c_void) {
             arg.obj,
             name.as_mut_ptr() as *mut c_char,
             1,
-            value_size,
+            value_size as u64,
             value.as_mut_ptr() as *mut c_void,
         );
         value.set_len(value_size as usize);

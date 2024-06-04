@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [build-dependencies]
-bindgen = "0.60"
+bindgen = "0.69.4"
 pkg-config = "0.3.26"
 
 [dependencies]

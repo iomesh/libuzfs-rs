@@ -417,7 +417,7 @@ impl Dataset {
             .iter()
             .map(|v| iovec {
                 iov_base: v.as_ptr() as *mut c_void,
-                iov_len: v.len() as u64,
+                iov_len: v.len(),
             })
             .collect();
         let mut arg = LibuzfsWriteObjectArg {
