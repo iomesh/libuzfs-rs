@@ -4,12 +4,8 @@ use dashmap::DashMap;
 use futures::FutureExt;
 use libc::c_void;
 use once_cell::sync::OnceCell;
-use std::{
-    sync::atomic::{AtomicU32, Ordering},
-    time::Duration,
-};
-
-pub(crate) static COROUTINE_KEY: AtomicU32 = AtomicU32::new(0);
+use std::time::Duration;
+use tokio::runtime::Handle;
 
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn co_sched_yield() {
@@ -17,8 +13,11 @@ pub unsafe extern "C" fn co_sched_yield() {
 }
 
 #[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn co_create_key(key: *mut u32) {
-    *key = COROUTINE_KEY.fetch_add(1, Ordering::Relaxed);
+pub unsafe extern "C" fn co_create_key(
+    key: *mut u32,
+    destructor: Option<unsafe extern "C" fn(*mut c_void)>,
+) {
+    *key = AsyncCoroutine::create_key(destructor);
 }
 
 #[allow(clippy::missing_safety_doc)]
@@ -51,10 +50,9 @@ pub unsafe extern "C" fn co_sleep(duration: *const sys::timespec) {
 
 // const TS_RUN: i32 = 0x00000002;
 const TS_JOINABLE: i32 = 0x00000004;
-const TS_NEW_RUNTIME: i32 = 0x00000008;
+const TS_BLOCKING: i32 = 0x00000008;
 
 static ID_TASK_HANDLE_MAP: OnceCell<DashMap<u64, tokio::task::JoinHandle<()>>> = OnceCell::new();
-static ID_RUNTIME_MAP: OnceCell<DashMap<u64, std::thread::JoinHandle<()>>> = OnceCell::new();
 
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn thread_create(
@@ -62,28 +60,22 @@ pub unsafe extern "C" fn thread_create(
     arg: *mut c_void,
     state: i32,
 ) -> u64 {
-    let coroutine = AsyncCoroutine::new(thread_func.unwrap(), arg as usize, false);
+    let mut coroutine = AsyncCoroutine::new(thread_func.unwrap(), arg as usize, false);
+    coroutine.global = true;
     let id = coroutine.id;
     let fut = coroutine.fuse();
-    let blocking = (state & TS_NEW_RUNTIME) != 0;
-    let joinable = (state & TS_JOINABLE) != 0;
-    if blocking {
-        let handle = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .build()
-                .unwrap();
-            rt.block_on(fut);
-        });
-        if joinable {
-            ID_RUNTIME_MAP.get_or_init(DashMap::new).insert(id, handle);
-        }
+    let handle = if (state & TS_BLOCKING) != 0 {
+        tokio::task::spawn_blocking(move || {
+            Handle::current().block_on(fut);
+        })
     } else {
-        let handle = tokio::spawn(fut);
-        if joinable {
-            ID_TASK_HANDLE_MAP
-                .get_or_init(DashMap::new)
-                .insert(id, handle);
-        }
+        tokio::spawn(fut)
+    };
+
+    if (state & TS_JOINABLE) != 0 {
+        ID_TASK_HANDLE_MAP
+            .get_or_init(DashMap::new)
+            .insert(id, handle);
     }
 
     id
@@ -100,7 +92,5 @@ pub unsafe extern "C" fn thread_join(id: u64) {
         AsyncCoroutine::tls_coroutine()
             .poll_until_ready(handle)
             .unwrap();
-    } else if let Some((_, handle)) = ID_RUNTIME_MAP.get().unwrap().remove(&id) {
-        handle.join().unwrap();
     }
 }

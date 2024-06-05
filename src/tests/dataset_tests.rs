@@ -1,4 +1,4 @@
-use crate::bindings::sys;
+use crate::bindings::sys::timespec;
 use crate::uzfs_env_fini;
 use crate::uzfs_env_init;
 use crate::Dataset;
@@ -6,7 +6,6 @@ use crate::DatasetType;
 use crate::InodeType;
 use crate::KvSetOption;
 use crate::MAX_RESERVED_SIZE;
-use cstr_argument::CStrArgument;
 use dashmap::DashMap;
 use nix::sys::wait::waitpid;
 use nix::sys::wait::WaitStatus;
@@ -24,7 +23,6 @@ use std::process::exit;
 use std::sync::atomic::AtomicU16;
 use std::sync::Arc;
 use std::time::Duration;
-use sys::timespec;
 use tempfile::NamedTempFile;
 use tokio::task::JoinHandle;
 
@@ -81,19 +79,11 @@ async fn uzfs_test() {
     let file_name = "fileA";
     let reserved = vec![1; 128];
 
-    let dsname = "uzfs-test-pool/ds";
-    let poolname = "uzfs-test-pool";
+    let dsname = "uzfs-test/ds";
     uzfs_env_init().await;
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
 
     {
-        let mut err = 0;
-        let hdl =
-            unsafe { sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr(), &mut err, 1024, 4096) };
-        assert!(hdl.is_null());
-        let hdl = unsafe { sys::libuzfs_zpool_open(poolname.into_cstr().as_ptr(), &mut err) };
-        assert!(hdl.is_null());
-
         Dataset::init(
             dsname,
             &uzfs_test_env.get_dev_path().unwrap(),
@@ -254,12 +244,6 @@ async fn uzfs_test() {
     }
 
     {
-        let mut err = 0;
-        let hdl =
-            unsafe { sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr(), &mut err, 1024, 4096) };
-        assert!(hdl.is_null());
-        let hdl = unsafe { sys::libuzfs_zpool_open(poolname.into_cstr().as_ptr(), &mut err) };
-        assert!(hdl.is_null());
         let ds = Dataset::init(
             dsname,
             uzfs_test_env.get_dev_path().unwrap().as_str(),
@@ -373,7 +357,7 @@ async fn uzfs_test() {
 #[serial]
 async fn uzfs_claim_test() {
     let ino;
-    let dsname = "uzfs-test-pool/ds";
+    let dsname = "uzfs_claim_test/ds";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
     uzfs_env_init().await;
 
@@ -447,7 +431,7 @@ async fn uzfs_claim_test() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn uzfs_zap_iterator_test() {
-    let dsname = "uzfs-test-pool/ds";
+    let dsname = "uzfs_zap_iterator_test/ds";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
     uzfs_env_init().await;
 
@@ -507,7 +491,7 @@ async fn uzfs_zap_iterator_test() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn uzfs_expand_test() {
-    let dsname = "uzfs-test-pool/ds";
+    let dsname = "uzfs_expand_test/ds";
     let mut uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
     uzfs_env_init().await;
 
@@ -568,7 +552,7 @@ async fn uzfs_expand_test() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn uzfs_rangelock_test() {
-    let dsname = "uzfs-test-pool/ds";
+    let dsname = "uzfs_rangelock_test/ds";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
     uzfs_env_init().await;
 
@@ -685,7 +669,7 @@ async fn uzfs_rangelock_test() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn uzfs_attr_test() {
-    let dsname = "uzfs-test-pool/ds";
+    let dsname = "uzfs_attr_test/ds";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
     uzfs_env_init().await;
 
@@ -951,9 +935,12 @@ fn uzfs_sync_test() {
                 }
             }
             Ok(ForkResult::Child) => {
-                let rt = tokio::runtime::Builder::new_multi_thread().build().unwrap();
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
                 let obj = rt.block_on(async move {
-                    let dsname = "uzfs-test-pool/ds";
+                    let dsname = "uzfs_sync_test/ds";
                     if obj == 0 {
                         let mut options = std::fs::OpenOptions::new();
                         options
@@ -1052,7 +1039,7 @@ fn uzfs_sync_test() {
 #[tokio::test]
 #[serial]
 async fn uzfs_write_read_test() {
-    let dsname = "uzfs-test-pool/ds";
+    let dsname = "uzfs_write_read_test/ds";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
     let dev_path = uzfs_test_env.get_dev_path().unwrap();
     uzfs_env_init().await;

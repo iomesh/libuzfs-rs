@@ -5,7 +5,6 @@ use crate::context::coroutine_c::*;
 use crate::io::async_io_c::*;
 use crate::metrics::{Method, Metrics};
 use crate::sync::sync_c::*;
-use crate::sync::taskq::*;
 use cstr_argument::CStrArgument;
 use io::Result;
 use once_cell::sync::OnceCell;
@@ -105,24 +104,6 @@ pub async fn uzfs_env_init() {
             submit_aio_fsync: Some(submit_fsync),
         };
 
-        let taskq_ops = taskq_ops {
-            taskq_create: Some(taskq_create),
-            taskq_dispatch: Some(taskq_dispatch),
-            taskq_dispatch_delay: Some(taskq_dispatch_delay),
-            taskq_dispatch_ent: Some(taskq_dispatch_ent),
-            taskq_empty_ent: Some(taskq_empty_ent),
-            taskq_init_ent: Some(taskq_init_ent),
-            taskq_destroy: Some(taskq_destroy),
-            taskq_wait: Some(taskq_wait),
-            taskq_wait_id: Some(taskq_wait_id),
-            taskq_wait_outstanding: Some(taskq_wait_outstanding),
-            taskq_member: Some(taskq_member),
-            taskq_of_curthread: Some(taskq_of_curthread),
-            taskq_cancel_id: Some(taskq_cancel_id),
-            taskq_nalloc: Some(taskq_nalloc),
-            taskq_empty: Some(taskq_empty),
-        };
-
         let thread_ops = thread_ops {
             uthread_create: Some(thread_create),
             uthread_exit: Some(thread_exit),
@@ -137,7 +118,6 @@ pub async fn uzfs_env_init() {
                 &cond_ops,
                 &rwlock_ops,
                 &aio_ops,
-                &taskq_ops,
                 &thread_ops,
             )
         };

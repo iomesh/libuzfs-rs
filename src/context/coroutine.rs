@@ -1,5 +1,5 @@
 use super::libcontext::{fcontext_t, jump_fcontext, make_fcontext};
-use super::stack::{fetch_or_alloc_stack, return_or_release_stack, Stack};
+use super::stack::*;
 use dashmap::DashMap;
 use futures::{Future, FutureExt};
 use libc::{c_void, intptr_t};
@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::mem::transmute;
 use std::pin::Pin;
 use std::ptr::{self, NonNull};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::Context;
 use std::task::Poll;
 
@@ -38,8 +39,8 @@ unsafe extern "C" fn task_runner_c(_: intptr_t) {
     );
 }
 
-static KEY_DESTRUCTORS: OnceCell<DashMap<u32, unsafe extern "C" fn(arg: *mut c_void)>> =
-    OnceCell::new();
+pub(crate) static COROUTINE_KEY: AtomicU32 = AtomicU32::new(0);
+static KEY_DESTRUCTORS: OnceCell<DashMap<u32, unsafe extern "C" fn(*mut c_void)>> = OnceCell::new();
 
 thread_local! {
     static TLS_COROUTINE: Cell<usize> = const { Cell::new(0) };
@@ -65,6 +66,7 @@ pub struct AsyncCoroutine {
     saved_errno: i32,
     pub(crate) id: u64,
     foreground: bool,
+    pub(super) global: bool,
 
     #[cfg(target_arch = "x86_64")]
     bottom_fpp: usize,
@@ -107,6 +109,7 @@ impl AsyncCoroutine {
             specific: HashMap::new(),
             saved_errno: 0,
             foreground,
+            global: false,
 
             #[cfg(target_arch = "x86_64")]
             bottom_fpp: 0,
@@ -163,6 +166,17 @@ impl AsyncCoroutine {
     }
 
     #[inline]
+    pub(crate) fn create_key(destructor: Option<unsafe extern "C" fn(*mut c_void)>) -> u32 {
+        let key = COROUTINE_KEY.fetch_add(1, Ordering::Relaxed);
+        if let Some(destructor) = destructor {
+            KEY_DESTRUCTORS
+                .get_or_init(DashMap::new)
+                .insert(key, destructor);
+        }
+        key
+    }
+
+    #[inline]
     pub(crate) fn set_specific(&mut self, k: u32, v: *mut c_void) {
         self.specific.insert(k, v);
     }
@@ -201,7 +215,10 @@ impl Drop for AsyncCoroutine {
     fn drop(&mut self) {
         assert_eq!(self.state, RunState::Done);
         let stack: Stack = self.stack.take().unwrap();
-        return_or_release_stack(stack, !self.foreground);
+        match self.global {
+            true => return_stack_to_global(stack, !self.foreground),
+            false => return_stack(stack, !self.foreground),
+        };
         for (k, v) in &self.specific {
             if let Some(destructor) = KEY_DESTRUCTORS.get().unwrap().get(k) {
                 let destructor = destructor.value().to_owned();

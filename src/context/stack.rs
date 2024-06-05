@@ -14,7 +14,7 @@ const MAX_STACK_ID: u64 = 256 << 10;
 #[derive(Debug)]
 pub(super) struct Stack {
     pub(super) stack_bottom: *mut c_void,
-    // high 32 bit means version, lower 32 bits are id
+    // high 46 bit means version, lower 18 bits are id
     pub(super) stack_id: u64,
     stack_size: usize,
 }
@@ -91,9 +91,9 @@ impl StackPool {
     }
 
     fn return_multi(&mut self, stacks: &mut Vec<Stack>) {
-	assert!(self.global);
-	assert!(self.stacks.len() + stacks.len() <= self.capacity);
-	self.stacks.append(stacks);
+        assert!(self.global);
+        assert!(self.stacks.len() + stacks.len() <= self.capacity);
+        self.stacks.append(stacks);
     }
 }
 
@@ -134,11 +134,18 @@ pub(super) fn fetch_or_alloc_stack(stack_size: usize) -> Stack {
 }
 
 #[inline]
-pub(super) fn return_or_release_stack(stack: Stack, inc_id: bool) {
+pub(super) fn return_stack(stack: Stack, inc_id: bool) {
     let id_increment = inc_id as u64 * MAX_STACK_ID;
     let res = TLS_STACK_POOL.with_borrow_mut(|tls_pool| tls_pool.return_stack(stack, id_increment));
     if let Err(stack) = res {
         let mut global_pool = GLOBAL_STACK_POOL.lock().unwrap();
         global_pool.return_stack(stack, id_increment).unwrap();
     }
+}
+
+#[cold]
+pub(super) fn return_stack_to_global(stack: Stack, inc_id: bool) {
+    let id_increment = inc_id as u64 * MAX_STACK_ID;
+    let mut global_pool = GLOBAL_STACK_POOL.lock().unwrap();
+    global_pool.return_stack(stack, id_increment).unwrap();
 }

@@ -144,8 +144,8 @@ impl AioContex {
                     IoType::Sync => IOCB_CMD_FSYNC,
                 };
 
-                let mut iocb = iocb {
-                    aio_data: 0,
+                iocb {
+                    aio_data: aio_cb.arg as u64,
                     aio_key: 0,
                     aio_rw_flags: 0,
                     aio_lio_opcode: opcode as u16,
@@ -157,10 +157,7 @@ impl AioContex {
                     aio_reserved2: 0,
                     aio_flags: IOCB_FLAG_RESFD,
                     aio_resfd: self.eventfd.raw_fd() as u32,
-                };
-                iocb.aio_data = aio_cb.arg as u64;
-
-                iocb
+                }
             })
             .collect();
         unsafe { io_submit(self.io_ctx, &iocbs).unwrap() };

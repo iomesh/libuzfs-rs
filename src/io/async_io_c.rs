@@ -15,7 +15,7 @@ struct AioHandle {
 
 static FD_CONTEXT_MAP: OnceCell<DashMap<i32, Arc<AioHandle>>> = OnceCell::new();
 
-const DEFAULT_NR_REQUESTS: u32 = 1;
+const DEFAULT_NR_REQUESTS: u32 = 128;
 const ENV_NR_REQUESTS: &str = "NR_REQUESTS";
 
 #[allow(clippy::missing_safety_doc)]

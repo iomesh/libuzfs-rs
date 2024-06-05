@@ -24,9 +24,9 @@ pub unsafe extern "C" fn co_mutex_lock(mutex: *mut Mutex) {
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn co_mutex_trylock(mutex: *mut Mutex) -> i32 {
     if (*mutex).try_lock() {
-        0
+        1
     } else {
-        libc::EBUSY
+        0
     }
 }
 
