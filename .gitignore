@@ -1,6 +1,9 @@
 Cargo.lock
 target
-src/bindings.rs
+src/bindings/sys.rs
+src/sync/sync_ops.rs
+src/context/libcontext.rs
+src/io/aio.rs
 download
 install
 libuzfs.pc
