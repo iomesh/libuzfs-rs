@@ -39,20 +39,36 @@ fn main() {
                 .map(|path| format!("-L{}", path.to_string_lossy())),
         )
         .clang_args(lib.libs.iter().map(|lib| format!("-l{lib}")))
-        .header("src/wrapper.h")
+        .header("src/bindings/wrapper.h")
         .allowlist_function("libuzfs_.*")
+        .allowlist_function("taskq_.*")
+        .allowlist_file("taskq*")
         .allowlist_var("dmu_ot.*")
         .allowlist_type("DMU_OT.*")
-        .allowlist_function("co_rw_lock_.*")
-        .allowlist_function("co_cond_.*")
-        .allowlist_function("co_mutex_.*")
-        .allowlist_function("coroutine_.*")
-        .allowlist_file("coroutine.h")
         .derive_default(true)
+        .derive_copy(false)
         .generate()
         .expect("Unable to generate bindings");
 
     bindings
-        .write_to_file("src/bindings.rs")
+        .write_to_file("src/bindings/sys.rs")
         .expect("Couldn't write bindings!");
+
+    cc::Build::new()
+        .file("src/context/libcontext.c")
+        .compile("libcontext");
+
+    let context_bindings = bindgen::Builder::default()
+        .header("src/context/libcontext.h")
+        .generate()
+        .unwrap();
+    context_bindings
+        .write_to_file("src/context/libcontext.rs")
+        .unwrap();
+
+    let aio_bindings = bindgen::Builder::default()
+        .header("src/io/wrapper.h")
+        .generate()
+        .unwrap();
+    aio_bindings.write_to_file("src/io/aio.rs").unwrap();
 }
