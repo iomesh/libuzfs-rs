@@ -1,5 +1,4 @@
-use crate::bindings::*;
-use crate::coroutine::*;
+use super::sys::*;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_void};
 
@@ -7,38 +6,9 @@ const MAX_POOL_NAME_SIZE: i32 = 32;
 const MAX_NAME_SIZE: usize = 256;
 const MAX_KVATTR_VALUE_SIZE: usize = 8192;
 
-unsafe extern "C" fn print_backtrace() {
-    let mut depth = 0;
-    backtrace::trace(|frame| {
-        backtrace::resolve_frame(frame, |symbol| {
-            let name = match symbol.name() {
-                Some(name) => name.as_str().unwrap(),
-                None => "",
-            };
-
-            let file_name = match symbol.filename() {
-                Some(path) => path.to_str().unwrap(),
-                None => "",
-            };
-
-            let line = symbol.lineno().unwrap_or(0);
-
-            println!("#{depth}  {file_name}:{line}:{name}");
-            depth += 1;
-        });
-
-        true // keep going to the next frame
-    });
-}
-
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_init_c(_: *mut c_void) {
-    libuzfs_init(
-        Some(thread_create),
-        Some(thread_exit),
-        Some(thread_join),
-        Some(print_backtrace),
-    );
+    libuzfs_init();
 }
 
 #[allow(clippy::missing_safety_doc)]
@@ -185,8 +155,7 @@ pub unsafe extern "C" fn libuzfs_zap_list_c(arg: *mut c_void) {
 
     loop {
         let mut name = Vec::<u8>::with_capacity(MAX_NAME_SIZE + 1);
-        let rc =
-            libuzfs_zap_iterator_name(iter, name.as_mut_ptr() as *mut c_char, MAX_NAME_SIZE as u64);
+        let rc = libuzfs_zap_iterator_name(iter, name.as_mut_ptr() as *mut c_char, MAX_NAME_SIZE);
         assert!(rc > 0);
         name.set_len(rc as usize);
         // make name end with '\0'
@@ -198,7 +167,7 @@ pub unsafe extern "C" fn libuzfs_zap_list_c(arg: *mut c_void) {
             arg.obj,
             name.as_mut_ptr() as *mut c_char,
             1,
-            value_size,
+            value_size as u64,
             value.as_mut_ptr() as *mut c_void,
         );
         value.set_len(value_size as usize);
