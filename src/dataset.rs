@@ -1,7 +1,11 @@
-use crate::async_sys::*;
-use crate::bindings::{self as sys, iovec, uzfs_inode_attr_t, uzfs_object_attr_t};
-use crate::coroutine::*;
+use crate::bindings::async_sys::*;
+use crate::bindings::sys::*;
+use crate::context::coroutine::AsyncCoroutine;
+use crate::context::coroutine_c::*;
+use crate::context::taskq;
+use crate::io::async_io_c::*;
 use crate::metrics::{Method, Metrics};
+use crate::sync::sync_c::*;
 use cstr_argument::CStrArgument;
 use io::Result;
 use once_cell::sync::OnceCell;
@@ -25,17 +29,28 @@ pub struct InodeAttr {
     pub reserved: Vec<u8>,
 }
 
-#[inline]
-pub fn set_coroutine_backtrace_funcs(
-    add_bt: fn(u64, String),
-    remove_bt: fn(u64),
-    add_cp: fn(u64, String),
-    remove_cp: fn(u64),
-) {
-    ADD_BACKTRACE.get_or_init(|| add_bt);
-    REMOVE_BACKTRACE.get_or_init(|| remove_bt);
-    ADD_CREATION_POS.get_or_init(|| add_cp);
-    REMOVE_CREATION_POS.get_or_init(|| remove_cp);
+unsafe extern "C" fn print_backtrace() {
+    let mut depth = 0;
+    backtrace::trace(|frame| {
+        backtrace::resolve_frame(frame, |symbol| {
+            let name = match symbol.name() {
+                Some(name) => name.as_str().unwrap(),
+                None => "",
+            };
+
+            let file_name = match symbol.filename() {
+                Some(path) => path.to_str().unwrap(),
+                None => "",
+            };
+
+            let line = symbol.lineno().unwrap_or(0);
+
+            println!("#{depth}  {file_name}:{line}:{name}");
+            depth += 1;
+        });
+
+        true // keep going to the next frame
+    });
 }
 
 pub async fn uzfs_env_init() {
@@ -43,42 +58,122 @@ pub async fn uzfs_env_init() {
     let mut guard = UZFS_INIT_REF.get_or_init(|| Mutex::new(0)).lock().await;
 
     if *guard == 0 {
-        UzfsCoroutineFuture::new(libuzfs_init_c, 0, true, true).await;
+        let co_ops = coroutine_ops_t {
+            coroutine_key_create: Some(co_create_key),
+            coroutine_getkey: Some(co_get_key),
+            coroutine_setkey: Some(co_set_key),
+            uzfs_coroutine_self: Some(co_self),
+            coroutine_sched_yield: Some(co_sched_yield),
+            coroutine_sleep: Some(co_sleep),
+        };
+
+        let mutex_ops = co_mutex_ops {
+            co_mutex_held: Some(co_mutex_held),
+            co_mutex_init: Some(co_mutex_init),
+            co_mutex_destroy: Some(co_mutex_destroy),
+            co_mutex_lock: Some(co_mutex_lock),
+            co_mutex_trylock: Some(co_mutex_trylock),
+            co_mutex_unlock: Some(co_mutex_unlock),
+        };
+
+        let cond_ops = co_cond_ops {
+            co_cond_init: Some(co_cond_init),
+            co_cond_destroy: Some(co_cond_destroy),
+            co_cond_wait: Some(co_cond_wait),
+            co_cond_timedwait: Some(co_cond_timedwait),
+            co_cond_signal: Some(co_cond_signal),
+            co_cond_broadcast: Some(co_cond_broadcast),
+        };
+
+        let rwlock_ops = co_rwlock_ops {
+            co_rw_lock_read_held: Some(co_rwlock_read_held),
+            co_rw_lock_write_held: Some(co_rwlock_write_held),
+            co_rw_lock_init: Some(co_rwlock_init),
+            co_rw_lock_destroy: Some(co_rwlock_destroy),
+            co_rw_lock_read: Some(co_rw_lock_read),
+            co_rw_lock_write: Some(co_rw_lock_write),
+            co_rw_lock_try_read: Some(co_rwlock_try_read),
+            co_rw_lock_try_write: Some(co_rwlock_try_write),
+            co_rw_lock_exit: Some(co_rw_unlock),
+        };
+
+        let aio_ops = aio_ops {
+            register_aio_fd: Some(register_fd),
+            unregister_aio_fd: Some(unregister_fd),
+            submit_aio_read: Some(submit_read),
+            submit_aio_write: Some(submit_write),
+            submit_aio_fsync: Some(submit_fsync),
+        };
+
+        let thread_ops = thread_ops {
+            uthread_create: Some(thread_create),
+            uthread_exit: Some(thread_exit),
+            uthread_join: Some(thread_join),
+            backtrace: Some(print_backtrace),
+        };
+
+        let taskq_ops = taskq_ops {
+            taskq_create: Some(taskq::taskq_create),
+            taskq_dispatch: Some(taskq::taskq_dispatch),
+            taskq_delay_dispatch: Some(taskq::taskq_delay_dispatch),
+            taskq_member: Some(taskq::taskq_is_member),
+            taskq_of_curthread: Some(taskq::taskq_of_curthread),
+            taskq_wait: Some(taskq::taskq_wait),
+            taskq_destroy: Some(taskq::taskq_destroy),
+            taskq_wait_id: Some(taskq::taskq_wait_id),
+            taskq_cancel_id: Some(taskq::taskq_cancel_id),
+            taskq_is_empty: Some(taskq::taskq_is_empty),
+            taskq_nalloc: Some(taskq::taskq_nalloc),
+        };
+
+        unsafe {
+            libuzfs_set_sync_ops(
+                &co_ops,
+                &mutex_ops,
+                &cond_ops,
+                &rwlock_ops,
+                &aio_ops,
+                &thread_ops,
+                &taskq_ops,
+            )
+        };
+
+        AsyncCoroutine::new(libuzfs_init_c, 0, true).await;
     }
 
     *guard += 1;
 }
 
 pub fn set_fail_percent(fp: i32) {
-    unsafe { sys::libuzfs_set_fail_percent(fp) };
+    unsafe { libuzfs_set_fail_percent(fp) };
 }
 
 #[inline]
 pub fn uzfs_set_zpool_cache_path<P: CStrArgument>(path: P) {
     unsafe {
-        sys::libuzfs_set_zpool_cache_path(path.into_cstr().as_ref().as_ptr());
+        libuzfs_set_zpool_cache_path(path.into_cstr().as_ref().as_ptr());
     }
 }
 
 pub fn enable_debug_msg() {
-    unsafe { sys::libuzfs_enable_debug_msg() };
+    unsafe { libuzfs_enable_debug_msg() };
 }
 
 pub fn disable_debug_msg() {
-    unsafe { sys::libuzfs_disable_debug_msg() };
+    unsafe { libuzfs_disable_debug_msg() };
 }
 
 pub async fn uzfs_env_fini() {
     let mut guard = UZFS_INIT_REF.get().unwrap().lock().await;
     if *guard == 1 {
-        UzfsCoroutineFuture::new(libuzfs_fini_c, 0, true, false).await;
+        AsyncCoroutine::new(libuzfs_fini_c, 0, true).await;
     }
     *guard -= 1;
 }
 
 pub enum InodeType {
-    FILE = sys::libuzfs_inode_type_t_INODE_FILE as isize,
-    DIR = sys::libuzfs_inode_type_t_INODE_DIR as isize,
+    FILE = libuzfs_inode_type_t_INODE_FILE as isize,
+    DIR = libuzfs_inode_type_t_INODE_DIR as isize,
 }
 
 pub enum DatasetType {
@@ -93,8 +188,8 @@ pub enum KvSetOption {
 }
 
 pub struct Dataset {
-    dhp: *mut sys::libuzfs_dataset_handle_t,
-    zhp: *mut sys::libuzfs_zpool_handle_t,
+    dhp: *mut libuzfs_dataset_handle_t,
+    zhp: *mut libuzfs_zpool_handle_t,
     poolname: CString,
     pub metrics: Metrics,
 }
@@ -142,7 +237,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsDatasetInitArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_dataset_init_c, arg_usize, true, true).await;
+        AsyncCoroutine::new(libuzfs_dataset_init_c, arg_usize, true).await;
 
         let metrics = Metrics::new();
 
@@ -168,7 +263,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsDatasetExpandArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_dataset_expand_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_dataset_expand_c, arg_usize, true).await;
 
         if arg.ret == 0 {
             Ok(())
@@ -179,7 +274,7 @@ impl Dataset {
 
     // this function should never block
     pub fn get_superblock_ino(&self) -> u64 {
-        unsafe { sys::libuzfs_dataset_get_superblock_ino(self.dhp) }
+        unsafe { libuzfs_dataset_get_superblock_ino(self.dhp) }
     }
 
     pub async fn zap_create(&self) -> Result<(u64, u64)> {
@@ -200,7 +295,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsZapListArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_zap_list_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_zap_list_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.list)
@@ -224,7 +319,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsZapUpdateArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_zap_update_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_zap_update_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -255,7 +350,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsZapUpdateArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_zap_update_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_zap_update_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -276,7 +371,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsZapRemoveArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_zap_remove_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_zap_remove_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -297,7 +392,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsCreateObjectsArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_objects_create_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_objects_create_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok((arg.objs, arg.gen))
@@ -317,7 +412,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsDeleteObjectArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_delete_object_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_delete_object_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(())
@@ -329,7 +424,7 @@ impl Dataset {
     pub async fn wait_log_commit(&self) {
         let _guard = self.metrics.record(Method::WaitLogCommit, 0);
         let arg_usize = self.dhp as usize;
-        UzfsCoroutineFuture::new(libuzfs_wait_log_commit_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_wait_log_commit_c, arg_usize, true).await;
     }
 
     pub async fn get_object_attr(&self, obj: u64) -> Result<uzfs_object_attr_t> {
@@ -343,7 +438,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsGetObjectAttrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_get_object_attr_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_get_object_attr_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.attr)
@@ -360,22 +455,22 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsListObjectArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_list_object_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_list_object_c, arg_usize, true).await;
 
         Ok(arg.num_objs)
     }
 
-    pub async fn stat_object(&self, obj: u64) -> Result<sys::dmu_object_info_t> {
+    pub async fn stat_object(&self, obj: u64) -> Result<dmu_object_info_t> {
         let mut arg = LibuzfsStatObjectArg {
             dhp: self.dhp,
             obj,
-            doi: sys::dmu_object_info_t::default(),
+            doi: dmu_object_info_t::default(),
             err: 0,
         };
 
         let arg_usize = &mut arg as *mut LibuzfsStatObjectArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_stat_object_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_stat_object_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.doi)
@@ -397,7 +492,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsReadObjectArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_read_object_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_read_object_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.data)
@@ -406,7 +501,6 @@ impl Dataset {
         }
     }
 
-    // TODO(hping): add unit tests to verify sync write works well in crash scenario
     pub async fn write_object(
         &self,
         obj: u64,
@@ -419,7 +513,7 @@ impl Dataset {
             .iter()
             .map(|v| iovec {
                 iov_base: v.as_ptr() as *mut c_void,
-                iov_len: v.len() as u64,
+                iov_len: v.len(),
             })
             .collect();
         let mut arg = LibuzfsWriteObjectArg {
@@ -433,7 +527,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsWriteObjectArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_write_object_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_write_object_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(())
@@ -449,7 +543,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsSyncObjectArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_sync_object_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_sync_object_c, arg_usize, true).await;
     }
 
     pub async fn truncate_object(&self, obj: u64, offset: u64, size: u64) -> Result<()> {
@@ -463,7 +557,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsTruncateObjectArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_truncate_object_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_truncate_object_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(())
@@ -483,7 +577,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsDatasetSpaceArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_dataset_space_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_dataset_space_c, arg_usize, true).await;
 
         (
             arg.refd_bytes,
@@ -503,7 +597,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsFindHoleArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_object_next_hole_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_object_next_hole_c, arg_usize, true).await;
 
         match arg.err {
             0 => Ok(arg.off < offset + size),
@@ -511,7 +605,7 @@ impl Dataset {
         }
     }
 
-    pub fn dump_object_doi(obj: u64, doi: sys::dmu_object_info_t) {
+    pub fn dump_object_doi(obj: u64, doi: dmu_object_info_t) {
         println!("object: {obj}");
         println!("\tdata_block_size: {}", doi.doi_data_block_size);
         println!("\tmetadata_block_size: {}", doi.doi_metadata_block_size);
@@ -540,7 +634,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsCreateInode as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_create_inode_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_create_inode_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok((arg.ino, arg.txg))
@@ -560,7 +654,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsClaimInodeArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_claim_inode_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_claim_inode_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(())
@@ -581,7 +675,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsDeleteInode as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_delete_inode_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_delete_inode_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -606,7 +700,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsGetAttrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_inode_getattr_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_inode_getattr_c, arg_usize, true).await;
 
         if arg.err == 0 {
             unsafe { attr.reserved.set_len(arg.size as usize) };
@@ -632,7 +726,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsSetAttrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_set_attr_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_set_attr_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -654,7 +748,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsGetKvattrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_inode_get_kvattr_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_inode_get_kvattr_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.data)
@@ -685,7 +779,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsSetKvAttrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_set_kvattr_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_set_kvattr_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -706,7 +800,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsRemoveKvattrArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_remove_kvattr_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_remove_kvattr_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -725,7 +819,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsListKvAttrsArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_list_kvattrs_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_list_kvattrs_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.names)
@@ -753,7 +847,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsCreateDentryArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_create_dentry_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_create_dentry_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -775,7 +869,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsDeleteDentryArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_delete_entry_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_delete_entry_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -797,7 +891,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsLookupDentryArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_lookup_dentry_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_lookup_dentry_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(arg.ino)
@@ -825,7 +919,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsIterateDentryArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_iterate_dentry_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_iterate_dentry_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok((arg.data, arg.num))
@@ -835,13 +929,13 @@ impl Dataset {
     }
 
     pub fn get_last_synced_txg(&self) -> u64 {
-        unsafe { sys::libuzfs_get_last_synced_txg(self.dhp) }
+        unsafe { libuzfs_get_last_synced_txg(self.dhp) }
     }
 
     pub async fn wait_synced(&self) -> Result<()> {
         let _guard = self.metrics.record(Method::WaitSynced, 0);
         let arg_usize = self.dhp as usize;
-        UzfsCoroutineFuture::new(libuzfs_wait_synced_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_wait_synced_c, arg_usize, true).await;
         Ok(())
     }
 
@@ -856,7 +950,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsInodeCheckValidArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_inode_check_valid_c, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_inode_check_valid_c, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(())
@@ -875,7 +969,7 @@ impl Dataset {
         };
 
         let arg_usize = &mut arg as *mut LibuzfsObjectSetMtimeArg as usize;
-        UzfsCoroutineFuture::new(libuzfs_object_set_mtime, arg_usize, true, false).await;
+        AsyncCoroutine::new(libuzfs_object_set_mtime, arg_usize, true).await;
 
         if arg.err == 0 {
             Ok(())
@@ -894,7 +988,7 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsDatasetFiniArg as usize;
 
-        UzfsCoroutineFuture::new(libuzfs_dataset_fini_c, arg_usize, true, true).await;
+        AsyncCoroutine::new(libuzfs_dataset_fini_c, arg_usize, true).await;
 
         if arg.err != 0 {
             Err(io::Error::from_raw_os_error(arg.err))
