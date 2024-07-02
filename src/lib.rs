@@ -1962,7 +1962,7 @@ mod tests {
         let _ = std::fs::remove_file(dev_path);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     #[serial]
     async fn uzfs_write_read_test() {
         let dsname = "uzfs-test-pool/ds";
@@ -1971,20 +1971,20 @@ mod tests {
         uzfs_env_init().await;
 
         let concurrency = 64;
-        let mut handles = Vec::with_capacity(concurrency);
         let ds = Arc::new(
             Dataset::init(dsname, &dev_path, DatasetType::Data, 65536, false)
                 .await
                 .unwrap(),
         );
 
-        for _ in 0..10000 {
+        for _ in 0..10 {
+            let mut handles = Vec::with_capacity(concurrency);
             let obj = ds.create_objects(1).await.unwrap().0[0];
             let blksize = 16 << 10;
             for i in 0..concurrency {
                 let ds = ds.clone();
                 let offset = blksize * i;
-                handles.push(async move {
+                handles.push(tokio::spawn(async move {
                     let data: Vec<_> = (0..blksize).map(|_| rand::thread_rng().gen()).collect();
                     ds.write_object(obj, offset as u64, false, vec![&data])
                         .await
@@ -1994,8 +1994,77 @@ mod tests {
                         .await
                         .unwrap();
                     assert!(read == data);
-                });
+                }));
             }
+
+            for handle in handles {
+                handle.await.unwrap();
+            }
+            ds.delete_object(obj).await.unwrap();
+        }
+
+        ds.close().await.unwrap();
+        uzfs_env_fini().await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn uzfs_truncate_test() {
+        let dsname = "uzfs-test-pool/ds";
+        let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+        let dev_path = uzfs_test_env.get_dev_path().unwrap();
+        uzfs_env_init().await;
+
+        let blksize = 65536;
+        let ds = Arc::new(
+            Dataset::init(dsname, &dev_path, DatasetType::Data, blksize, false)
+                .await
+                .unwrap(),
+        );
+
+        let iters = 10000;
+        let objs = ds.create_objects(iters).await.unwrap().0;
+        let max_end_size = blksize * 2;
+        let mut total_data: Vec<u8> = vec![0; max_end_size as usize];
+        for obj in objs {
+            let write_size = rand::thread_rng().gen_range(512..max_end_size) as u64;
+            let truncate_size = rand::thread_rng().gen_range(512..max_end_size) as u64;
+            total_data.fill(0);
+
+            let data = vec![1; write_size as usize];
+            let end_size = if rand::thread_rng().gen_bool(0.5) {
+                total_data[..data.len()].copy_from_slice(&data);
+                total_data[(truncate_size as usize)..].fill(0);
+                ds.write_object(obj, 0, false, vec![&data]).await.unwrap();
+                ds.truncate_object(obj, 0, truncate_size).await.unwrap();
+                truncate_size
+            } else {
+                total_data[(truncate_size as usize)..].fill(0);
+                total_data[..data.len()].copy_from_slice(&data);
+                ds.truncate_object(obj, 0, truncate_size).await.unwrap();
+                ds.write_object(obj, 0, false, vec![&data]).await.unwrap();
+                std::cmp::max(write_size, truncate_size)
+            };
+
+            let read_off = rand::thread_rng().gen_range(0..end_size);
+            let read_size = rand::thread_rng().gen_range(0..(max_end_size as u64 - read_off));
+            let actually_read = std::cmp::min(end_size - read_off, read_size);
+            let data = ds.read_object(obj, read_off, read_size).await.unwrap();
+            assert_eq!(actually_read, data.len() as u64);
+            assert_eq!(
+                data,
+                total_data[(read_off as usize)..((read_off + actually_read) as usize)]
+            );
+
+            let obj_attr = ds.get_object_attr(obj).await.unwrap();
+            assert_eq!(obj_attr.size, end_size);
+            let obj_blksize = obj_attr.blksize;
+            if obj_blksize < blksize {
+                assert!(obj_blksize >= end_size as u32);
+            } else {
+                assert_eq!(obj_blksize, blksize);
+            }
+
             ds.delete_object(obj).await.unwrap();
         }
 
