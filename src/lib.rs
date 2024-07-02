@@ -3,9 +3,10 @@ use cstr_argument::CStrArgument;
 use io::Result;
 use metrics::{Method, Metrics};
 use once_cell::sync::OnceCell;
-use std::ffi::{CStr, CString};
-use std::io;
+use std::ffi::CString;
+use std::io::{Error, ErrorKind};
 use std::os::raw::{c_char, c_void};
+use std::{io, ptr};
 use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
 use uzfs_sys::async_sys::*;
@@ -98,27 +99,28 @@ pub struct Dataset {
 }
 
 impl Dataset {
-    fn dsname_to_poolname<P: AsRef<CStr>>(dsname: P) -> Result<CString> {
-        let s = dsname.as_ref().to_string_lossy().into_owned();
-        let v: Vec<&str> = s.split('/').collect();
-        if v.len() != 2 {
-            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    fn dsname_to_poolname(dsname: &str) -> Result<String> {
+        // the correct format of dsname is <poolname>/<dsname>, e.g testzp/ds
+        let parts: Vec<_> = dsname.split('/').collect();
+        if parts.len() != 2 {
+            Err(Error::from(ErrorKind::InvalidInput))
+        } else {
+            Ok(parts[0].to_owned())
         }
-        Ok(CString::new(v[0]).unwrap())
     }
 
-    pub async fn init<P: CStrArgument>(
-        dsname: P,
-        dev_path: P,
+    pub async fn init(
+        dsname: &str,
+        dev_path: &str,
         dstype: DatasetType,
         max_blksize: u32,
         already_formatted: bool,
     ) -> Result<Self> {
         assert!(max_blksize == 0 || (max_blksize & (max_blksize - 1)) == 0);
 
-        let dsname = dsname.into_cstr();
-        let poolname = Self::dsname_to_poolname(&dsname)?;
+        let poolname = Self::dsname_to_poolname(dsname)?.into_cstr();
         let dev_path_c = dev_path.into_cstr();
+        let dsname = dsname.into_cstr();
 
         let dnodesize = match dstype {
             DatasetType::Data => UZFS_DNODESIZE_DATA,
@@ -155,6 +157,89 @@ impl Dataset {
                 poolname,
                 metrics,
             })
+        }
+    }
+
+    pub async fn open_snapshot(dsname: &str, snapname: &str) -> Result<Self> {
+        let poolname = Self::dsname_to_poolname(dsname)?;
+        let dsname = format!("{dsname}@{snapname}").into_cstr();
+        let mut arg = LibuzfsDatasetOpenArgs {
+            dsname: dsname.as_ptr() as *const c_char,
+            max_blksize: 0,
+            readonly: true,
+            dnodesize: 0,
+            ret: 0,
+            dhp: ptr::null_mut(),
+        };
+
+        let arg_usize = &mut arg as *mut _ as usize;
+
+        UzfsCoroutineFuture::new(libuzfs_dataset_open_c, arg_usize, false, true).await;
+
+        if arg.ret == 0 {
+            Ok(Self {
+                dhp: arg.dhp,
+                zhp: ptr::null_mut(),
+                poolname: poolname.into_cstr(),
+                metrics: Metrics::new(),
+            })
+        } else {
+            Err(io::Error::from_raw_os_error(arg.ret))
+        }
+    }
+
+    pub async fn create_snapshot(dsname: &str, snapname: &str) -> Result<()> {
+        let snapname = format!("{dsname}@{snapname}").into_cstr();
+        let mut arg = LibuzfsSnapshotCreateArg {
+            snapname: snapname.as_ptr() as *const c_char,
+            ret: 0,
+        };
+
+        let arg_usize = &mut arg as *mut _ as usize;
+
+        UzfsCoroutineFuture::new(libuzfs_dataset_snapshot_create_c, arg_usize, true, false).await;
+
+        if arg.ret == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(arg.ret))
+        }
+    }
+
+    pub async fn destroy_snapshot(dsname: &str, snapname: &str) -> Result<()> {
+        let snapname = format!("{dsname}@{snapname}").into_cstr();
+        let mut arg = LibuzfsSnapshotDestroyArg {
+            snapname: snapname.as_ptr(),
+            ret: 0,
+        };
+
+        let arg_usize = &mut arg as *mut _ as usize;
+
+        UzfsCoroutineFuture::new(libuzfs_dataset_snapshot_destroy_c, arg_usize, true, false).await;
+
+        if arg.ret == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(arg.ret))
+        }
+    }
+
+    pub async fn rollback(&mut self, snapname: &str) -> Result<()> {
+        let snapname = snapname.into_cstr();
+        let mut arg = LibuzfsSnapshotRollbackArg {
+            snapname: snapname.as_ptr(),
+            dhp: self.dhp,
+            ret: 0,
+        };
+
+        let arg_usize = &mut arg as *mut _ as usize;
+
+        UzfsCoroutineFuture::new(libuzfs_dataset_snapshot_rollback_c, arg_usize, true, false).await;
+
+        if arg.ret == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(arg.ret))
         }
     }
 
@@ -998,7 +1083,7 @@ mod tests {
         {
             let mut err = 0;
             let hdl = unsafe {
-                sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr(), &mut err, 1024, 4096)
+                sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr(), &mut err, 1024, 4096, 0)
             };
             assert!(hdl.is_null());
             let hdl = unsafe { sys::libuzfs_zpool_open(poolname.into_cstr().as_ptr(), &mut err) };
@@ -1166,7 +1251,7 @@ mod tests {
         {
             let mut err = 0;
             let hdl = unsafe {
-                sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr(), &mut err, 1024, 4096)
+                sys::libuzfs_dataset_open(dsname.into_cstr().as_ptr(), &mut err, 1024, 4096, 0)
             };
             assert!(hdl.is_null());
             let hdl = unsafe { sys::libuzfs_zpool_open(poolname.into_cstr().as_ptr(), &mut err) };
@@ -1816,6 +1901,37 @@ mod tests {
         uzfs_env_init().await;
         test_reduce_max(dsname, &dev_path).await;
         test_increase_max(dsname, &dev_path).await;
+        uzfs_env_fini().await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn uzfs_snapshot_test() {
+        let dsname = "uzfs-test-pool/ds";
+        let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+        let dev_path = uzfs_test_env.get_dev_path().unwrap();
+
+        uzfs_env_init().await;
+        let mut ds = Dataset::init(dsname, &dev_path, DatasetType::Meta, 0, false)
+            .await
+            .unwrap();
+
+        let (ino, txg) = ds.create_inode(InodeType::DIR).await.unwrap();
+        let snap1 = "snap1";
+        Dataset::create_snapshot(dsname, snap1).await.unwrap();
+        ds.delete_inode(ino, InodeType::DIR).await.unwrap();
+        ds.check_valid(ino, txg).await.unwrap_err();
+
+        let ds_snap1 = Dataset::open_snapshot(dsname, snap1).await.unwrap();
+        ds_snap1.check_valid(ino, txg).await.unwrap();
+        ds_snap1.close().await.unwrap();
+        ds.rollback(snap1).await.unwrap();
+        ds.check_valid(ino, txg).await.unwrap();
+        ds.rollback(snap1).await.unwrap();
+        ds.check_valid(ino, txg).await.unwrap();
+        Dataset::destroy_snapshot(dsname, snap1).await.unwrap();
+        ds.close().await.unwrap();
+
         uzfs_env_fini().await;
     }
 
