@@ -13,13 +13,15 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest]
-        rust: [nightly-2023-12-28]
+        rust: [nightly-2024-05-02]
 
     steps:
     - uses: hecrj/setup-rust-action@master
       with:
         rust-version: ${{ matrix.rust }}
     - uses: actions/checkout@master
+      with:
+        submodules: recursive
     - name: Install dependencies
       run: |
         sudo apt update
@@ -29,6 +31,10 @@ jobs:
         sudo apt install libffi-dev python3-packaging git libcurl4-openssl-dev libtirpc-dev
     - name: Install rustfmt
       run: rustup component add rustfmt
+    - uses: actions-rs/clippy-check@v1
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        args: --all-features
     - uses: Swatinem/rust-cache@v1
     - run: cargo fmt --all -- --check
     - name: Check all targets

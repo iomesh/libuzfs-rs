@@ -1,5 +1,4 @@
-use crate::bindings::*;
-use crate::coroutine::*;
+use super::sys::*;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_void};
 
@@ -7,38 +6,9 @@ const MAX_POOL_NAME_SIZE: i32 = 32;
 const MAX_NAME_SIZE: usize = 256;
 const MAX_KVATTR_VALUE_SIZE: usize = 8192;
 
-unsafe extern "C" fn print_backtrace() {
-    let mut depth = 0;
-    backtrace::trace(|frame| {
-        backtrace::resolve_frame(frame, |symbol| {
-            let name = match symbol.name() {
-                Some(name) => name.as_str().unwrap(),
-                None => "",
-            };
-
-            let file_name = match symbol.filename() {
-                Some(path) => path.to_str().unwrap(),
-                None => "",
-            };
-
-            let line = symbol.lineno().unwrap_or(0);
-
-            println!("#{depth}  {file_name}:{line}:{name}");
-            depth += 1;
-        });
-
-        true // keep going to the next frame
-    });
-}
-
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_init_c(_: *mut c_void) {
-    libuzfs_init(
-        Some(thread_create),
-        Some(thread_exit),
-        Some(thread_join),
-        Some(print_backtrace),
-    );
+    libuzfs_init();
 }
 
 #[allow(clippy::missing_safety_doc)]
@@ -101,13 +71,18 @@ pub unsafe extern "C" fn libuzfs_dataset_init_c(arg: *mut c_void) {
     arg.zhp = libuzfs_zpool_open(arg.pool_name, &mut arg.ret);
     if !arg.zhp.is_null() {
         assert_eq!(arg.ret, 0);
-        arg.dhp = libuzfs_dataset_open(arg.dsname, &mut arg.ret, arg.dnodesize, arg.max_blksize);
+        arg.dhp = libuzfs_dataset_open(arg.dsname, &mut arg.ret, arg.dnodesize, arg.max_blksize, 0);
         if arg.dhp.is_null() && arg.ret == libc::ENOENT && !arg.already_formatted {
             arg.ret = libuzfs_dataset_create(arg.dsname);
             assert_ne!(arg.ret, libc::EEXIST);
             if arg.ret == 0 {
-                arg.dhp =
-                    libuzfs_dataset_open(arg.dsname, &mut arg.ret, arg.dnodesize, arg.max_blksize);
+                arg.dhp = libuzfs_dataset_open(
+                    arg.dsname,
+                    &mut arg.ret,
+                    arg.dnodesize,
+                    arg.max_blksize,
+                    0,
+                );
             }
         }
 
@@ -127,6 +102,31 @@ pub unsafe extern "C" fn libuzfs_dataset_init_c(arg: *mut c_void) {
     assert_eq!(libuzfs_zpool_export(arg.pool_name), 0);
 }
 
+pub struct LibuzfsDatasetOpenArgs {
+    pub dsname: *const c_char,
+    pub dnodesize: u32,
+    pub max_blksize: u32,
+    pub readonly: bool,
+
+    pub ret: i32,
+    pub dhp: *mut libuzfs_dataset_handle_t,
+}
+
+unsafe impl Send for LibuzfsDatasetOpenArgs {}
+unsafe impl Sync for LibuzfsDatasetOpenArgs {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_dataset_open_c(arg: *mut c_void) {
+    let arg = &mut *(arg as *mut LibuzfsDatasetOpenArgs);
+    arg.dhp = libuzfs_dataset_open(
+        arg.dsname,
+        &mut arg.ret,
+        arg.dnodesize,
+        arg.max_blksize,
+        arg.readonly as u32,
+    );
+}
+
 pub struct LibuzfsDatasetFiniArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
     pub zhp: *mut libuzfs_zpool_handle_t,
@@ -142,9 +142,57 @@ unsafe impl Sync for LibuzfsDatasetFiniArg {}
 pub unsafe extern "C" fn libuzfs_dataset_fini_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsDatasetFiniArg);
     libuzfs_dataset_close(arg.dhp);
-    libuzfs_zpool_close(arg.zhp);
-    assert!(!arg.zhp.is_null());
-    arg.err = libuzfs_zpool_export(arg.poolname);
+    if !arg.zhp.is_null() {
+        libuzfs_zpool_close(arg.zhp);
+        assert!(!arg.zhp.is_null());
+        arg.err = libuzfs_zpool_export(arg.poolname);
+    }
+}
+
+pub struct LibuzfsSnapshotCreateArg {
+    pub snapname: *const c_char,
+
+    pub ret: i32,
+}
+
+unsafe impl Send for LibuzfsSnapshotCreateArg {}
+unsafe impl Sync for LibuzfsSnapshotCreateArg {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_dataset_snapshot_create_c(arg: *mut c_void) {
+    let arg = &mut *(arg as *mut LibuzfsSnapshotCreateArg);
+    arg.ret = libuzfs_dataset_snapshot_create(arg.snapname);
+}
+
+pub struct LibuzfsSnapshotDestroyArg {
+    pub snapname: *const c_char,
+
+    pub ret: i32,
+}
+
+unsafe impl Send for LibuzfsSnapshotDestroyArg {}
+unsafe impl Sync for LibuzfsSnapshotDestroyArg {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_dataset_snapshot_destroy_c(arg: *mut c_void) {
+    let arg = &mut *(arg as *mut LibuzfsSnapshotDestroyArg);
+    arg.ret = libuzfs_dataset_snapshot_destroy(arg.snapname);
+}
+
+pub struct LibuzfsSnapshotRollbackArg {
+    pub snapname: *const c_char,
+    pub dhp: *mut libuzfs_dataset_handle_t,
+
+    pub ret: i32,
+}
+
+unsafe impl Send for LibuzfsSnapshotRollbackArg {}
+unsafe impl Sync for LibuzfsSnapshotRollbackArg {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_dataset_snapshot_rollback_c(arg: *mut c_void) {
+    let arg = &mut *(arg as *mut LibuzfsSnapshotRollbackArg);
+    arg.ret = libuzfs_dataset_snapshot_rollback(arg.dhp, arg.snapname);
 }
 
 pub struct LibuzfsDatasetExpandArg {
@@ -185,8 +233,7 @@ pub unsafe extern "C" fn libuzfs_zap_list_c(arg: *mut c_void) {
 
     loop {
         let mut name = Vec::<u8>::with_capacity(MAX_NAME_SIZE + 1);
-        let rc =
-            libuzfs_zap_iterator_name(iter, name.as_mut_ptr() as *mut c_char, MAX_NAME_SIZE as u64);
+        let rc = libuzfs_zap_iterator_name(iter, name.as_mut_ptr() as *mut c_char, MAX_NAME_SIZE);
         assert!(rc > 0);
         name.set_len(rc as usize);
         // make name end with '\0'
@@ -198,7 +245,7 @@ pub unsafe extern "C" fn libuzfs_zap_list_c(arg: *mut c_void) {
             arg.obj,
             name.as_mut_ptr() as *mut c_char,
             1,
-            value_size,
+            value_size as u64,
             value.as_mut_ptr() as *mut c_void,
         );
         value.set_len(value_size as usize);
