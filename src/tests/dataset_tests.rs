@@ -1144,3 +1144,34 @@ async fn uzfs_truncate_test() {
     ds.close().await.unwrap();
     uzfs_env_fini().await;
 }
+
+#[tokio::test]
+#[serial]
+async fn uzfs_snapshot_test() {
+    let dsname = "uzfs-snapshot-test-pool/ds";
+    let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+    let dev_path = uzfs_test_env.get_dev_path().unwrap();
+
+    uzfs_env_init().await;
+    let mut ds = Dataset::init(dsname, &dev_path, DatasetType::Meta, 0, false)
+        .await
+        .unwrap();
+
+    let (ino, txg) = ds.create_inode(InodeType::DIR).await.unwrap();
+    let snap1 = "snap1";
+    Dataset::create_snapshot(dsname, snap1).await.unwrap();
+    ds.delete_inode(ino, InodeType::DIR).await.unwrap();
+    ds.check_valid(ino, txg).await.unwrap_err();
+
+    let ds_snap1 = Dataset::open_snapshot(dsname, snap1).await.unwrap();
+    ds_snap1.check_valid(ino, txg).await.unwrap();
+    ds_snap1.close().await.unwrap();
+    ds.rollback(snap1).await.unwrap();
+    ds.check_valid(ino, txg).await.unwrap();
+    ds.rollback(snap1).await.unwrap();
+    ds.check_valid(ino, txg).await.unwrap();
+    Dataset::destroy_snapshot(dsname, snap1).await.unwrap();
+    ds.close().await.unwrap();
+
+    uzfs_env_fini().await;
+}
