@@ -41,9 +41,12 @@ impl CondVar {
         // Unlock the mutex before going to sleep.
         mutex.as_mut().unlock();
 
+        self.futex.inc_ref();
+
         // Wait, but only if there hasn't been any
         // notification since we unlocked the mutex.
         let res = self.futex.wait_until(futex_value, duration);
+        self.futex.dec_ref();
 
         // Lock the mutex again.
         mutex.as_mut().lock();
