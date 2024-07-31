@@ -1,6 +1,6 @@
 pub(crate) mod coroutine;
 pub(crate) mod coroutine_c;
-pub(super) mod stack;
+pub mod stack;
 
 #[allow(dead_code)]
 #[allow(non_upper_case_globals)]
