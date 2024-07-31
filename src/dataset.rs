@@ -15,6 +15,7 @@ use std::io::Error;
 use std::io::ErrorKind;
 use std::os::raw::{c_char, c_void};
 use std::ptr;
+use std::ptr::null_mut;
 use tokio::sync::Mutex;
 
 pub const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
@@ -177,12 +178,46 @@ pub async fn uzfs_env_fini() {
 pub enum InodeType {
     FILE = libuzfs_inode_type_t_INODE_FILE as isize,
     DIR = libuzfs_inode_type_t_INODE_DIR as isize,
+    DATAOBJ = libuzfs_inode_type_t_INODE_DATA_OBJ as isize,
 }
 
 pub enum DatasetType {
     Data,
     Meta,
 }
+
+#[derive(Debug, PartialEq, Eq)]
+#[must_use]
+#[warn(unused_must_use)]
+pub struct InodeHandle {
+    ihp: *mut libuzfs_inode_handle_t,
+    pub ino: u64,
+    pub gen: u64,
+}
+
+#[cfg(debug_assertions)]
+impl InodeHandle {
+    pub fn fake_handle(ino: u64, gen: u64) -> Self {
+        Self {
+            ihp: null_mut(),
+            ino,
+            gen,
+        }
+    }
+}
+
+impl Default for InodeHandle {
+    fn default() -> Self {
+        Self {
+            ihp: null_mut(),
+            ino: 0,
+            gen: 0,
+        }
+    }
+}
+
+unsafe impl Send for InodeHandle {}
+unsafe impl Sync for InodeHandle {}
 
 pub enum KvSetOption {
     None = 0,
@@ -359,13 +394,52 @@ impl Dataset {
         }
     }
 
-    // this function should never block
-    pub fn get_superblock_ino(&self) -> u64 {
-        unsafe { libuzfs_dataset_get_superblock_ino(self.dhp) }
+    // when the inode handle is useless, release_inode_handle should be called
+    pub async fn get_superblock_inode_handle(&self) -> Result<InodeHandle> {
+        let ino = unsafe { libuzfs_dataset_get_superblock_ino(self.dhp) };
+        self.get_inode_handle(ino, u64::MAX, false).await
+    }
+
+    // when the inode handle is useless, release_inode_handle should be called
+    pub async fn get_inode_handle(
+        &self,
+        ino: u64,
+        gen: u64,
+        is_data_inode: bool,
+    ) -> Result<InodeHandle> {
+        let mut arg = LibuzfsInodeHandleGetArgs {
+            dhp: self.dhp,
+            ino,
+            gen,
+            is_data_inode,
+            ihp: null_mut(),
+            err: 0,
+        };
+        let arg_usize = &mut arg as *mut _ as usize;
+        AsyncCoroutine::new(libuzfs_inode_handle_get_c, arg_usize, true).await;
+
+        if arg.err == 0 {
+            Ok(InodeHandle {
+                ihp: arg.ihp,
+                ino,
+                gen,
+            })
+        } else {
+            Err(io::Error::from_raw_os_error(arg.err))
+        }
+    }
+
+    // Do not access inode_hanlde after this function returns
+    pub async fn release_inode_handle(&self, ino_hdl: &mut InodeHandle) {
+        AsyncCoroutine::new(libuzfs_inode_handle_rele_c, ino_hdl.ihp as usize, true).await;
+        ino_hdl.ihp = null_mut();
     }
 
     pub async fn zap_create(&self) -> Result<(u64, u64)> {
-        self.create_inode(InodeType::DIR).await
+        let mut handle = self.create_inode(InodeType::DIR).await?;
+        let (ino, gen) = (handle.ino, handle.gen);
+        self.release_inode_handle(&mut handle).await;
+        Ok((ino, gen))
     }
 
     pub async fn zap_claim(&self, ino: u64, gen: u64) -> Result<()> {
@@ -489,11 +563,10 @@ impl Dataset {
     }
 
     // delete_object won't wait until synced, wait_log_commit is needed if you want wait sync
-    pub async fn delete_object(&self, obj: u64) -> Result<()> {
+    pub async fn delete_object(&self, ino_hdl: &mut InodeHandle) -> Result<()> {
         let _guard = self.metrics.record(Method::DeleteObject, 0);
         let mut arg = LibuzfsDeleteObjectArg {
-            dhp: self.dhp,
-            obj,
+            ihp: ino_hdl.ihp,
             err: 0,
         };
 
@@ -514,11 +587,10 @@ impl Dataset {
         AsyncCoroutine::new(libuzfs_wait_log_commit_c, arg_usize, true).await;
     }
 
-    pub async fn get_object_attr(&self, obj: u64) -> Result<uzfs_object_attr_t> {
+    pub async fn get_object_attr(&self, ino_hdl: &InodeHandle) -> Result<uzfs_object_attr_t> {
         let _guard = self.metrics.record(Method::GetObjectAttr, 0);
         let mut arg = LibuzfsGetObjectAttrArg {
-            dhp: self.dhp,
-            obj,
+            ihp: ino_hdl.ihp,
             attr: uzfs_object_attr_t::default(),
             err: 0,
         };
@@ -566,11 +638,15 @@ impl Dataset {
         }
     }
 
-    pub async fn read_object(&self, obj: u64, offset: u64, size: u64) -> Result<Vec<u8>> {
+    pub async fn read_object(
+        &self,
+        ino_hdl: &InodeHandle,
+        offset: u64,
+        size: u64,
+    ) -> Result<Vec<u8>> {
         let _guard = self.metrics.record(Method::ReadObject, size as usize);
         let mut arg = LibuzfsReadObjectArg {
-            dhp: self.dhp,
-            obj,
+            ihp: ino_hdl.ihp,
             offset,
             size,
             err: 0,
@@ -590,7 +666,7 @@ impl Dataset {
 
     pub async fn write_object(
         &self,
-        obj: u64,
+        ino_hdl: &InodeHandle,
         offset: u64,
         sync: bool,
         data: Vec<&[u8]>,
@@ -604,8 +680,7 @@ impl Dataset {
             })
             .collect();
         let mut arg = LibuzfsWriteObjectArg {
-            dhp: self.dhp,
-            obj,
+            ihp: ino_hdl.ihp,
             offset,
             iovs,
             sync,
@@ -623,20 +698,20 @@ impl Dataset {
         }
     }
 
-    // TODO(hping): add ut
-    pub async fn sync_object(&self, obj: u64) {
+    pub async fn sync_object(&self, ino_hdl: &InodeHandle) {
         let _guard = self.metrics.record(Method::SyncObject, 0);
-        let mut arg = LibuzfsSyncObjectArg { dhp: self.dhp, obj };
 
-        let arg_usize = &mut arg as *mut LibuzfsSyncObjectArg as usize;
-
-        AsyncCoroutine::new(libuzfs_sync_object_c, arg_usize, true).await;
+        AsyncCoroutine::new(libuzfs_sync_object_c, ino_hdl.ihp as usize, true).await;
     }
 
-    pub async fn truncate_object(&self, obj: u64, offset: u64, size: u64) -> Result<()> {
+    pub async fn truncate_object(
+        &self,
+        ino_hdl: &mut InodeHandle,
+        offset: u64,
+        size: u64,
+    ) -> Result<()> {
         let mut arg = LibuzfsTruncateObjectArg {
-            dhp: self.dhp,
-            obj,
+            ihp: ino_hdl.ihp,
             offset,
             size,
             err: 0,
@@ -674,10 +749,14 @@ impl Dataset {
         )
     }
 
-    pub async fn object_has_hole_in_range(&self, obj: u64, offset: u64, size: u64) -> Result<bool> {
+    pub async fn object_has_hole_in_range(
+        &self,
+        ino_hdl: &InodeHandle,
+        offset: u64,
+        size: u64,
+    ) -> Result<bool> {
         let mut arg = LibuzfsFindHoleArg {
-            dhp: self.dhp,
-            obj,
+            ihp: ino_hdl.ihp,
             off: offset,
             err: 0,
         };
@@ -709,11 +788,15 @@ impl Dataset {
         println!("\tfill_count: {}", doi.doi_fill_count);
     }
 
-    pub async fn create_inode(&self, inode_type: InodeType) -> Result<(u64, u64)> {
+    // this function will return with hashed lock guard, get_inode_handle or release_inode_handle
+    // will be blocked within the lifetime of this lock guard
+    pub async fn create_inode(&self, inode_type: InodeType) -> Result<InodeHandle> {
         let _guard = self.metrics.record(Method::CreateInode, 0);
         let mut arg = LibuzfsCreateInode {
             dhp: self.dhp,
             inode_type: inode_type as u32,
+
+            ihp: null_mut(),
             ino: 0,
             txg: 0,
             err: 0,
@@ -724,7 +807,11 @@ impl Dataset {
         AsyncCoroutine::new(libuzfs_create_inode_c, arg_usize, true).await;
 
         if arg.err == 0 {
-            Ok((arg.ino, arg.txg))
+            Ok(InodeHandle {
+                ihp: arg.ihp,
+                ino: arg.ino,
+                gen: arg.txg,
+            })
         } else {
             Err(io::Error::from_raw_os_error(arg.err))
         }
@@ -750,11 +837,14 @@ impl Dataset {
         }
     }
 
-    pub async fn delete_inode(&self, ino: u64, inode_type: InodeType) -> Result<u64> {
+    pub async fn delete_inode(
+        &self,
+        ino_hdl: &mut InodeHandle,
+        inode_type: InodeType,
+    ) -> Result<u64> {
         let _guard = self.metrics.record(Method::DeleteInode, 0);
         let mut arg = LibuzfsDeleteInode {
-            dhp: self.dhp,
-            ino,
+            ihp: ino_hdl.ihp,
             inode_type: inode_type as u32,
             err: 0,
             txg: 0,
@@ -771,14 +861,13 @@ impl Dataset {
         }
     }
 
-    pub async fn get_attr(&self, ino: u64) -> Result<InodeAttr> {
+    pub async fn get_attr(&self, ino_hdl: &InodeHandle) -> Result<InodeAttr> {
         let _guard = self.metrics.record(Method::GetAttr, 0);
         let mut attr = InodeAttr::default();
         attr.reserved.reserve(MAX_RESERVED_SIZE);
 
         let mut arg = LibuzfsGetAttrArg {
-            dhp: self.dhp,
-            ino,
+            ihp: ino_hdl.ihp,
             reserved: attr.reserved.as_mut_ptr() as *mut i8,
             size: 0,
             attr: uzfs_inode_attr_t::default(),
@@ -799,12 +888,11 @@ impl Dataset {
         }
     }
 
-    pub async fn set_attr(&self, ino: u64, reserved: &[u8]) -> Result<u64> {
+    pub async fn set_attr(&self, ino_hdl: &mut InodeHandle, reserved: &[u8]) -> Result<u64> {
         let _guard = self.metrics.record(Method::SetAttr, 0);
         assert!(reserved.len() <= MAX_RESERVED_SIZE);
         let mut arg = LibuzfsSetAttrArg {
-            dhp: self.dhp,
-            ino,
+            ihp: ino_hdl.ihp,
             reserved: reserved.as_ptr() as *mut i8,
             size: reserved.len() as u32,
             err: 0,
@@ -822,12 +910,15 @@ impl Dataset {
         }
     }
 
-    pub async fn get_kvattr<P: CStrArgument>(&self, ino: u64, name: P) -> Result<Vec<u8>> {
+    pub async fn get_kvattr<P: CStrArgument>(
+        &self,
+        ino_hdl: &InodeHandle,
+        name: P,
+    ) -> Result<Vec<u8>> {
         let _guard = self.metrics.record(Method::GetKvattr, 0);
         let cname = name.into_cstr();
         let mut arg = LibuzfsGetKvattrArg {
-            dhp: self.dhp,
-            ino,
+            ihp: ino_hdl.ihp,
             name: cname.as_ref().as_ptr(),
             data: Vec::new(),
             err: 0,
@@ -846,7 +937,7 @@ impl Dataset {
 
     pub async fn set_kvattr<P: CStrArgument>(
         &self,
-        ino: u64,
+        ino_hdl: &mut InodeHandle,
         name: P,
         value: &[u8],
         option: u32,
@@ -854,8 +945,7 @@ impl Dataset {
         let _guard = self.metrics.record(Method::SetKvattr, 0);
         let cname = name.into_cstr();
         let mut arg = LibuzfsSetKvAttrArg {
-            dhp: self.dhp,
-            ino,
+            ihp: ino_hdl.ihp,
             name: cname.as_ref().as_ptr(),
             option,
             value: value.as_ptr() as *const c_char,
@@ -875,11 +965,14 @@ impl Dataset {
         }
     }
 
-    pub async fn remove_kvattr<P: CStrArgument>(&self, ino: u64, name: P) -> Result<u64> {
+    pub async fn remove_kvattr<P: CStrArgument>(
+        &self,
+        ino_hdl: &mut InodeHandle,
+        name: P,
+    ) -> Result<u64> {
         let cname = name.into_cstr();
         let mut arg = LibuzfsRemoveKvattrArg {
-            dhp: self.dhp,
-            ino,
+            ihp: ino_hdl.ihp,
             name: cname.as_ref().as_ptr(),
             err: 0,
             txg: 0,
@@ -896,10 +989,9 @@ impl Dataset {
         }
     }
 
-    pub async fn list_kvattrs(&self, ino: u64) -> Result<Vec<String>> {
+    pub async fn list_kvattrs(&self, ino_hdl: &InodeHandle) -> Result<Vec<String>> {
         let mut arg = LibuzfsListKvAttrsArg {
-            dhp: self.dhp,
-            ino,
+            ihp: ino_hdl.ihp,
             err: 0,
             names: Vec::new(),
         };
@@ -917,15 +1009,14 @@ impl Dataset {
 
     pub async fn create_dentry<P: CStrArgument>(
         &self,
-        pino: u64,
+        ino_hdl: &mut InodeHandle,
         name: P,
         value: u64,
     ) -> Result<u64> {
         let _guard = self.metrics.record(Method::CreateDentry, 0);
         let cname = name.into_cstr();
         let mut arg = LibuzfsCreateDentryArg {
-            dhp: self.dhp,
-            pino,
+            dihp: ino_hdl.ihp,
             name: cname.as_ref().as_ptr(),
             ino: value,
             err: 0,
@@ -943,12 +1034,15 @@ impl Dataset {
         }
     }
 
-    pub async fn delete_dentry<P: CStrArgument>(&self, pino: u64, name: P) -> Result<u64> {
+    pub async fn delete_dentry<P: CStrArgument>(
+        &self,
+        ino_hdl: &mut InodeHandle,
+        name: P,
+    ) -> Result<u64> {
         let _guard = self.metrics.record(Method::DeleteDentry, 0);
         let cname = name.into_cstr();
         let mut arg = LibuzfsDeleteDentryArg {
-            dhp: self.dhp,
-            pino,
+            dihp: ino_hdl.ihp,
             name: cname.as_ref().as_ptr(),
             err: 0,
             txg: 0,
@@ -965,12 +1059,15 @@ impl Dataset {
         }
     }
 
-    pub async fn lookup_dentry<P: CStrArgument>(&self, pino: u64, name: P) -> Result<u64> {
+    pub async fn lookup_dentry<P: CStrArgument>(
+        &self,
+        ino_hdl: &InodeHandle,
+        name: P,
+    ) -> Result<u64> {
         let _guard = self.metrics.record(Method::LookupDentry, 0);
         let cname = name.into_cstr();
         let mut arg = LibuzfsLookupDentryArg {
-            dhp: self.dhp,
-            pino,
+            dihp: ino_hdl.ihp,
             name: cname.as_ref().as_ptr(),
             ino: 0,
             err: 0,
@@ -989,14 +1086,13 @@ impl Dataset {
 
     pub async fn iterate_dentry(
         &self,
-        pino: u64,
+        ino_hdl: &InodeHandle,
         whence: u64,
         size: u32,
     ) -> Result<(Vec<u8>, u32)> {
         let _guard = self.metrics.record(Method::IterateDentry, 0);
         let mut arg = LibuzfsIterateDentryArg {
-            dhp: self.dhp,
-            pino,
+            dihp: ino_hdl.ihp,
             whence,
             size,
             err: 0,
@@ -1026,30 +1122,14 @@ impl Dataset {
         Ok(())
     }
 
-    pub async fn check_valid(&self, ino: u64, gen: u64) -> Result<()> {
-        let mut arg = LibuzfsInodeCheckValidArg {
-            dhp: self.dhp,
-            ino,
-            gen,
-
-            err: 0,
-        };
-
-        let arg_usize = &mut arg as *mut LibuzfsInodeCheckValidArg as usize;
-
-        AsyncCoroutine::new(libuzfs_inode_check_valid_c, arg_usize, true).await;
-
-        if arg.err == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::from_raw_os_error(arg.err))
-        }
-    }
-
-    pub async fn set_object_mtime(&self, obj: u64, tv_sec: i64, tv_nsec: i64) -> Result<()> {
+    pub async fn set_object_mtime(
+        &self,
+        ino_hdl: &mut InodeHandle,
+        tv_sec: i64,
+        tv_nsec: i64,
+    ) -> Result<()> {
         let mut arg = LibuzfsObjectSetMtimeArg {
-            dhp: self.dhp,
-            obj,
+            ihp: ino_hdl.ihp,
             tv_sec,
             tv_nsec,
             err: 0,

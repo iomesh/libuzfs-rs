@@ -15,7 +15,7 @@ const MAX_STACK_ID: u64 = 256 << 10;
 const STACK_ID_MASK: u64 = MAX_STACK_ID - 1;
 
 #[allow(dead_code)]
-struct StackBacktrace {
+pub struct StackBacktrace {
     stack_bottom: *mut c_void,
     stack_top: *mut c_void,
     stack_id: u64,
@@ -27,7 +27,8 @@ const EMPTY_STACK: CachePadded<StackBacktrace> = CachePadded::new(StackBacktrace
     stack_id: 0,
 });
 
-static mut STACKS: UnsafeCell<[CachePadded<StackBacktrace>; MAX_STACK_ID as usize]> =
+#[no_mangle]
+pub static mut STACKS: UnsafeCell<[CachePadded<StackBacktrace>; MAX_STACK_ID as usize]> =
     UnsafeCell::new([EMPTY_STACK; MAX_STACK_ID as usize]);
 
 #[derive(Debug, Clone)]
