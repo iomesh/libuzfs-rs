@@ -9,7 +9,8 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::mem::transmute;
 use std::pin::Pin;
-use std::ptr::{self, NonNull};
+use std::ptr::null_mut;
+use std::ptr::{self};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::Context;
 use std::task::Poll;
@@ -51,7 +52,7 @@ pub struct AsyncCoroutine {
     poller_context: fcontext_t,
     pollee_context: fcontext_t,
     stack: Stack,
-    context: Option<NonNull<Context<'static>>>,
+    context: *mut Context<'static>,
     state: RunState,
     arg: *mut c_void,
     func: unsafe extern "C" fn(*mut c_void),
@@ -103,7 +104,7 @@ impl AsyncCoroutine {
             pollee_context,
             id: stack.stack_id,
             stack,
-            context: None,
+            context: null_mut(),
             state: RunState::Runnable,
             arg: arg as *mut c_void,
             func,
@@ -141,8 +142,7 @@ impl AsyncCoroutine {
     unsafe fn run(&mut self, cx: &mut Context<'_>) -> RunState {
         self.state = RunState::Runnable;
         TLS_COROUTINE.set(self as *mut _ as usize);
-        let cx: &mut Context<'static> = transmute(cx);
-        self.context.replace(NonNull::from(cx));
+        self.context = transmute(cx);
         *libc::__errno_location() = self.saved_errno;
 
         #[cfg(target_arch = "x86_64")]
@@ -203,7 +203,7 @@ impl AsyncCoroutine {
     pub unsafe fn poll_until_ready<F: Future<Output = T>, T>(&mut self, mut f: F) -> T {
         loop {
             let pinned_ref = Pin::new_unchecked(&mut f);
-            match pinned_ref.poll(self.context.unwrap().as_mut()) {
+            match pinned_ref.poll(&mut *self.context) {
                 Poll::Ready(res) => return res,
                 Poll::Pending => self.pend_and_switch(),
             }
