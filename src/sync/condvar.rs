@@ -38,10 +38,9 @@ impl CondVar {
         // Examine the notification counter _before_ we unlock the mutex.
         let futex_value = self.futex.value().load(Relaxed);
 
+        self.futex.inc_ref();
         // Unlock the mutex before going to sleep.
         mutex.as_mut().unlock();
-
-        self.futex.inc_ref();
 
         // Wait, but only if there hasn't been any
         // notification since we unlocked the mutex.
