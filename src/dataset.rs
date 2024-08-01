@@ -249,6 +249,7 @@ impl Dataset {
         dstype: DatasetType,
         max_blksize: u32,
         already_formatted: bool,
+        discard_granularity: u64,
     ) -> Result<Self> {
         assert!(max_blksize == 0 || (max_blksize & (max_blksize - 1)) == 0);
 
@@ -268,6 +269,7 @@ impl Dataset {
             dnodesize,
             max_blksize,
             already_formatted,
+            discard_granularity,
 
             ret: 0,
             dhp: std::ptr::null_mut(),

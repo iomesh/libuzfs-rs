@@ -23,6 +23,7 @@ pub struct LibuzfsDatasetInitArg {
     pub dnodesize: u32,
     pub max_blksize: u32,
     pub already_formatted: bool,
+    pub discard_granularity: u64,
 
     pub ret: i32,
     pub dhp: *mut libuzfs_dataset_handle_t,
@@ -87,6 +88,11 @@ pub unsafe extern "C" fn libuzfs_dataset_init_c(arg: *mut c_void) {
         }
 
         if arg.ret == 0 {
+            libuzfs_configure_trim(
+                arg.dhp,
+                arg.discard_granularity,
+                arg.already_formatted as u32,
+            );
             return;
         }
     }
