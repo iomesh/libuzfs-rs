@@ -57,6 +57,7 @@ async fn uzfs_test() {
             DatasetType::Meta,
             4096,
             false,
+            262144,
         )
         .await
         .unwrap()
@@ -71,6 +72,7 @@ async fn uzfs_test() {
                 DatasetType::Meta,
                 4096,
                 false,
+                262144,
             )
             .await
             .unwrap()
@@ -85,6 +87,7 @@ async fn uzfs_test() {
             DatasetType::Meta,
             0,
             false,
+            262144,
         )
         .await
         .unwrap();
@@ -247,6 +250,7 @@ async fn uzfs_test() {
             DatasetType::Meta,
             4096,
             false,
+            262144,
         )
         .await
         .unwrap();
@@ -326,6 +330,7 @@ async fn uzfs_test() {
             DatasetType::Meta,
             4096,
             false,
+            262144,
         )
         .await
         .unwrap();
@@ -388,6 +393,7 @@ async fn uzfs_claim_test() {
             DatasetType::Meta,
             4096,
             false,
+            262144,
         )
         .await
         .unwrap();
@@ -429,6 +435,7 @@ async fn uzfs_claim_test() {
             DatasetType::Meta,
             4096,
             false,
+            262144,
         )
         .await
         .unwrap();
@@ -447,6 +454,7 @@ async fn uzfs_claim_test() {
             DatasetType::Meta,
             4096,
             false,
+            262144,
         )
         .await
         .unwrap();
@@ -482,6 +490,7 @@ async fn uzfs_zap_iterator_test() {
             DatasetType::Meta,
             4096,
             false,
+            262144,
         )
         .await
         .unwrap(),
@@ -542,6 +551,7 @@ async fn uzfs_expand_test() {
             DatasetType::Data,
             4096,
             false,
+            262144,
         )
         .await
         .unwrap(),
@@ -610,6 +620,7 @@ async fn uzfs_rangelock_test() {
             DatasetType::Data,
             4096,
             false,
+            262144,
         )
         .await
         .unwrap(),
@@ -732,6 +743,7 @@ async fn uzfs_attr_test() {
             DatasetType::Meta,
             4096,
             false,
+            262144,
         )
         .await
         .unwrap(),
@@ -844,7 +856,7 @@ async fn uzfs_attr_test() {
 }
 
 async fn test_reduce_max(dsname: &str, dev_path: &str) {
-    let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 4096, false)
+    let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 4096, false, 262144)
         .await
         .unwrap();
     let (objs, gen) = ds.create_objects(4).await.unwrap();
@@ -890,7 +902,7 @@ async fn test_reduce_max(dsname: &str, dev_path: &str) {
     ds.release_inode_handle(&mut hdl3).await;
     ds.close().await.unwrap();
 
-    let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 1024, false)
+    let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 1024, false, 262144)
         .await
         .unwrap();
     let mut hdl0 = ds.get_inode_handle(objs[0], gen, true).await.unwrap();
@@ -921,7 +933,7 @@ async fn test_reduce_max(dsname: &str, dev_path: &str) {
 }
 
 async fn test_increase_max(dsname: &str, dev_path: &str) {
-    let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 1024, false)
+    let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 1024, false, 262144)
         .await
         .unwrap();
     let (objs, gen) = ds.create_objects(3).await.unwrap();
@@ -952,7 +964,7 @@ async fn test_increase_max(dsname: &str, dev_path: &str) {
     ds.release_inode_handle(&mut hdl2).await;
     ds.close().await.unwrap();
 
-    let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 4096, false)
+    let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 4096, false, 262144)
         .await
         .unwrap();
     let mut hdl0 = ds.get_inode_handle(objs[0], gen, true).await.unwrap();
@@ -1049,7 +1061,7 @@ fn uzfs_sync_test() {
                     }
                     uzfs_env_init().await;
                     let ds = Arc::new(
-                        Dataset::init(dsname, dev_path, DatasetType::Data, 262144, false)
+                        Dataset::init(dsname, dev_path, DatasetType::Data, 262144, false, 262144)
                             .await
                             .unwrap(),
                     );
@@ -1155,6 +1167,7 @@ async fn uzfs_write_read_test() {
             DatasetType::Data,
             65536,
             false,
+            262144,
         )
         .await
         .unwrap(),
@@ -1209,6 +1222,7 @@ async fn uzfs_truncate_test() {
             DatasetType::Data,
             blksize,
             false,
+            262144,
         )
         .await
         .unwrap(),
@@ -1302,6 +1316,7 @@ async fn uzfs_snapshot_test() {
         DatasetType::Meta,
         0,
         false,
+        262144,
     )
     .await
     .unwrap();
