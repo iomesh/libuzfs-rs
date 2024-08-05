@@ -749,6 +749,40 @@ async fn uzfs_attr_test() {
         .unwrap(),
     );
 
+    let mut ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
+    let value = vec![1; 512];
+    ds.set_kvattr(&mut ino_hdl, "name1", &value, KvSetOption::None as u32)
+        .await
+        .unwrap();
+    ds.set_kvattr(
+        &mut ino_hdl,
+        "name2",
+        &value,
+        KvSetOption::HighPriority as u32,
+    )
+    .await
+    .unwrap();
+    ds.release_inode_handle(&mut ino_hdl).await;
+
+    let mut ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
+    ds.set_kvattr(
+        &mut ino_hdl,
+        "name1",
+        &vec![1; 1024],
+        KvSetOption::None as u32,
+    )
+    .await
+    .unwrap();
+    ds.set_kvattr(
+        &mut ino_hdl,
+        "name2",
+        &vec![1; 512],
+        KvSetOption::HighPriority as u32,
+    )
+    .await
+    .unwrap();
+    ds.release_inode_handle(&mut ino_hdl).await;
+
     let ntests = 16;
     let nloops = 50;
     let max_key_size = 256;
