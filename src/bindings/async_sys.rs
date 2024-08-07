@@ -549,6 +549,23 @@ pub unsafe extern "C" fn libuzfs_object_next_hole_c(arg: *mut c_void) {
     arg.err = libuzfs_object_next_hole(arg.ihp, &mut arg.off);
 }
 
+pub struct LibuzfsNextBlockArg {
+    pub ihp: *mut libuzfs_inode_handle_t,
+    pub off: u64,
+    pub size: u64,
+
+    pub err: i32,
+}
+
+unsafe impl Send for LibuzfsNextBlockArg {}
+unsafe impl Sync for LibuzfsNextBlockArg {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_object_next_block_c(arg: *mut c_void) {
+    let arg = &mut *(arg as *mut LibuzfsNextBlockArg);
+    arg.err = libuzfs_object_next_block(arg.ihp, &mut arg.off, &mut arg.size);
+}
+
 pub struct LibuzfsCreateInode {
     pub dhp: *mut libuzfs_dataset_handle_t,
     pub inode_type: libuzfs_inode_type_t,
