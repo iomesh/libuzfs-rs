@@ -27,6 +27,7 @@ const EMPTY_STACK: CachePadded<StackBacktrace> = CachePadded::new(StackBacktrace
     stack_id: 0,
 });
 
+#[no_mangle]
 static mut STACKS: UnsafeCell<[CachePadded<StackBacktrace>; MAX_STACK_ID as usize]> =
     UnsafeCell::new([EMPTY_STACK; MAX_STACK_ID as usize]);
 
