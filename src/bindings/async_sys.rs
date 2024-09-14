@@ -97,6 +97,20 @@ pub unsafe extern "C" fn libuzfs_dataset_init_c(arg: *mut c_void) {
     assert_eq!(libuzfs_zpool_export(arg.pool_name), 0);
 }
 
+pub struct LibuzfsDatasetTrimArgs {
+    pub dhp: *mut libuzfs_dataset_handle_t,
+
+    pub err: i32,
+}
+
+unsafe impl Send for LibuzfsDatasetTrimArgs {}
+unsafe impl Sync for LibuzfsDatasetTrimArgs {}
+
+pub unsafe extern "C" fn libuzfs_dataset_start_manual_trim_c(arg: *mut c_void) {
+    let arg = &mut *(arg as *mut LibuzfsDatasetTrimArgs);
+    arg.err = libuzfs_start_manual_trim(arg.dhp);
+}
+
 pub struct LibuzfsDatasetFiniArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
     pub zhp: *mut libuzfs_zpool_handle_t,
