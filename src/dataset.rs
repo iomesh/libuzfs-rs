@@ -1084,6 +1084,22 @@ impl Dataset {
         }
     }
 
+    pub async fn start_manual_trim(&self) -> Result<()> {
+        let mut arg = LibuzfsDatasetTrimArgs {
+            dhp: self.dhp,
+            err: 0,
+        };
+
+        let arg_usize = &mut arg as *mut _ as usize;
+        CoroutineFuture::new(libuzfs_dataset_start_manual_trim_c, arg_usize).await;
+
+        if arg.err == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(arg.err))
+        }
+    }
+
     pub async fn close(&self) -> Result<()> {
         let mut arg = LibuzfsDatasetFiniArg {
             dhp: self.dhp,
