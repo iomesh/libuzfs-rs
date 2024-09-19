@@ -32,3 +32,11 @@ serial_test = { version = "1.0.0" }
 tempfile = "3.3.0"
 petgraph = "0.6.3"
 nix = { version = "0.27.1", features = ["process"] }
+
+[[bin]]
+name = "uzfs-bench"
+path = "src/bin/bench/main.rs"
+
+[[bin]]
+name = "uzdb"
+path = "src/bin/uzdb/main.rs"

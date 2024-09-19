@@ -86,10 +86,15 @@ impl CoroutineFuture {
     }
 
     #[inline]
-    pub fn new(func: unsafe extern "C" fn(arg1: *mut c_void), arg: usize) -> Self {
-        let stack = fetch_or_alloc_stack(STACK_SIZE);
+    // this is only used in uzdb, other usage should call new
+    pub(crate) fn new_with_stack_size(
+        func: unsafe extern "C" fn(arg1: *mut c_void),
+        arg: usize,
+        stack_size: usize,
+    ) -> Self {
+        let stack = fetch_or_alloc_stack(stack_size);
         let pollee_context =
-            unsafe { make_fcontext(stack.stack_bottom, STACK_SIZE, Some(task_runner_c)) };
+            unsafe { make_fcontext(stack.stack_bottom, stack_size, Some(task_runner_c)) };
 
         // this position stores the finish addr which will be executed when task_runner_c returns,
         // in order to backtrace to the poll function in backtrace, this addr is replaced with Self::poll
@@ -116,6 +121,11 @@ impl CoroutineFuture {
             #[cfg(target_arch = "x86_64")]
             saved_fp: 0,
         }
+    }
+
+    #[inline]
+    pub fn new(func: unsafe extern "C" fn(arg1: *mut c_void), arg: usize) -> Self {
+        Self::new_with_stack_size(func, arg, STACK_SIZE)
     }
 
     #[inline]
