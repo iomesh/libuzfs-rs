@@ -848,3 +848,17 @@ pub unsafe extern "C" fn libuzfs_inode_handle_rele_c(arg: *mut c_void) {
     let arg = arg as *mut libuzfs_inode_handle_t;
     libuzfs_inode_handle_rele(arg);
 }
+
+pub struct LibuzfsDebugArgs {
+    pub argv: *mut *mut c_char,
+    pub argc: i32,
+}
+
+unsafe impl Send for LibuzfsDebugArgs {}
+unsafe impl Sync for LibuzfsDebugArgs {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_debug_main_c(arg: *mut c_void) {
+    let arg = &*(arg as *mut LibuzfsDebugArgs);
+    libuzfs_debug_main(arg.argc, arg.argv);
+}

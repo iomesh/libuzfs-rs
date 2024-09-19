@@ -9,6 +9,7 @@ use crate::sync::sync_c::*;
 use cstr_argument::CStrArgument;
 use io::Result;
 use once_cell::sync::OnceCell;
+use std::ffi::CStr;
 use std::ffi::CString;
 use std::io;
 use std::io::Error;
@@ -56,91 +57,122 @@ unsafe extern "C" fn print_backtrace() {
     });
 }
 
+unsafe extern "C" fn print_log(buf: *const c_char, new_line: i32) {
+    let buf = CStr::from_ptr(buf);
+    if new_line != 0 {
+        println!("{}", buf.to_bytes().escape_ascii());
+    } else {
+        print!("{}", buf.to_bytes().escape_ascii());
+    }
+}
+
+unsafe fn set_libuzfs_ops(log_func: Option<unsafe extern "C" fn(*const c_char, i32)>) {
+    let co_ops = coroutine_ops_t {
+        coroutine_key_create: Some(co_create_key),
+        coroutine_getkey: Some(co_get_key),
+        coroutine_setkey: Some(co_set_key),
+        uzfs_coroutine_self: Some(co_self),
+        coroutine_sched_yield: Some(co_sched_yield),
+        coroutine_sleep: Some(co_sleep),
+    };
+
+    let mutex_ops = co_mutex_ops {
+        co_mutex_held: Some(co_mutex_held),
+        co_mutex_init: Some(co_mutex_init),
+        co_mutex_destroy: Some(co_mutex_destroy),
+        co_mutex_lock: Some(co_mutex_lock),
+        co_mutex_trylock: Some(co_mutex_trylock),
+        co_mutex_unlock: Some(co_mutex_unlock),
+    };
+
+    let cond_ops = co_cond_ops {
+        co_cond_init: Some(co_cond_init),
+        co_cond_destroy: Some(co_cond_destroy),
+        co_cond_wait: Some(co_cond_wait),
+        co_cond_timedwait: Some(co_cond_timedwait),
+        co_cond_signal: Some(co_cond_signal),
+        co_cond_broadcast: Some(co_cond_broadcast),
+    };
+
+    let rwlock_ops = co_rwlock_ops {
+        co_rw_lock_read_held: Some(co_rwlock_read_held),
+        co_rw_lock_write_held: Some(co_rwlock_write_held),
+        co_rw_lock_init: Some(co_rwlock_init),
+        co_rw_lock_destroy: Some(co_rwlock_destroy),
+        co_rw_lock_read: Some(co_rw_lock_read),
+        co_rw_lock_write: Some(co_rw_lock_write),
+        co_rw_lock_try_read: Some(co_rwlock_try_read),
+        co_rw_lock_try_write: Some(co_rwlock_try_write),
+        co_rw_lock_exit: Some(co_rw_unlock),
+    };
+
+    let aio_ops = aio_ops {
+        register_aio_fd: Some(register_fd),
+        unregister_aio_fd: Some(unregister_fd),
+        submit_aio_read: Some(submit_read),
+        submit_aio_write: Some(submit_write),
+        submit_aio_fsync: Some(submit_fsync),
+    };
+
+    let thread_ops = thread_ops {
+        uthread_create: Some(thread_create),
+        uthread_exit: Some(thread_exit),
+        uthread_join: Some(thread_join),
+        backtrace: Some(print_backtrace),
+    };
+
+    let taskq_ops = taskq_ops {
+        taskq_create: Some(taskq::taskq_create),
+        taskq_dispatch: Some(taskq::taskq_dispatch),
+        taskq_delay_dispatch: Some(taskq::taskq_delay_dispatch),
+        taskq_member: Some(taskq::taskq_is_member),
+        taskq_of_curthread: Some(taskq::taskq_of_curthread),
+        taskq_wait: Some(taskq::taskq_wait),
+        taskq_destroy: Some(taskq::taskq_destroy),
+        taskq_wait_id: Some(taskq::taskq_wait_id),
+        taskq_cancel_id: Some(taskq::taskq_cancel_id),
+        taskq_is_empty: Some(taskq::taskq_is_empty),
+        taskq_nalloc: Some(taskq::taskq_nalloc),
+    };
+
+    unsafe {
+        libuzfs_set_ops(
+            &co_ops,
+            &mutex_ops,
+            &cond_ops,
+            &rwlock_ops,
+            &aio_ops,
+            &thread_ops,
+            &taskq_ops,
+            log_func,
+        )
+    };
+}
+
+pub async fn uzfs_debug_main() {
+    unsafe { set_libuzfs_ops(None) };
+    let mut args: Vec<_> = std::env::args()
+        .map(|arg| CString::new(arg).unwrap().into_raw())
+        .collect();
+
+    let mut coroutine_arg = LibuzfsDebugArgs {
+        argc: args.len() as i32,
+        argv: args.as_mut_ptr(),
+    };
+    let arg_usize = &mut coroutine_arg as *mut _ as usize;
+    CoroutineFuture::new_with_stack_size(libuzfs_debug_main_c, arg_usize, 16 << 20).await;
+
+    for arg in args {
+        let _ = unsafe { CString::from_raw(arg) };
+    }
+}
+
 pub async fn uzfs_env_init() {
     let _ = std::fs::remove_file(DEFAULT_CACHE_FILE);
     let mut guard = UZFS_INIT_REF.get_or_init(|| Mutex::new(0)).lock().await;
 
     if *guard == 0 {
-        let co_ops = coroutine_ops_t {
-            coroutine_key_create: Some(co_create_key),
-            coroutine_getkey: Some(co_get_key),
-            coroutine_setkey: Some(co_set_key),
-            uzfs_coroutine_self: Some(co_self),
-            coroutine_sched_yield: Some(co_sched_yield),
-            coroutine_sleep: Some(co_sleep),
-        };
-
-        let mutex_ops = co_mutex_ops {
-            co_mutex_held: Some(co_mutex_held),
-            co_mutex_init: Some(co_mutex_init),
-            co_mutex_destroy: Some(co_mutex_destroy),
-            co_mutex_lock: Some(co_mutex_lock),
-            co_mutex_trylock: Some(co_mutex_trylock),
-            co_mutex_unlock: Some(co_mutex_unlock),
-        };
-
-        let cond_ops = co_cond_ops {
-            co_cond_init: Some(co_cond_init),
-            co_cond_destroy: Some(co_cond_destroy),
-            co_cond_wait: Some(co_cond_wait),
-            co_cond_timedwait: Some(co_cond_timedwait),
-            co_cond_signal: Some(co_cond_signal),
-            co_cond_broadcast: Some(co_cond_broadcast),
-        };
-
-        let rwlock_ops = co_rwlock_ops {
-            co_rw_lock_read_held: Some(co_rwlock_read_held),
-            co_rw_lock_write_held: Some(co_rwlock_write_held),
-            co_rw_lock_init: Some(co_rwlock_init),
-            co_rw_lock_destroy: Some(co_rwlock_destroy),
-            co_rw_lock_read: Some(co_rw_lock_read),
-            co_rw_lock_write: Some(co_rw_lock_write),
-            co_rw_lock_try_read: Some(co_rwlock_try_read),
-            co_rw_lock_try_write: Some(co_rwlock_try_write),
-            co_rw_lock_exit: Some(co_rw_unlock),
-        };
-
-        let aio_ops = aio_ops {
-            register_aio_fd: Some(register_fd),
-            unregister_aio_fd: Some(unregister_fd),
-            submit_aio_read: Some(submit_read),
-            submit_aio_write: Some(submit_write),
-            submit_aio_fsync: Some(submit_fsync),
-        };
-
-        let thread_ops = thread_ops {
-            uthread_create: Some(thread_create),
-            uthread_exit: Some(thread_exit),
-            uthread_join: Some(thread_join),
-            backtrace: Some(print_backtrace),
-        };
-
-        let taskq_ops = taskq_ops {
-            taskq_create: Some(taskq::taskq_create),
-            taskq_dispatch: Some(taskq::taskq_dispatch),
-            taskq_delay_dispatch: Some(taskq::taskq_delay_dispatch),
-            taskq_member: Some(taskq::taskq_is_member),
-            taskq_of_curthread: Some(taskq::taskq_of_curthread),
-            taskq_wait: Some(taskq::taskq_wait),
-            taskq_destroy: Some(taskq::taskq_destroy),
-            taskq_wait_id: Some(taskq::taskq_wait_id),
-            taskq_cancel_id: Some(taskq::taskq_cancel_id),
-            taskq_is_empty: Some(taskq::taskq_is_empty),
-            taskq_nalloc: Some(taskq::taskq_nalloc),
-        };
-
-        unsafe {
-            libuzfs_set_sync_ops(
-                &co_ops,
-                &mutex_ops,
-                &cond_ops,
-                &rwlock_ops,
-                &aio_ops,
-                &thread_ops,
-                &taskq_ops,
-            )
-        };
-
+        unsafe { set_libuzfs_ops(Some(print_log)) };
         CoroutineFuture::new(libuzfs_init_c, 0).await;
     }
 
