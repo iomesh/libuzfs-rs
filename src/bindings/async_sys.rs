@@ -1,10 +1,131 @@
 use super::sys::*;
+use crate::context::coroutine_c::*;
+use crate::context::taskq;
+use crate::io::async_io_c::*;
+use crate::metrics;
+use crate::metrics::stats::*;
+use crate::sync::sync_c::*;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_void};
 
 const MAX_POOL_NAME_SIZE: i32 = 32;
 const MAX_NAME_SIZE: usize = 256;
 const MAX_KVATTR_VALUE_SIZE: usize = 8192;
+
+unsafe extern "C" fn print_backtrace() {
+    let mut depth = 0;
+    backtrace::trace(|frame| {
+        backtrace::resolve_frame(frame, |symbol| {
+            let name = match symbol.name() {
+                Some(name) => name.as_str().unwrap(),
+                None => "",
+            };
+
+            let file_name = match symbol.filename() {
+                Some(path) => path.to_str().unwrap(),
+                None => "",
+            };
+
+            let line = symbol.lineno().unwrap_or(0);
+
+            println!("#{depth}  {file_name}:{line}:{name}");
+            depth += 1;
+        });
+
+        true // keep going to the next frame
+    });
+}
+
+pub(crate) unsafe fn set_libuzfs_ops(log_func: Option<unsafe extern "C" fn(*const c_char, i32)>) {
+    let co_ops = coroutine_ops_t {
+        coroutine_key_create: Some(co_create_key),
+        coroutine_getkey: Some(co_get_key),
+        coroutine_setkey: Some(co_set_key),
+        uzfs_coroutine_self: Some(co_self),
+        coroutine_sched_yield: Some(co_sched_yield),
+        coroutine_sleep: Some(co_sleep),
+    };
+
+    let mutex_ops = co_mutex_ops {
+        co_mutex_held: Some(co_mutex_held),
+        co_mutex_init: Some(co_mutex_init),
+        co_mutex_destroy: Some(co_mutex_destroy),
+        co_mutex_lock: Some(co_mutex_lock),
+        co_mutex_trylock: Some(co_mutex_trylock),
+        co_mutex_unlock: Some(co_mutex_unlock),
+    };
+
+    let cond_ops = co_cond_ops {
+        co_cond_init: Some(co_cond_init),
+        co_cond_destroy: Some(co_cond_destroy),
+        co_cond_wait: Some(co_cond_wait),
+        co_cond_timedwait: Some(co_cond_timedwait),
+        co_cond_signal: Some(co_cond_signal),
+        co_cond_broadcast: Some(co_cond_broadcast),
+    };
+
+    let rwlock_ops = co_rwlock_ops {
+        co_rw_lock_read_held: Some(co_rwlock_read_held),
+        co_rw_lock_write_held: Some(co_rwlock_write_held),
+        co_rw_lock_init: Some(co_rwlock_init),
+        co_rw_lock_destroy: Some(co_rwlock_destroy),
+        co_rw_lock_read: Some(co_rw_lock_read),
+        co_rw_lock_write: Some(co_rw_lock_write),
+        co_rw_lock_try_read: Some(co_rwlock_try_read),
+        co_rw_lock_try_write: Some(co_rwlock_try_write),
+        co_rw_lock_exit: Some(co_rw_unlock),
+    };
+
+    let aio_ops = aio_ops {
+        register_aio_fd: Some(register_fd),
+        unregister_aio_fd: Some(unregister_fd),
+        submit_aio_read: Some(submit_read),
+        submit_aio_write: Some(submit_write),
+        submit_aio_fsync: Some(submit_fsync),
+    };
+
+    let thread_ops = thread_ops {
+        uthread_create: Some(thread_create),
+        uthread_exit: Some(thread_exit),
+        uthread_join: Some(thread_join),
+    };
+
+    let taskq_ops = taskq_ops {
+        taskq_create: Some(taskq::taskq_create),
+        taskq_dispatch: Some(taskq::taskq_dispatch),
+        taskq_delay_dispatch: Some(taskq::taskq_delay_dispatch),
+        taskq_member: Some(taskq::taskq_is_member),
+        taskq_of_curthread: Some(taskq::taskq_of_curthread),
+        taskq_wait: Some(taskq::taskq_wait),
+        taskq_destroy: Some(taskq::taskq_destroy),
+        taskq_wait_id: Some(taskq::taskq_wait_id),
+        taskq_cancel_id: Some(taskq::taskq_cancel_id),
+        taskq_is_empty: Some(taskq::taskq_is_empty),
+        taskq_nalloc: Some(taskq::taskq_nalloc),
+    };
+
+    let stat_ops = stat_ops {
+        print_log: log_func,
+        kstat_install: Some(install_stat),
+        kstat_uinstall: Some(uninstall_stat),
+        backtrace: Some(print_backtrace),
+        record_txg_delays: Some(metrics::record_txg_delay),
+        record_zio: Some(metrics::record_zio),
+    };
+
+    unsafe {
+        libuzfs_set_ops(
+            &co_ops,
+            &mutex_ops,
+            &cond_ops,
+            &rwlock_ops,
+            &aio_ops,
+            &thread_ops,
+            &taskq_ops,
+            &stat_ops,
+        )
+    };
+}
 
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_init_c(_: *mut c_void) {
@@ -23,6 +144,7 @@ pub struct LibuzfsDatasetInitArg {
     pub dnodesize: u32,
     pub max_blksize: u32,
     pub already_formatted: bool,
+    pub metrics: *const c_void,
 
     pub ret: i32,
     pub dhp: *mut libuzfs_dataset_handle_t,
@@ -71,13 +193,24 @@ pub unsafe extern "C" fn libuzfs_dataset_init_c(arg: *mut c_void) {
     arg.zhp = libuzfs_zpool_open(arg.pool_name, &mut arg.ret);
     if !arg.zhp.is_null() {
         assert_eq!(arg.ret, 0);
-        arg.dhp = libuzfs_dataset_open(arg.dsname, &mut arg.ret, arg.dnodesize, arg.max_blksize);
+        arg.dhp = libuzfs_dataset_open(
+            arg.dsname,
+            &mut arg.ret,
+            arg.dnodesize,
+            arg.max_blksize,
+            arg.metrics,
+        );
         if arg.dhp.is_null() && arg.ret == libc::ENOENT && !arg.already_formatted {
             arg.ret = libuzfs_dataset_create(arg.dsname);
             assert_ne!(arg.ret, libc::EEXIST);
             if arg.ret == 0 {
-                arg.dhp =
-                    libuzfs_dataset_open(arg.dsname, &mut arg.ret, arg.dnodesize, arg.max_blksize);
+                arg.dhp = libuzfs_dataset_open(
+                    arg.dsname,
+                    &mut arg.ret,
+                    arg.dnodesize,
+                    arg.max_blksize,
+                    arg.metrics,
+                );
             }
         }
 
@@ -861,4 +994,37 @@ unsafe impl Sync for LibuzfsDebugArgs {}
 pub unsafe extern "C" fn libuzfs_debug_main_c(arg: *mut c_void) {
     let arg = &*(arg as *mut LibuzfsDebugArgs);
     libuzfs_debug_main(arg.argc, arg.argv);
+}
+
+pub struct LibuzfsShowStatsArgs {
+    pub stat_ptr: *mut c_void,
+    pub stat_type: i32,
+
+    pub formatted_strings: Vec<Vec<u8>>,
+}
+
+unsafe impl Send for LibuzfsShowStatsArgs {}
+unsafe impl Sync for LibuzfsShowStatsArgs {}
+
+unsafe extern "C" fn generate(arg: *mut c_void, sf: *mut seq_file) {
+    let buf_size = 1024;
+    let arg = &mut *(arg as *mut Vec<Vec<u8>>);
+    arg.push(Vec::with_capacity(buf_size));
+    let last = arg.last_mut().unwrap();
+    last.resize(buf_size, 0);
+    *sf = seq_file {
+        buf: last.as_ptr() as *mut _,
+        size: buf_size as i32,
+    };
+}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_show_stats_c(arg: *mut c_void) {
+    let arg = &mut *(arg as *mut LibuzfsShowStatsArgs);
+    let generator = seq_file_generator {
+        generate: Some(generate),
+        arg: &mut arg.formatted_strings as *mut _ as *mut _,
+    };
+
+    libuzfs_show_stats(arg.stat_ptr, arg.stat_type, &generator);
 }
