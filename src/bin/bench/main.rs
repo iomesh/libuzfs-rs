@@ -60,9 +60,9 @@ async fn main() {
     uzfs_env_init().await;
     let dev_path = std::env::args().nth(1).unwrap();
     let sync: bool = std::env::args().nth(2).unwrap().parse().unwrap();
-    let concurrency = 64;
+    let concurrency = 256;
     let blksize = 1 << 20;
-    let file_size = 1 << 30;
+    let file_size = 64 << 30;
 
     let ds = Arc::new(
         Dataset::init("testzp/ds", &dev_path, DatasetType::Data, 0, false)

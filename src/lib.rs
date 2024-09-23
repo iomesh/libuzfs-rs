@@ -5,6 +5,7 @@ pub mod context;
 pub(crate) mod io;
 pub mod metrics;
 pub(crate) mod sync;
+
 #[cfg(test)]
 mod tests;
 

@@ -1,11 +1,7 @@
 use crate::bindings::async_sys::*;
 use crate::bindings::sys::*;
 use crate::context::coroutine::CoroutineFuture;
-use crate::context::coroutine_c::*;
-use crate::context::taskq;
-use crate::io::async_io_c::*;
-use crate::metrics::{Method, Metrics};
-use crate::sync::sync_c::*;
+use crate::metrics::{RequestMethod, UzfsMetrics};
 use cstr_argument::CStrArgument;
 use io::Result;
 use once_cell::sync::OnceCell;
@@ -33,122 +29,6 @@ pub struct InodeAttr {
     pub reserved: Vec<u8>,
 }
 
-unsafe extern "C" fn print_backtrace() {
-    let mut depth = 0;
-    backtrace::trace(|frame| {
-        backtrace::resolve_frame(frame, |symbol| {
-            let name = match symbol.name() {
-                Some(name) => name.as_str().unwrap(),
-                None => "",
-            };
-
-            let file_name = match symbol.filename() {
-                Some(path) => path.to_str().unwrap(),
-                None => "",
-            };
-
-            let line = symbol.lineno().unwrap_or(0);
-
-            println!("#{depth}  {file_name}:{line}:{name}");
-            depth += 1;
-        });
-
-        true // keep going to the next frame
-    });
-}
-
-unsafe extern "C" fn print_log(buf: *const c_char, new_line: i32) {
-    let buf = CStr::from_ptr(buf);
-    if new_line != 0 {
-        println!("{}", buf.to_bytes().escape_ascii());
-    } else {
-        print!("{}", buf.to_bytes().escape_ascii());
-    }
-}
-
-unsafe fn set_libuzfs_ops(log_func: Option<unsafe extern "C" fn(*const c_char, i32)>) {
-    let co_ops = coroutine_ops_t {
-        coroutine_key_create: Some(co_create_key),
-        coroutine_getkey: Some(co_get_key),
-        coroutine_setkey: Some(co_set_key),
-        uzfs_coroutine_self: Some(co_self),
-        coroutine_sched_yield: Some(co_sched_yield),
-        coroutine_sleep: Some(co_sleep),
-    };
-
-    let mutex_ops = co_mutex_ops {
-        co_mutex_held: Some(co_mutex_held),
-        co_mutex_init: Some(co_mutex_init),
-        co_mutex_destroy: Some(co_mutex_destroy),
-        co_mutex_lock: Some(co_mutex_lock),
-        co_mutex_trylock: Some(co_mutex_trylock),
-        co_mutex_unlock: Some(co_mutex_unlock),
-    };
-
-    let cond_ops = co_cond_ops {
-        co_cond_init: Some(co_cond_init),
-        co_cond_destroy: Some(co_cond_destroy),
-        co_cond_wait: Some(co_cond_wait),
-        co_cond_timedwait: Some(co_cond_timedwait),
-        co_cond_signal: Some(co_cond_signal),
-        co_cond_broadcast: Some(co_cond_broadcast),
-    };
-
-    let rwlock_ops = co_rwlock_ops {
-        co_rw_lock_read_held: Some(co_rwlock_read_held),
-        co_rw_lock_write_held: Some(co_rwlock_write_held),
-        co_rw_lock_init: Some(co_rwlock_init),
-        co_rw_lock_destroy: Some(co_rwlock_destroy),
-        co_rw_lock_read: Some(co_rw_lock_read),
-        co_rw_lock_write: Some(co_rw_lock_write),
-        co_rw_lock_try_read: Some(co_rwlock_try_read),
-        co_rw_lock_try_write: Some(co_rwlock_try_write),
-        co_rw_lock_exit: Some(co_rw_unlock),
-    };
-
-    let aio_ops = aio_ops {
-        register_aio_fd: Some(register_fd),
-        unregister_aio_fd: Some(unregister_fd),
-        submit_aio_read: Some(submit_read),
-        submit_aio_write: Some(submit_write),
-        submit_aio_fsync: Some(submit_fsync),
-    };
-
-    let thread_ops = thread_ops {
-        uthread_create: Some(thread_create),
-        uthread_exit: Some(thread_exit),
-        uthread_join: Some(thread_join),
-        backtrace: Some(print_backtrace),
-    };
-
-    let taskq_ops = taskq_ops {
-        taskq_create: Some(taskq::taskq_create),
-        taskq_dispatch: Some(taskq::taskq_dispatch),
-        taskq_delay_dispatch: Some(taskq::taskq_delay_dispatch),
-        taskq_member: Some(taskq::taskq_is_member),
-        taskq_of_curthread: Some(taskq::taskq_of_curthread),
-        taskq_wait: Some(taskq::taskq_wait),
-        taskq_destroy: Some(taskq::taskq_destroy),
-        taskq_wait_id: Some(taskq::taskq_wait_id),
-        taskq_cancel_id: Some(taskq::taskq_cancel_id),
-        taskq_is_empty: Some(taskq::taskq_is_empty),
-        taskq_nalloc: Some(taskq::taskq_nalloc),
-    };
-
-    unsafe {
-        libuzfs_set_ops(
-            &co_ops,
-            &mutex_ops,
-            &cond_ops,
-            &rwlock_ops,
-            &aio_ops,
-            &thread_ops,
-            &taskq_ops,
-            log_func,
-        )
-    };
-}
-
 pub async fn uzfs_debug_main() {
     unsafe { set_libuzfs_ops(None) };
     let mut args: Vec<_> = std::env::args()
@@ -168,6 +48,15 @@ pub async fn uzfs_debug_main() {
 }
 
 pub async fn uzfs_env_init() {
+    unsafe extern "C" fn print_log(buf: *const c_char, new_line: i32) {
+        let buf = CStr::from_ptr(buf);
+        if new_line != 0 {
+            println!("{}", buf.to_bytes().escape_ascii());
+        } else {
+            print!("{}", buf.to_bytes().escape_ascii());
+        }
+    }
+
     let _ = std::fs::remove_file(DEFAULT_CACHE_FILE);
     let mut guard = UZFS_INIT_REF.get_or_init(|| Mutex::new(0)).lock().await;
 
@@ -260,9 +149,17 @@ pub struct Dataset {
     dhp: *mut libuzfs_dataset_handle_t,
     zhp: *mut libuzfs_zpool_handle_t,
     poolname: CString,
-    pub metrics: Metrics,
+    metrics: Box<UzfsMetrics>,
 }
 
+// metrics
+impl Dataset {
+    pub fn metrics(&self) -> &UzfsMetrics {
+        &self.metrics
+    }
+}
+
+// control functions
 impl Dataset {
     fn dsname_to_poolname(dsname: &str) -> Result<String> {
         // the correct format of dsname is <poolname>/<dsname>, e.g testzp/ds
@@ -283,7 +180,10 @@ impl Dataset {
     ) -> Result<Self> {
         assert!(max_blksize == 0 || (max_blksize & (max_blksize - 1)) == 0);
 
-        let poolname = Self::dsname_to_poolname(dsname)?.into_cstr();
+        let poolname = Self::dsname_to_poolname(dsname)?;
+        let metrics = UzfsMetrics::new_boxed(&poolname);
+
+        let poolname = poolname.into_cstr();
         let dev_path_c = dev_path.into_cstr();
         let dsname = dsname.into_cstr();
 
@@ -299,6 +199,7 @@ impl Dataset {
             dnodesize,
             max_blksize,
             already_formatted,
+            metrics: metrics.as_ref() as *const _ as *const _,
 
             ret: 0,
             dhp: std::ptr::null_mut(),
@@ -308,8 +209,6 @@ impl Dataset {
         let arg_usize = &mut arg as *mut LibuzfsDatasetInitArg as usize;
 
         CoroutineFuture::new(libuzfs_dataset_init_c, arg_usize).await;
-
-        let metrics = Metrics::new();
 
         if arg.ret != 0 {
             Err(io::Error::from_raw_os_error(arg.ret))
@@ -342,6 +241,54 @@ impl Dataset {
         }
     }
 
+    pub async fn start_manual_trim(&self) -> Result<()> {
+        let mut arg = LibuzfsDatasetTrimArgs {
+            dhp: self.dhp,
+            err: 0,
+        };
+
+        let arg_usize = &mut arg as *mut _ as usize;
+        CoroutineFuture::new(libuzfs_dataset_start_manual_trim_c, arg_usize).await;
+
+        if arg.err == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(arg.err))
+        }
+    }
+
+    pub async fn close(&self) -> Result<()> {
+        let mut arg = LibuzfsDatasetFiniArg {
+            dhp: self.dhp,
+            zhp: self.zhp,
+            poolname: self.poolname.as_ptr(),
+            err: 0,
+        };
+
+        let arg_usize = &mut arg as *mut LibuzfsDatasetFiniArg as usize;
+
+        CoroutineFuture::new(libuzfs_dataset_fini_c, arg_usize).await;
+
+        if arg.err != 0 {
+            Err(io::Error::from_raw_os_error(arg.err))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn get_last_synced_txg(&self) -> u64 {
+        unsafe { libuzfs_get_last_synced_txg(self.dhp) }
+    }
+
+    pub async fn wait_synced(&self) {
+        let _guard = self.metrics.record(RequestMethod::WaitSynced, 0);
+        let arg_usize = self.dhp as usize;
+        CoroutineFuture::new(libuzfs_wait_synced_c, arg_usize).await;
+    }
+}
+
+// inode handle functions
+impl Dataset {
     // when the inode handle is useless, release_inode_handle should be called
     pub async fn get_superblock_inode_handle(&self) -> Result<InodeHandle> {
         let ino = unsafe { libuzfs_dataset_get_superblock_ino(self.dhp) };
@@ -382,7 +329,10 @@ impl Dataset {
         CoroutineFuture::new(libuzfs_inode_handle_rele_c, ino_hdl.ihp as usize).await;
         ino_hdl.ihp = null_mut();
     }
+}
 
+// zap functions
+impl Dataset {
     pub async fn zap_create(&self) -> Result<(u64, u64)> {
         let mut handle = self.create_inode(InodeType::DIR).await?;
         let (ino, gen) = (handle.ino, handle.gen);
@@ -488,9 +438,12 @@ impl Dataset {
             Err(io::Error::from_raw_os_error(arg.err))
         }
     }
+}
 
+// object functions
+impl Dataset {
     pub async fn create_objects(&self, num_objs: usize) -> Result<(Vec<u64>, u64)> {
-        let _guard = self.metrics.record(Method::CreateObjects, num_objs);
+        let _guard = self.metrics.record(RequestMethod::CreateObjects, num_objs);
         let mut arg = LibuzfsCreateObjectsArg {
             dhp: self.dhp,
             num_objs,
@@ -512,7 +465,7 @@ impl Dataset {
 
     // delete_object won't wait until synced, wait_log_commit is needed if you want wait sync
     pub async fn delete_object(&self, ino_hdl: &mut InodeHandle) -> Result<()> {
-        let _guard = self.metrics.record(Method::DeleteObject, 0);
+        let _guard = self.metrics.record(RequestMethod::DeleteObject, 0);
         let mut arg = LibuzfsDeleteObjectArg {
             ihp: ino_hdl.ihp,
             err: 0,
@@ -530,13 +483,13 @@ impl Dataset {
     }
 
     pub async fn wait_log_commit(&self) {
-        let _guard = self.metrics.record(Method::WaitLogCommit, 0);
+        let _guard = self.metrics.record(RequestMethod::WaitLogCommit, 0);
         let arg_usize = self.dhp as usize;
         CoroutineFuture::new(libuzfs_wait_log_commit_c, arg_usize).await;
     }
 
     pub async fn get_object_attr(&self, ino_hdl: &InodeHandle) -> Result<uzfs_object_attr_t> {
-        let _guard = self.metrics.record(Method::GetObjectAttr, 0);
+        let _guard = self.metrics.record(RequestMethod::GetObjectAttr, 0);
         let mut arg = LibuzfsGetObjectAttrArg {
             ihp: ino_hdl.ihp,
             attr: uzfs_object_attr_t::default(),
@@ -592,7 +545,9 @@ impl Dataset {
         offset: u64,
         size: u64,
     ) -> Result<Vec<u8>> {
-        let _guard = self.metrics.record(Method::ReadObject, size as usize);
+        let _guard = self
+            .metrics
+            .record(RequestMethod::ReadObject, size as usize);
         let mut arg = LibuzfsReadObjectArg {
             ihp: ino_hdl.ihp,
             offset,
@@ -619,7 +574,10 @@ impl Dataset {
         sync: bool,
         data: Vec<&[u8]>,
     ) -> Result<()> {
-        let _guard = self.metrics.record(Method::WriteObject, data.len());
+        let request_size = data.iter().map(|v| v.len()).sum();
+        let _guard = self
+            .metrics
+            .record(RequestMethod::WriteObject, request_size);
         let iovs = data
             .iter()
             .map(|v| iovec {
@@ -647,7 +605,7 @@ impl Dataset {
     }
 
     pub async fn sync_object(&self, ino_hdl: &InodeHandle) {
-        let _guard = self.metrics.record(Method::SyncObject, 0);
+        let _guard = self.metrics.record(RequestMethod::SyncObject, 0);
 
         CoroutineFuture::new(libuzfs_sync_object_c, ino_hdl.ihp as usize).await;
     }
@@ -760,10 +718,36 @@ impl Dataset {
         println!("\tfill_count: {}", doi.doi_fill_count);
     }
 
+    pub async fn set_object_mtime(
+        &self,
+        ino_hdl: &mut InodeHandle,
+        tv_sec: i64,
+        tv_nsec: i64,
+    ) -> Result<()> {
+        let mut arg = LibuzfsObjectSetMtimeArg {
+            ihp: ino_hdl.ihp,
+            tv_sec,
+            tv_nsec,
+            err: 0,
+        };
+
+        let arg_usize = &mut arg as *mut LibuzfsObjectSetMtimeArg as usize;
+        CoroutineFuture::new(libuzfs_object_set_mtime, arg_usize).await;
+
+        if arg.err == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(arg.err))
+        }
+    }
+}
+
+// inode functions
+impl Dataset {
     // this function will return with hashed lock guard, get_inode_handle or release_inode_handle
     // will be blocked within the lifetime of this lock guard
     pub async fn create_inode(&self, inode_type: InodeType) -> Result<InodeHandle> {
-        let _guard = self.metrics.record(Method::CreateInode, 0);
+        let _guard = self.metrics.record(RequestMethod::CreateInode, 0);
         let mut arg = LibuzfsCreateInode {
             dhp: self.dhp,
             inode_type: inode_type as u32,
@@ -814,7 +798,7 @@ impl Dataset {
         ino_hdl: &mut InodeHandle,
         inode_type: InodeType,
     ) -> Result<u64> {
-        let _guard = self.metrics.record(Method::DeleteInode, 0);
+        let _guard = self.metrics.record(RequestMethod::DeleteInode, 0);
         let mut arg = LibuzfsDeleteInode {
             ihp: ino_hdl.ihp,
             inode_type: inode_type as u32,
@@ -834,7 +818,7 @@ impl Dataset {
     }
 
     pub async fn get_attr(&self, ino_hdl: &InodeHandle) -> Result<InodeAttr> {
-        let _guard = self.metrics.record(Method::GetAttr, 0);
+        let _guard = self.metrics.record(RequestMethod::GetAttr, 0);
         let mut attr = InodeAttr::default();
         attr.reserved.reserve(MAX_RESERVED_SIZE);
 
@@ -861,7 +845,7 @@ impl Dataset {
     }
 
     pub async fn set_attr(&self, ino_hdl: &mut InodeHandle, reserved: &[u8]) -> Result<u64> {
-        let _guard = self.metrics.record(Method::SetAttr, 0);
+        let _guard = self.metrics.record(RequestMethod::SetAttr, 0);
         assert!(reserved.len() <= MAX_RESERVED_SIZE);
         let mut arg = LibuzfsSetAttrArg {
             ihp: ino_hdl.ihp,
@@ -887,7 +871,7 @@ impl Dataset {
         ino_hdl: &InodeHandle,
         name: P,
     ) -> Result<Vec<u8>> {
-        let _guard = self.metrics.record(Method::GetKvattr, 0);
+        let _guard = self.metrics.record(RequestMethod::GetKvattr, 0);
         let cname = name.into_cstr();
         let mut arg = LibuzfsGetKvattrArg {
             ihp: ino_hdl.ihp,
@@ -914,7 +898,7 @@ impl Dataset {
         value: &[u8],
         option: u32,
     ) -> Result<u64> {
-        let _guard = self.metrics.record(Method::SetKvattr, 0);
+        let _guard = self.metrics.record(RequestMethod::SetKvattr, 0);
         let cname = name.into_cstr();
         let mut arg = LibuzfsSetKvAttrArg {
             ihp: ino_hdl.ihp,
@@ -985,7 +969,7 @@ impl Dataset {
         name: P,
         value: u64,
     ) -> Result<u64> {
-        let _guard = self.metrics.record(Method::CreateDentry, 0);
+        let _guard = self.metrics.record(RequestMethod::CreateDentry, 0);
         let cname = name.into_cstr();
         let mut arg = LibuzfsCreateDentryArg {
             dihp: ino_hdl.ihp,
@@ -1011,7 +995,7 @@ impl Dataset {
         ino_hdl: &mut InodeHandle,
         name: P,
     ) -> Result<u64> {
-        let _guard = self.metrics.record(Method::DeleteDentry, 0);
+        let _guard = self.metrics.record(RequestMethod::DeleteDentry, 0);
         let cname = name.into_cstr();
         let mut arg = LibuzfsDeleteDentryArg {
             dihp: ino_hdl.ihp,
@@ -1036,7 +1020,7 @@ impl Dataset {
         ino_hdl: &InodeHandle,
         name: P,
     ) -> Result<u64> {
-        let _guard = self.metrics.record(Method::LookupDentry, 0);
+        let _guard = self.metrics.record(RequestMethod::LookupDentry, 0);
         let cname = name.into_cstr();
         let mut arg = LibuzfsLookupDentryArg {
             dihp: ino_hdl.ihp,
@@ -1062,7 +1046,7 @@ impl Dataset {
         whence: u64,
         size: u32,
     ) -> Result<(Vec<u8>, u32)> {
-        let _guard = self.metrics.record(Method::IterateDentry, 0);
+        let _guard = self.metrics.record(RequestMethod::IterateDentry, 0);
         let mut arg = LibuzfsIterateDentryArg {
             dihp: ino_hdl.ihp,
             whence,
@@ -1080,74 +1064,6 @@ impl Dataset {
             Ok((arg.data, arg.num))
         } else {
             Err(io::Error::from_raw_os_error(arg.err))
-        }
-    }
-
-    pub fn get_last_synced_txg(&self) -> u64 {
-        unsafe { libuzfs_get_last_synced_txg(self.dhp) }
-    }
-
-    pub async fn wait_synced(&self) {
-        let _guard = self.metrics.record(Method::WaitSynced, 0);
-        let arg_usize = self.dhp as usize;
-        CoroutineFuture::new(libuzfs_wait_synced_c, arg_usize).await;
-    }
-
-    pub async fn set_object_mtime(
-        &self,
-        ino_hdl: &mut InodeHandle,
-        tv_sec: i64,
-        tv_nsec: i64,
-    ) -> Result<()> {
-        let mut arg = LibuzfsObjectSetMtimeArg {
-            ihp: ino_hdl.ihp,
-            tv_sec,
-            tv_nsec,
-            err: 0,
-        };
-
-        let arg_usize = &mut arg as *mut LibuzfsObjectSetMtimeArg as usize;
-        CoroutineFuture::new(libuzfs_object_set_mtime, arg_usize).await;
-
-        if arg.err == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::from_raw_os_error(arg.err))
-        }
-    }
-
-    pub async fn start_manual_trim(&self) -> Result<()> {
-        let mut arg = LibuzfsDatasetTrimArgs {
-            dhp: self.dhp,
-            err: 0,
-        };
-
-        let arg_usize = &mut arg as *mut _ as usize;
-        CoroutineFuture::new(libuzfs_dataset_start_manual_trim_c, arg_usize).await;
-
-        if arg.err == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::from_raw_os_error(arg.err))
-        }
-    }
-
-    pub async fn close(&self) -> Result<()> {
-        let mut arg = LibuzfsDatasetFiniArg {
-            dhp: self.dhp,
-            zhp: self.zhp,
-            poolname: self.poolname.as_ptr(),
-            err: 0,
-        };
-
-        let arg_usize = &mut arg as *mut LibuzfsDatasetFiniArg as usize;
-
-        CoroutineFuture::new(libuzfs_dataset_fini_c, arg_usize).await;
-
-        if arg.err != 0 {
-            Err(io::Error::from_raw_os_error(arg.err))
-        } else {
-            Ok(())
         }
     }
 }
