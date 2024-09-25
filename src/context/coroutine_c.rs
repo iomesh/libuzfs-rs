@@ -44,7 +44,7 @@ pub unsafe extern "C" fn co_self() -> u64 {
 pub unsafe extern "C" fn co_sleep(duration: *const sys::timespec) {
     let duration = &*duration;
     let duration = Duration::new(duration.tv_sec as u64, duration.tv_nsec as u32);
-    CoroutineFuture::tls_coroutine().poll_until_ready(tokio::time::sleep(duration));
+    CoroutineFuture::poll_until_ready(tokio::time::sleep(duration));
 }
 
 // const TS_RUN: i32 = 0x00000002;
@@ -101,8 +101,6 @@ pub unsafe extern "C" fn thread_exit() {
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn thread_join(id: u64) {
     if let Some((_, handle)) = ID_TASK_HANDLE_MAP.get().unwrap().remove(&id) {
-        CoroutineFuture::tls_coroutine()
-            .poll_until_ready(handle)
-            .unwrap();
+        CoroutineFuture::poll_until_ready(handle).unwrap();
     }
 }

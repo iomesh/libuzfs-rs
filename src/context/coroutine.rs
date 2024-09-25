@@ -37,7 +37,7 @@ pub(crate) static COROUTINE_KEY: AtomicU32 = AtomicU32::new(0);
 static KEY_DESTRUCTORS: OnceCell<DashMap<u32, unsafe extern "C" fn(*mut c_void)>> = OnceCell::new();
 
 thread_local! {
-    static TLS_COROUTINE: Cell<usize> = const { Cell::new(0) };
+    static TLS_COROUTINE: Cell<*mut CoroutineFuture> = const { Cell::new(ptr::null_mut()) };
 }
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
@@ -80,9 +80,9 @@ pub struct CoroutineFuture {
 const STACK_SIZE: usize = 1 << 20;
 
 impl CoroutineFuture {
-    #[inline]
+    #[inline(always)]
     pub fn tls_coroutine<'a>() -> &'a mut Self {
-        unsafe { &mut *(TLS_COROUTINE.get() as *mut Self) }
+        unsafe { &mut *TLS_COROUTINE.get() }
     }
 
     #[inline]
@@ -139,7 +139,8 @@ impl CoroutineFuture {
     #[inline(always)]
     unsafe fn run(&mut self, cx: &mut Context<'_>) -> RunState {
         self.state = RunState::Runnable;
-        TLS_COROUTINE.set(self as *mut _ as usize);
+        let prev = TLS_COROUTINE.get();
+        TLS_COROUTINE.set(self as *mut _);
         self.context = transmute(cx);
         *libc::__errno_location() = self.saved_errno;
 
@@ -162,7 +163,7 @@ impl CoroutineFuture {
 
         jump_fcontext(&mut self.poller_context, self.pollee_context, 0, 1);
         self.saved_errno = *libc::__errno_location();
-        TLS_COROUTINE.set(0);
+        TLS_COROUTINE.set(prev);
         self.state
     }
 
@@ -199,13 +200,22 @@ impl CoroutineFuture {
     //     }
     // }
 
-    #[inline]
-    pub unsafe fn poll_until_ready<F: Future<Output = T>, T>(&mut self, mut f: F) -> T {
+    // Why use inline(never) here?
+    //
+    // The rust compiler may optimize the second thread local access, consider
+    // the following operation sequence:
+    // first get tls -> jump_fcontext -> thread switch -> second get tls
+    // because the two tls_get are called in the same function, the compiler may
+    // think the second get is useless and optimize it, such that the second tls_get
+    // gets the address of tls in last thread, resulting in polluted memory
+    #[inline(never)]
+    pub unsafe fn poll_until_ready<F: Future<Output = T>, T>(mut f: F) -> T {
+        let tls_coroutine = Self::tls_coroutine();
         loop {
             let pinned_ref = Pin::new_unchecked(&mut f);
-            match pinned_ref.poll(&mut *self.context) {
+            match pinned_ref.poll(&mut *tls_coroutine.context) {
                 Poll::Ready(res) => return res,
-                Poll::Pending => self.pend_and_switch(),
+                Poll::Pending => tls_coroutine.pend_and_switch(),
             }
         }
     }

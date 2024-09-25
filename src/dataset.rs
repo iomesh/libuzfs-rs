@@ -14,6 +14,7 @@ use std::io;
 use std::io::Error;
 use std::io::ErrorKind;
 use std::os::raw::{c_char, c_void};
+use std::ptr::null_mut;
 use tokio::sync::Mutex;
 
 pub const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
@@ -331,7 +332,7 @@ impl Dataset {
             err: 0,
         };
         let arg_usize = &mut arg as *mut _ as usize;
-        CoroutineFuture::new(libuzfs_inode_handle_get_c, arg_usize, true).await;
+        CoroutineFuture::new(libuzfs_inode_handle_get_c, arg_usize).await;
 
         if arg.err == 0 {
             Ok(InodeHandle {
@@ -346,7 +347,7 @@ impl Dataset {
 
     // Do not access inode_hanlde after this function returns
     pub async fn release_inode_handle(&self, ino_hdl: &mut InodeHandle) {
-        CoroutineFuture::new(libuzfs_inode_handle_rele_c, ino_hdl.ihp as usize, true).await;
+        CoroutineFuture::new(libuzfs_inode_handle_rele_c, ino_hdl.ihp as usize).await;
         ino_hdl.ihp = null_mut();
     }
 
@@ -616,8 +617,6 @@ impl Dataset {
     pub async fn sync_object(&self, ino_hdl: &InodeHandle) {
         let _guard = self.metrics.record(Method::SyncObject, 0);
 
-        let arg_usize = &mut arg as *mut LibuzfsSyncObjectArg as usize;
-
         CoroutineFuture::new(libuzfs_sync_object_c, ino_hdl.ihp as usize).await;
     }
 
@@ -684,6 +683,30 @@ impl Dataset {
 
         match arg.err {
             0 => Ok(arg.off < offset + size),
+            other => Err(io::Error::from_raw_os_error(other)),
+        }
+    }
+
+    pub async fn object_next_block(
+        &self,
+        ino_hdl: &InodeHandle,
+        offset: u64,
+    ) -> Result<Option<(u64, u64)>> {
+        let mut arg = LibuzfsNextBlockArg {
+            ihp: ino_hdl.ihp,
+            off: offset,
+
+            size: 0,
+            err: 0,
+        };
+
+        let arg_usize = &mut arg as *mut _ as usize;
+
+        CoroutineFuture::new(libuzfs_object_next_block_c, arg_usize).await;
+
+        match arg.err {
+            0 => Ok(Some((arg.off, arg.size))),
+            libc::ESRCH => Ok(None),
             other => Err(io::Error::from_raw_os_error(other)),
         }
     }
@@ -1032,11 +1055,10 @@ impl Dataset {
         unsafe { libuzfs_get_last_synced_txg(self.dhp) }
     }
 
-    pub async fn wait_synced(&self) -> Result<()> {
+    pub async fn wait_synced(&self) {
         let _guard = self.metrics.record(Method::WaitSynced, 0);
         let arg_usize = self.dhp as usize;
         CoroutineFuture::new(libuzfs_wait_synced_c, arg_usize).await;
-        Ok(())
     }
 
     pub async fn set_object_mtime(

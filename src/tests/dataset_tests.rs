@@ -105,7 +105,7 @@ async fn uzfs_test() {
 
         let value_read = ds.get_kvattr(&sb_hdl, key).await.unwrap();
         assert_eq!(value_read.as_slice(), value.as_bytes());
-        ds.wait_synced().await.unwrap();
+        ds.wait_synced().await;
 
         let mut tmp_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
         (tmp_ino, gen) = (tmp_hdl.ino, tmp_hdl.gen);
@@ -120,7 +120,7 @@ async fn uzfs_test() {
             .create_dentry(&mut sb_hdl, tmp_name, tmp_ino)
             .await
             .unwrap();
-        ds.wait_synced().await.unwrap();
+        ds.wait_synced().await;
         assert!(ds.get_last_synced_txg() >= txg);
 
         let tmp_dentry_data_read = ds.lookup_dentry(&sb_hdl, tmp_name).await.unwrap();
@@ -183,7 +183,7 @@ async fn uzfs_test() {
             .unwrap();
         let dentry_data_read = ds.lookup_dentry(&dir_hdl, file_name).await.unwrap();
         assert_eq!(file_ino, dentry_data_read);
-        ds.wait_synced().await.unwrap();
+        ds.wait_synced().await;
         assert!(ds.get_last_synced_txg() >= txg);
 
         let (_, dentry_num) = ds.iterate_dentry(&dir_hdl, 0, 4096).await.unwrap();
@@ -226,7 +226,7 @@ async fn uzfs_test() {
         ds.write_object(&obj_hdl, (size * 2) as u64, false, vec![&data])
             .await
             .unwrap();
-        ds.wait_synced().await.unwrap();
+        ds.wait_synced().await;
         assert!(!ds
             .object_has_hole_in_range(&obj_hdl, 0, size as u64)
             .await
@@ -302,7 +302,7 @@ async fn uzfs_test() {
         assert_eq!(value_read.as_slice(), value.as_bytes());
 
         txg = ds.remove_kvattr(&mut file_hdl, key).await.unwrap();
-        ds.wait_synced().await.unwrap();
+        ds.wait_synced().await;
         assert!(ds.get_last_synced_txg() >= txg);
 
         _ = ds.delete_inode(&mut dir_hdl, InodeType::DIR).await.unwrap();
@@ -310,7 +310,7 @@ async fn uzfs_test() {
             .delete_inode(&mut file_hdl, InodeType::FILE)
             .await
             .unwrap();
-        ds.wait_synced().await.unwrap();
+        ds.wait_synced().await;
         assert!(ds.get_last_synced_txg() >= txg);
         ds.release_inode_handle(&mut file_hdl).await;
         ds.release_inode_handle(&mut dir_hdl).await;
@@ -436,7 +436,7 @@ async fn uzfs_claim_test() {
         ino = ino_hdl.ino;
         ds.release_inode_handle(&mut ino_hdl).await;
 
-        ds.wait_synced().await.unwrap();
+        ds.wait_synced().await;
         ds.close().await.unwrap();
     }
 
@@ -458,7 +458,7 @@ async fn uzfs_claim_test() {
 
         ds.delete_inode(&mut ino_hdl, InodeType::DIR).await.unwrap();
         ds.release_inode_handle(&mut ino_hdl).await;
-        ds.wait_synced().await.unwrap();
+        ds.wait_synced().await;
 
         // test claim when inode doesn't exist
         ds.claim_inode(ino, 0, InodeType::DIR).await.unwrap();
@@ -736,6 +736,40 @@ async fn uzfs_attr_test() {
         .await
         .unwrap(),
     );
+
+    let mut ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
+    let value = vec![1; 512];
+    ds.set_kvattr(&mut ino_hdl, "name1", &value, KvSetOption::None as u32)
+        .await
+        .unwrap();
+    ds.set_kvattr(
+        &mut ino_hdl,
+        "name2",
+        &value,
+        KvSetOption::HighPriority as u32,
+    )
+    .await
+    .unwrap();
+    ds.release_inode_handle(&mut ino_hdl).await;
+
+    let mut ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
+    ds.set_kvattr(
+        &mut ino_hdl,
+        "name1",
+        &vec![1; 1024],
+        KvSetOption::None as u32,
+    )
+    .await
+    .unwrap();
+    ds.set_kvattr(
+        &mut ino_hdl,
+        "name2",
+        &vec![1; 512],
+        KvSetOption::HighPriority as u32,
+    )
+    .await
+    .unwrap();
+    ds.release_inode_handle(&mut ino_hdl).await;
 
     let ntests = 16;
     let nloops = 50;

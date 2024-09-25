@@ -227,11 +227,9 @@ impl Futex {
     ) -> bool {
         let waiter = self.wait(expected_value);
         if let Some(duration) = duration {
-            CoroutineFuture::tls_coroutine()
-                .poll_until_ready(timeout(duration, waiter))
-                .is_ok()
+            CoroutineFuture::poll_until_ready(timeout(duration, waiter)).is_ok()
         } else {
-            CoroutineFuture::tls_coroutine().poll_until_ready(waiter);
+            CoroutineFuture::poll_until_ready(waiter);
             true
         }
     }
