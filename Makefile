@@ -19,7 +19,7 @@ build:
 	cargo build --all
 
 test:
-	rustup default nightly-2024-05-02
+	rustup default nightly-2023-12-28
 	ENABLE_ASAN=yes RUSTFLAGS="-Zsanitizer=address -C force-frame-pointers=yes" ASAN_OPTIONS=detect_leaks=1 \
 	  cargo test --target x86_64-unknown-linux-gnu --workspace  -- --nocapture
 	ENABLE_ASAN=yes RUSTFLAGS="-Zsanitizer=address -C force-frame-pointers=yes" ASAN_OPTIONS=detect_leaks=0 \

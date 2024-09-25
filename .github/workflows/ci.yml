@@ -13,7 +13,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest]
-        rust: [nightly-2024-05-02]
+        rust: [nightly-2023-12-28]
 
     steps:
     - uses: hecrj/setup-rust-action@master
