@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering::*};
 use std::time::Duration;
 use std::{cmp::Ordering, collections::BTreeSet, sync::Arc};
 use tokio::runtime::Handle;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Semaphore};
 use tokio::time::Instant;
 use tokio::{
     sync::{mpsc::*, Notify},
@@ -52,18 +52,18 @@ impl Eq for TimerTask {}
 
 impl PartialOrd for TimerTask {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        let res = self.deadline.cmp(&other.deadline);
-        if res == Ordering::Equal {
-            Some(self.id.cmp(&other.id))
-        } else {
-            Some(res)
-        }
+        Some(self.cmp(other))
     }
 }
 
 impl Ord for TimerTask {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other).unwrap()
+        let res = self.deadline.cmp(&other.deadline);
+        if res == Ordering::Equal {
+            self.id.cmp(&other.id)
+        } else {
+            res
+        }
     }
 }
 
@@ -156,14 +156,16 @@ struct TaskQueue {
     cur_id: AtomicU64,
     task_map: Arc<DashMap<u64, Arc<Notify>>>,
     name: String,
+    concurrency_permits: Arc<Semaphore>,
 }
 
 impl TaskQueue {
-    pub(super) fn new(name: String) -> Box<Self> {
+    pub(super) fn new(name: String, max_concurrency: i32) -> Box<Self> {
         Box::new(Self {
             cur_id: AtomicU64::new(1),
             task_map: Arc::new(DashMap::new()),
             name,
+            concurrency_permits: Arc::new(Semaphore::new(max_concurrency as usize)),
         })
     }
 
@@ -172,14 +174,19 @@ impl TaskQueue {
         func: Option<unsafe extern "C" fn(*mut c_void)>,
         arg: *mut c_void,
     ) -> u64 {
-        let tq_key = *TASKQ_KEY.get_or_init(|| CoroutineFuture::create_key(None));
-        let mut coroutine = CoroutineFuture::new(func.unwrap(), arg as usize);
-        coroutine.set_specific(tq_key, self as *const _ as *mut c_void);
         let id = self.cur_id.fetch_add(1, Relaxed);
         let notify = Arc::new(Notify::new());
         self.task_map.insert(id, notify);
         let task_map = self.task_map.clone();
+        let arg_usize = arg as usize;
+        let tq_ptr_usize = self as *const _ as usize;
+        let permits = self.concurrency_permits.clone();
+
         tokio::spawn(async move {
+            let _permit = permits.acquire().await.unwrap();
+            let tq_key = *TASKQ_KEY.get_or_init(|| CoroutineFuture::create_key(None));
+            let mut coroutine = CoroutineFuture::new(func.unwrap(), arg_usize);
+            coroutine.set_specific(tq_key, tq_ptr_usize as *mut c_void);
             coroutine.await;
             let notify = task_map.remove(&id).unwrap().1;
             notify.notify_one();
@@ -248,9 +255,12 @@ impl TaskQueue {
     }
 }
 
-pub(crate) unsafe extern "C" fn taskq_create(tq_name: *const libc::c_char) -> *mut c_void {
+pub(crate) unsafe extern "C" fn taskq_create(
+    tq_name: *const libc::c_char,
+    nthreads: i32,
+) -> *mut c_void {
     let tq_name = CStr::from_ptr(tq_name);
-    let tq = TaskQueue::new(tq_name.to_string_lossy().to_string());
+    let tq = TaskQueue::new(tq_name.to_string_lossy().to_string(), nthreads);
     Box::into_raw(tq) as *mut _
 }
 
@@ -287,22 +297,22 @@ pub(crate) unsafe extern "C" fn taskq_of_curthread() -> *mut c_void {
 
 pub(crate) unsafe extern "C" fn taskq_wait(tq: *const c_void) {
     let tq = &*(tq as *const TaskQueue);
-    CoroutineFuture::tls_coroutine().poll_until_ready(tq.wait());
+    CoroutineFuture::poll_until_ready(tq.wait());
 }
 
 pub(crate) unsafe extern "C" fn taskq_destroy(tq: *const c_void) {
     let tq = Box::from_raw(tq as *mut TaskQueue);
-    CoroutineFuture::tls_coroutine().poll_until_ready(tq.wait());
+    CoroutineFuture::poll_until_ready(tq.wait());
 }
 
 pub(crate) unsafe extern "C" fn taskq_wait_id(tq: *const c_void, id: u64) {
     let tq = &*(tq as *const TaskQueue);
-    CoroutineFuture::tls_coroutine().poll_until_ready(tq.wait_id(id));
+    CoroutineFuture::poll_until_ready(tq.wait_id(id));
 }
 
 pub(crate) unsafe extern "C" fn taskq_cancel_id(tq: *const c_void, id: u64) -> i32 {
     let tq = &*(tq as *const TaskQueue);
-    CoroutineFuture::tls_coroutine().poll_until_ready(tq.cancel_delayed_task(id))
+    CoroutineFuture::poll_until_ready(tq.cancel_delayed_task(id))
 }
 
 pub(crate) unsafe extern "C" fn taskq_is_empty(tq: *const c_void) -> i32 {
