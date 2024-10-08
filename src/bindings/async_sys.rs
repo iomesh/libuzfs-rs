@@ -1028,3 +1028,9 @@ pub unsafe extern "C" fn libuzfs_show_stats_c(arg: *mut c_void) {
 
     libuzfs_show_stats(arg.stat_ptr, arg.stat_type, &generator);
 }
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_shrink_arc_c(arg: *mut c_void) {
+    let percent = arg as usize;
+    libuzfs_arc_shrink(percent);
+}

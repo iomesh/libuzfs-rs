@@ -21,6 +21,21 @@ pub const MAX_RESERVED_SIZE: usize = 192;
 const UZFS_DNODESIZE_META: u32 = 1024;
 const UZFS_DNODESIZE_DATA: u32 = 512;
 
+///
+/// Set arc parameters, which affects `arc_c`.
+/// `arc_c` is current limit of memory which can grow from `min` to `max`
+///
+pub fn set_arc_limit(max: usize, min: usize, sys_reserved: usize) {
+    unsafe { libuzfs_config_arc(max, min, sys_reserved) };
+}
+
+///
+/// Shrink `percent`% current memory
+///
+pub async fn arc_shrink(percent: usize) {
+    CoroutineFuture::new(libuzfs_shrink_arc_c, percent).await;
+}
+
 #[derive(Default)]
 pub struct InodeAttr {
     pub gen: u64,
