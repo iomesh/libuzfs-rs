@@ -1,12 +1,14 @@
+use crate::{
+    bindings::{
+        async_sys::{libuzfs_show_stats_c, LibuzfsShowStatsArgs},
+        sys,
+    },
+    context::{coroutine::CoroutineFuture, coroutine_c::co_sleep},
+};
 use dashmap::DashMap;
 use libc::{c_char, c_void};
 use once_cell::sync::OnceCell;
-use std::{ffi::CStr, sync::Arc, time::Duration};
-
-use crate::{
-    bindings::async_sys::{libuzfs_show_stats_c, LibuzfsShowStatsArgs},
-    context::coroutine::CoroutineFuture,
-};
+use std::{ffi::CStr, sync::Arc};
 
 struct StatDescriptor((usize, i32));
 
@@ -27,7 +29,11 @@ pub(crate) unsafe extern "C" fn uninstall_stat(name: *const c_char) {
     let stats_map = STATS_MAP.get().unwrap();
     if let Some((_, stat)) = stats_map.remove(name) {
         while Arc::strong_count(&stat) > 1 {
-            CoroutineFuture::poll_until_ready(tokio::time::sleep(Duration::from_millis(10)));
+            let d = sys::timespec {
+                tv_sec: 0,
+                tv_nsec: 1000000,
+            };
+            co_sleep(&d);
         }
     }
 }

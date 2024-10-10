@@ -24,6 +24,7 @@ strum = "0.26.2"
 strum_macros = "0.26.4"
 crossbeam-utils = "0.8.20"
 kanal = "0.1.0-pre7"
+crossbeam-channel = "0.5"
 
 [dev-dependencies]
 tokio-test = "0.4.2"
@@ -32,6 +33,10 @@ serial_test = { version = "1.0.0" }
 tempfile = "3.3.0"
 petgraph = "0.6.3"
 nix = { version = "0.27.1", features = ["process"] }
+
+[features]
+default = []
+thread = []
 
 [[bin]]
 name = "uzfs-bench"

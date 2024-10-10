@@ -1,6 +1,12 @@
 use super::sys::*;
+#[cfg(not(feature = "thread"))]
 use crate::context::coroutine_c::*;
+#[cfg(not(feature = "thread"))]
 use crate::context::taskq;
+#[cfg(feature = "thread")]
+use crate::context::taskq_thread as taskq;
+#[cfg(feature = "thread")]
+use crate::context::thread_c::*;
 use crate::io::async_io_c::*;
 use crate::metrics;
 use crate::metrics::stats::*;

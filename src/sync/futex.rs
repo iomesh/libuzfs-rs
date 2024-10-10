@@ -1,22 +1,30 @@
 use crate::bindings::sys::*;
+#[cfg(not(feature = "thread"))]
 use crate::context::coroutine::CoroutineFuture;
+#[cfg(not(feature = "thread"))]
 use futures::Future;
 use std::hint;
+#[cfg(not(feature = "thread"))]
 use std::pin::Pin;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicU32, Ordering};
+#[cfg(not(feature = "thread"))]
 use std::sync::Mutex;
+#[cfg(not(feature = "thread"))]
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
+#[cfg(not(feature = "thread"))]
 use tokio::time::timeout;
 
 #[repr(C)]
+#[cfg(not(feature = "thread"))]
 struct WaiterNode {
     prev: *mut WaiterNode,
     next: *mut WaiterNode,
     waker: Mutex<Option<Waker>>,
 }
 
+#[cfg(not(feature = "thread"))]
 impl WaiterNode {
     fn new() -> Self {
         Self {
@@ -38,7 +46,10 @@ impl WaiterList {
             lock,
         }
     }
+}
 
+#[cfg(not(feature = "thread"))]
+impl WaiterList {
     #[inline]
     unsafe fn push_back(&mut self, node: &mut WaiterNode) {
         node.next = null_mut();
@@ -114,6 +125,7 @@ impl WaiterList {
     }
 }
 
+#[cfg(not(feature = "thread"))]
 struct FutexWaiter<'a> {
     node: WaiterNode,
     expected_value: u32,
@@ -121,6 +133,7 @@ struct FutexWaiter<'a> {
     queued: bool,
 }
 
+#[cfg(not(feature = "thread"))]
 impl Future for FutexWaiter<'_> {
     type Output = i32;
 
@@ -168,6 +181,7 @@ impl Future for FutexWaiter<'_> {
     }
 }
 
+#[cfg(not(feature = "thread"))]
 impl Drop for FutexWaiter<'_> {
     fn drop(&mut self) {
         if self.queued {
@@ -210,6 +224,7 @@ impl Futex {
     }
 
     #[inline]
+    #[cfg(not(feature = "thread"))]
     fn wait(&mut self, expected_value: u32) -> FutexWaiter {
         FutexWaiter {
             node: WaiterNode::new(),
@@ -220,6 +235,7 @@ impl Futex {
     }
 
     #[inline]
+    #[cfg(not(feature = "thread"))]
     pub(crate) unsafe fn wait_until(
         &mut self,
         expected_value: u32,
@@ -234,15 +250,73 @@ impl Futex {
         }
     }
 
+    #[cfg(feature = "thread")]
+    pub(crate) unsafe fn wait_until(
+        &mut self,
+        expected_value: u32,
+        duration: Option<Duration>,
+    ) -> bool {
+        use std::{io::Error, mem::MaybeUninit, ptr::null};
+        const NANOSEC: i64 = 1000000000;
+
+        let deadline = duration.map(|d| {
+            let mut t = MaybeUninit::uninit();
+            if libc::clock_gettime(libc::CLOCK_MONOTONIC, t.as_mut_ptr()) == -1 {
+                panic!("get time failed, err: {}", Error::last_os_error());
+            }
+            let mut t = t.assume_init();
+            t.tv_nsec += d.as_nanos() as i64;
+            t.tv_sec += t.tv_nsec / NANOSEC;
+            t.tv_nsec %= NANOSEC;
+            t
+        });
+
+        loop {
+            let res = libc::syscall(
+                libc::SYS_futex,
+                &self.value as *const _,
+                libc::FUTEX_WAIT_BITSET | libc::FUTEX_PRIVATE_FLAG,
+                expected_value,
+                deadline
+                    .as_ref()
+                    .map_or(null(), |t| t as *const libc::timespec),
+                null::<u32>(), // This argument is unused for FUTEX_WAIT_BITSET.
+                !0u32,         // A full bitmask, to make it behave like a regular FUTEX_WAIT.
+            );
+
+            match (res < 0).then(|| *libc::__errno_location() as i32) {
+                Some(libc::ETIMEDOUT) => return false,
+                Some(libc::EINTR) => continue,
+                _ => return true,
+            }
+        }
+    }
+
     #[inline]
+    #[cfg(not(feature = "thread"))]
     pub(crate) unsafe fn wake_one(&mut self) -> bool {
         unsafe { self.waiters.wake_one() }
     }
 
+    #[cfg(feature = "thread")]
+    pub(crate) unsafe fn wake_one(&mut self) -> bool {
+        let ptr = &self.value as *const _;
+        let op = libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG;
+        libc::syscall(libc::SYS_futex, ptr, op, 1) > 0
+    }
+
     // TODO(sundengyu): implement futex requeue
     #[inline]
+    #[cfg(not(feature = "thread"))]
     pub(crate) unsafe fn wake_all(&mut self) {
         self.waiters.wake_all();
+    }
+
+    #[cfg(feature = "thread")]
+    pub(crate) unsafe fn wake_all(&mut self) {
+        let ptr = &self.value as *const _;
+        let op = libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG;
+        libc::syscall(libc::SYS_futex, ptr, op, i32::MAX);
     }
 
     // Why do we need a destroy function like this?
@@ -253,6 +327,7 @@ impl Futex {
     // potential memory use after free, we need to call inc_ref before wake, and the waiter should
     // wait until the ref count reduces to 0
     #[inline]
+    #[cfg(not(feature = "thread"))]
     pub(crate) unsafe fn destroy(&mut self) {
         let mut nspin = 0;
         let ref_cnt = unsafe { AtomicU32::from_ptr(&mut self.ref_cnt) };
@@ -265,9 +340,24 @@ impl Futex {
         }
         assert_eq!(libc::pthread_spin_destroy(&mut self.waiters.lock), 0);
     }
+
+    #[cfg(feature = "thread")]
+    pub(crate) unsafe fn destroy(&mut self) {
+        let mut nspin = 0;
+        let ref_cnt = unsafe { AtomicU32::from_ptr(&mut self.ref_cnt) };
+        while ref_cnt.load(Ordering::Acquire) > 0 {
+            hint::spin_loop();
+            nspin += 1;
+            if nspin % 100 == 0 {
+                libc::sched_yield();
+            }
+        }
+        assert_eq!(libc::pthread_spin_destroy(&mut self.waiters.lock), 0);
+    }
 }
 
 #[cfg(test)]
+#[cfg(not(feature = "thread"))]
 mod tests {
     use crate::bindings::sys::Futex;
     use futures::{task::noop_waker, Future};

@@ -161,7 +161,7 @@ impl AioContext {
     pub fn reap(
         io_ctx: aio_context_t,
         stop: Arc<AtomicBool>,
-        handle: Handle,
+        handle: Option<Handle>,
         cb: unsafe extern "C" fn(arg: *mut libc::c_void, res: i64),
     ) -> Result<(), Error> {
         while !stop.load(Ordering::Acquire) {
@@ -183,12 +183,16 @@ impl AioContext {
             };
 
             if ret > 0 {
-                handle.block_on(async move {
-                    unsafe { completions.set_len(ret as usize) };
-                    let mut completions = IoCompletions { completions, cb };
-                    let arg = &mut completions as *mut _ as usize;
-                    CoroutineFuture::new(process_completion, arg).await;
-                });
+                unsafe { completions.set_len(ret as usize) };
+                let mut completions = IoCompletions { completions, cb };
+                let arg = &mut completions as *mut _ as usize;
+                if let Some(ref hdl) = handle {
+                    hdl.block_on(async move {
+                        CoroutineFuture::new(process_completion, arg).await;
+                    });
+                } else {
+                    unsafe { process_completion(arg as *mut _) };
+                }
                 continue;
             }
 
@@ -217,7 +221,7 @@ impl AioContext {
         let submitter = std::thread::spawn(move || Self::submit(io_fd, receiver, io_ctx));
         let stop = Arc::new(AtomicBool::new(false));
         let stop_cloned = stop.clone();
-        let handle = Handle::current();
+        let handle = Handle::try_current().map_or(None, |hdl| Some(hdl));
         let reaper = std::thread::spawn(move || {
             Self::reap(io_ctx, stop_cloned, handle, cb).unwrap();
         });
