@@ -1,0 +1,7 @@
+This project includes code from the Rust standard library, originally licensed under 
+the MIT License and the Apache License, Version 2.0.
+
+Modifications made by IOMesh Inc in 2024 are licensed under the 
+Apache License, Version 2.0.
+
+For the full Apache License, see the LICENSE file in the project root.

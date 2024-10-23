@@ -1322,3 +1322,46 @@ async fn uzfs_truncate_test() {
     ds.close().await.unwrap();
     uzfs_env_fini().await;
 }
+
+#[tokio::test]
+async fn next_block_test() {
+    let dsname = "uzfs-truncate-test-pool/ds";
+    let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+    uzfs_env_init().await;
+
+    let ds = Dataset::init(
+        dsname,
+        uzfs_test_env.get_dev_path(),
+        DatasetType::Data,
+        0,
+        false,
+    )
+    .await
+    .unwrap();
+
+    let obj = ds.create_objects(1).await.unwrap().0[0];
+    let mut ino_hdl = ds.get_inode_handle(obj, u64::MAX, true).await.unwrap();
+    let data = vec![1; 65536];
+    ds.write_object(&ino_hdl, 65536, false, vec![&data])
+        .await
+        .unwrap();
+    ds.write_object(&ino_hdl, 262144, false, vec![&data])
+        .await
+        .unwrap();
+
+    ds.wait_synced().await;
+    let (off, size) = ds.object_next_block(&ino_hdl, 0).await.unwrap().unwrap();
+    assert_eq!(off, 65536);
+    assert_eq!(size, 65536);
+    let (off, size) = ds
+        .object_next_block(&ino_hdl, 65536 * 2)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(off, 262144);
+    assert_eq!(size, 65536);
+
+    ds.release_inode_handle(&mut ino_hdl).await;
+    ds.close().await.unwrap();
+    uzfs_env_fini().await;
+}
