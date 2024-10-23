@@ -1,55 +1,55 @@
 # libuzfs-rs
 
 Rust APIs for userworld ZFS(uZFS)
-[中文版本](README-cn.md)
+[English Readme](README.md)
 
-## Motivation
+## 目标
 
-ZFS is a powerful file system with excellent features such as Copy-On-Write (COW), snapshots, and ZFS Send/Receive. When developing a new userspace file system, we aim to build upon the existing features of ZFS. Additionally, the clear modular design of ZFS allows us to customize certain components, such as the ZFS VDEV layer.
+ZFS是一个强大的文件系统，其拥有COW、快照、ZFS Send/Receive等优秀的特性，因此在开发一个新的用户态文件系统时，我们想基于ZFS已有的特性进行开发，而且由于ZFS各个模块分层很清晰，这也有利于我们自定义一些模块如ZFS VDEV层。
 
-Rust has become increasingly popular in recent years. Its strict compile-time checks help avoid many concurrency and memory issues that often trouble C/C++ developers. Rust's async ecosystem is well-developed, with powerful runtimes like Tokio, making it easier to build I/O-intensive applications. Moreover, Rust offers a C-compatible ABI, which allows us to seamlessly reuse existing C code.
+Rust是近年来逐渐流行的编程语言，其通过严格的编译时期的检查避免了令许多C/C++开发者头疼的并发以及内存问题。Rust Async生态非常完善，其中有Tokio这样强大的Runtime，使得开发者能够比较简单地开发一个IO密集型应用，而且Rust拥有与C兼容的ABI，使得我们能够很简便地服用已有的C代码。
 
-The primary goal of libuzfs-rs is to provide Rust APIs based on ZFS and efficiently run ZFS code within the Rust async runtime at minimal cost. This makes it easier for developers to quickly build a high-performance userspace file system.
+libuzfs-rs的主要目标就是基于ZFS提供Rust API，并以较小的代价将ZFS代码跑在Rust Async Runtime中，进而便于使用者快速地实现一个高效地用户态文件系统。
 
-## Get Started
+## 开始上手
 
-### Environment Setup
+### 环境准备
 
 #### Ubuntu
 
-1. Dependencies for building ZFS
+1. 安装编译ZFS需要的依赖
 
 ` sudo apt install uuid-dev libblkid-dev libudev-dev libtirpc-dev`
 
-2. Install Rust
+2. 安装Rust
 
 `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
 
-### Run Existing Code
+### 运行已有代码
 
-#### Unit Tests
+#### 单测
 
 `make test`
 
 #### uzfs-bench
 
-uzfs-bench is a bench for data read and write
+uzfs-bench是数据读写吞吐测试
 
-1. Compile binaries
+1. 编译二进制
 
 `cargo build --all --release`
 
-2. Run uzfs-bench
+2. 运行uzfs-bench
 
 `./target/release/uzfs-bench <dev_path> false`
 
-`dev_name` can also be file path
+其中dev_name也可以是size > 128GiB的普通文件
 
-### libuzfs-rs Components
+### libuzfs-rs组件
 
 #### Dataset
 
-Dataset is ZFS Dataset，but we only create one dataset for one disk
+Dataset对应ZFS中Dataset，区别在于libuzfs-rs中对于一个盘只会创建一个Dataset
 
 ```rust
 pub struct Dataset {
@@ -65,7 +65,7 @@ pub async fn close(&self) -> Result<()> {}
 
 #### InodeHandle
 
-InodeHandle is a in-memory data structure used for data and meta operations. It works similarly as ZFS znode
+作用类似ZFS中的znode，用于操作元数据和数据
 
 ```rust
 pub struct Dataset {
@@ -79,9 +79,9 @@ pub async fn get_inode_handle(&self, ino: u64, gen: u64, is_data_inode: bool) ->
 pub async fn release_inode_handle(&self, ino_hdl: &mut InodeHandle) {}
 ```
 
-#### Meta Operations
+#### 元数据操作
 
-Here, the inode refers to a metadata inode. Therefore, the inode created by create_inode can only perform metadata-related operations, such as attribute (attr) and dentry operations.
+这里inode指的是元数据的inode，因此create_inode创建的inode只能进行元数据操作如attr以及dentry相关的操作
 
 ```rust
 pub async fn get_attr(&self, ino_hdl: &InodeHandle) -> Result<InodeAttr> {}
@@ -90,9 +90,9 @@ pub async fn create_inode(&self, inode_type: InodeType) -> Result<InodeHandle> {
 pub async fn delete_inode(&self, ino_hdl: &mut InodeHandle, inode_type: InodeType) -> Result<u64> {}
 ```
 
-#### Data Operations
+#### 数据操作
 
-The objects created by create_objects can only be used for data read and write operations. The naming here can be somewhat misleading. Although read and write operations on objects require passing an InodeHandle, the InodeHandle of the object cannot be used to perform the inode operations mentioned in the previous section.
+create_objects创建的object只能用于进行数据读写操作，这里命名有一些令人误解，虽然object的读写操作需要传入InodeHandle，但是并不能对object的InodeHandle进行上一节中的inode的操作
 
 ```rust
 pub async fn create_objects(&self, num_objs: usize) -> Result<(Vec<u64>, u64)> {}
@@ -101,7 +101,7 @@ pub async fn read_object(&self, ino_hdl: &InodeHandle, offset: u64, size: u64) -
 pub async fn write_object(&self, ino_hdl: &InodeHandle, offset: u64, sync: bool, data: Vec<&[u8]>) -> Result<()> {}
 ```
 
-### Simple Example
+### 简单示例
 
 ```rust
 use uzfs::*;

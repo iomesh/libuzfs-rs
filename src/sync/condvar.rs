@@ -1,3 +1,14 @@
+// Copyright (c) 2010-2024 The Rust Project Developers. 
+// Copyright (c) 2024 IOMesh Inc
+// 
+// Licensed under either of
+// 
+//     * Apache License, Version 2.0, (LICENSE-APACHE or http://www.apache.org/licenses/LICENSE-2.0)
+//     * MIT license (LICENSE-MIT or http://opensource.org/licenses/MIT)
+// 
+// at your option. This file may not be copied, modified, or distributed except according to
+// those terms.
+
 use crate::bindings::sys::*;
 use std::sync::atomic::Ordering::*;
 use std::{ptr::NonNull, time::Duration};
