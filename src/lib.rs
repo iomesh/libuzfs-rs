@@ -1,7 +1,7 @@
 mod dataset;
 pub use dataset::*;
 pub(crate) mod bindings;
-pub mod context;
+pub(crate) mod context;
 pub(crate) mod io;
 pub mod metrics;
 pub(crate) mod sync;
