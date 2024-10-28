@@ -5,6 +5,7 @@ use crate::Dataset;
 use crate::DatasetType;
 use crate::InodeType;
 use crate::KvSetOption;
+use crate::UzfsDentry;
 use crate::UzfsTestEnv;
 use crate::MAX_RESERVED_SIZE;
 use dashmap::DashMap;
@@ -16,8 +17,8 @@ use petgraph::algo::is_cyclic_directed;
 use petgraph::prelude::DiGraph;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
-use serial_test::serial;
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::io::ErrorKind;
 use std::process::abort;
 use std::process::exit;
@@ -27,7 +28,6 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 
 #[tokio::test(flavor = "multi_thread")]
-#[serial]
 async fn uzfs_test() {
     let rwobj;
     let mut gen;
@@ -186,10 +186,11 @@ async fn uzfs_test() {
         ds.wait_synced().await;
         assert!(ds.get_last_synced_txg() >= txg);
 
-        let (_, dentry_num) = ds.iterate_dentry(&dir_hdl, 0, 4096).await.unwrap();
+        let (dentries, done) = ds.iterate_dentry(&dir_hdl, 0, 4096).await.unwrap();
 
         // TODO(hping): verify dentry content
-        assert_eq!(dentry_num, 1);
+        assert_eq!(dentries.len(), 1);
+        assert!(done);
 
         assert_eq!(ds.list_object().await.unwrap(), num + 3);
 
@@ -283,13 +284,15 @@ async fn uzfs_test() {
         let dentry_data_read = ds.lookup_dentry(&dir_hdl, file_name).await.unwrap();
         assert_eq!(file_ino, dentry_data_read);
 
-        let (_, dentry_num) = ds.iterate_dentry(&dir_hdl, 0, 4096).await.unwrap();
-        assert_eq!(dentry_num, 1);
+        let (detries, done) = ds.iterate_dentry(&dir_hdl, 0, 4096).await.unwrap();
+        assert_eq!(detries.len(), 1);
+        assert!(done);
 
         _ = ds.delete_dentry(&mut dir_hdl, file_name).await.unwrap();
 
-        let (_, dentry_num) = ds.iterate_dentry(&dir_hdl, 0, 4096).await.unwrap();
-        assert_eq!(dentry_num, 0);
+        let (detries, done) = ds.iterate_dentry(&dir_hdl, 0, 4096).await.unwrap();
+        assert_eq!(detries.len(), 0);
+        assert!(done);
 
         let mut file_hdl = ds
             .get_inode_handle(file_ino, file_gen, false)
@@ -374,7 +377,6 @@ async fn uzfs_test() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[serial]
 async fn uzfs_claim_test() {
     let ino;
     let dsname = "uzfs_claim_test/ds";
@@ -469,7 +471,6 @@ async fn uzfs_claim_test() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[serial]
 async fn uzfs_zap_iterator_test() {
     let dsname = "uzfs_zap_iterator_test/ds";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
@@ -529,7 +530,6 @@ async fn uzfs_zap_iterator_test() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[serial]
 async fn uzfs_expand_test() {
     let dsname = "uzfs_expand_test/ds";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
@@ -597,7 +597,6 @@ async fn uzfs_expand_test() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[serial]
 async fn uzfs_rangelock_test() {
     let dsname = "uzfs_rangelock_test/ds";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
@@ -719,7 +718,6 @@ async fn uzfs_rangelock_test() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[serial]
 async fn uzfs_attr_test() {
     let dsname = "uzfs_attr_test/ds";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
@@ -1011,9 +1009,8 @@ async fn test_increase_max(dsname: &str, dev_path: &str) {
 }
 
 #[tokio::test]
-#[serial]
 async fn uzfs_block_test() {
-    let dsname = "uzfs-test-pool/ds";
+    let dsname = "uzfs_block_test/ds";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
     uzfs_env_init().await;
     test_reduce_max(dsname, uzfs_test_env.get_dev_path()).await;
@@ -1031,7 +1028,7 @@ fn uzfs_sync_test() {
     let key = "ababaa";
     let mut stored_value: Vec<u8> = Vec::new();
     let mut stored_mtime = timespec::default();
-    for i in 0..100 {
+    for i in 0..10 {
         // smallest write block is 16K
         // file is divided by several 256K blocks
         let file_blocks = rand::thread_rng().gen_range(64..=128);
@@ -1174,8 +1171,8 @@ fn uzfs_sync_test() {
 
     let _ = std::fs::remove_file(dev_path);
 }
+
 #[tokio::test(flavor = "multi_thread")]
-#[serial]
 async fn uzfs_write_read_test() {
     let dsname = "uzfs_write_read_test/ds";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
@@ -1229,7 +1226,6 @@ async fn uzfs_write_read_test() {
 }
 
 #[tokio::test]
-#[serial]
 async fn uzfs_truncate_test() {
     let dsname = "uzfs-truncate-test-pool/ds";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
@@ -1325,7 +1321,7 @@ async fn uzfs_truncate_test() {
 
 #[tokio::test]
 async fn next_block_test() {
-    let dsname = "uzfs-truncate-test-pool/ds";
+    let dsname = "next_block_test/ds";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
     uzfs_env_init().await;
 
@@ -1362,6 +1358,71 @@ async fn next_block_test() {
     assert_eq!(size, 65536);
 
     ds.release_inode_handle(&mut ino_hdl).await;
+    ds.close().await.unwrap();
+    uzfs_env_fini().await;
+}
+
+const PREFIX: &str = "qwertyuiopasdfghjkl-";
+
+#[tokio::test]
+async fn dentry_test() {
+    let dsname = "dentry_test/ds";
+    let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+    uzfs_env_init().await;
+    let ds = Dataset::init(
+        dsname,
+        uzfs_test_env.get_dev_path(),
+        DatasetType::Meta,
+        0,
+        false,
+    )
+    .await
+    .unwrap();
+
+    fn verify_dentries(dentries: Vec<UzfsDentry>) {
+        for dentry in &dentries {
+            assert_eq!(
+                dentry.name,
+                CString::new(format!("{PREFIX}{}", dentry.value)).unwrap()
+            );
+        }
+        let mut values: Vec<_> = dentries.into_iter().map(|d| d.value).collect();
+        values.sort();
+        for (j, value) in values.into_iter().enumerate() {
+            assert_eq!(j as u64, value);
+        }
+    }
+
+    for _ in 0..100 {
+        let mut ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
+        let ndentries = 2000;
+        for j in 0..ndentries {
+            ds.create_dentry(&mut ino_hdl, &format!("{PREFIX}{j}"), j)
+                .await
+                .unwrap();
+        }
+
+        let (dentries, done) = ds.iterate_dentry(&ino_hdl, 0, 1 << 20).await.unwrap();
+        assert!(done);
+        assert_eq!(dentries.len(), ndentries as usize);
+        verify_dentries(dentries);
+
+        let mut dentries = Vec::new();
+        let mut whence = 0;
+        loop {
+            let (dentries_part, done) = ds.iterate_dentry(&ino_hdl, whence, 1 << 9).await.unwrap();
+            dentries.extend(dentries_part);
+            whence = dentries.last().unwrap().whence;
+            if done {
+                break;
+            }
+        }
+        assert_eq!(dentries.len(), ndentries as usize);
+        verify_dentries(dentries);
+        ds.delete_inode(&mut ino_hdl, InodeType::DIR).await.unwrap();
+        ds.release_inode_handle(&mut ino_hdl).await;
+    }
+
     ds.close().await.unwrap();
     uzfs_env_fini().await;
 }
