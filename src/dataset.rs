@@ -764,6 +764,13 @@ impl Dataset {
     }
 }
 
+#[derive(Default)]
+pub struct UzfsDentry {
+    pub whence: u64,
+    pub name: CString,
+    pub value: u64,
+}
+
 // inode functions
 impl Dataset {
     // this function will return with hashed lock guard, get_inode_handle or release_inode_handle
@@ -1067,15 +1074,15 @@ impl Dataset {
         ino_hdl: &InodeHandle,
         whence: u64,
         size: u32,
-    ) -> Result<(Vec<u8>, u32)> {
+    ) -> Result<(Vec<UzfsDentry>, bool)> {
         let _guard = self.metrics.record(RequestMethod::IterateDentry, 0);
         let mut arg = LibuzfsIterateDentryArg {
             dihp: ino_hdl.ihp,
             whence,
             size,
             err: 0,
-            data: Vec::new(),
-            num: 0,
+            dentries: Vec::new(),
+            done: false,
         };
 
         let arg_usize = &mut arg as *mut LibuzfsIterateDentryArg as usize;
@@ -1083,7 +1090,7 @@ impl Dataset {
         CoroutineFuture::new(libuzfs_iterate_dentry_c, arg_usize).await;
 
         if arg.err == 0 {
-            Ok((arg.data, arg.num))
+            Ok((arg.dentries, arg.done))
         } else {
             Err(io::Error::from_raw_os_error(arg.err))
         }
