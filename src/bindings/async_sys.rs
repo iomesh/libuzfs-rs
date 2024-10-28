@@ -5,7 +5,9 @@ use crate::io::async_io_c::*;
 use crate::metrics;
 use crate::metrics::stats::*;
 use crate::sync::sync_c::*;
+use crate::UzfsDentry;
 use std::ffi::CStr;
+use std::mem::size_of;
 use std::os::raw::{c_char, c_void};
 
 const MAX_POOL_NAME_SIZE: i32 = 32;
@@ -183,7 +185,7 @@ pub unsafe extern "C" fn libuzfs_dataset_init_c(arg: *mut c_void) {
         if arg.ret == 0 {
             arg.ret = libuzfs_dataset_create(arg.dsname);
         }
-        assert_ne!(arg.ret, libc::EEXIST);
+        assert_ne!(arg.ret, libc::EEXIST, "{:?}", CStr::from_ptr(arg.pool_name));
     }
 
     if arg.ret != 0 {
@@ -900,28 +902,52 @@ pub struct LibuzfsIterateDentryArg {
     pub size: u32,
 
     pub err: i32,
-    pub data: Vec<u8>,
-    pub num: u32,
+    pub done: bool,
+    pub dentries: Vec<UzfsDentry>,
 }
 
 unsafe impl Send for LibuzfsIterateDentryArg {}
 unsafe impl Sync for LibuzfsIterateDentryArg {}
 
+const DEFAULT_NDENTRIES: usize = 128;
+
+unsafe extern "C" fn dir_emit(
+    arg: *mut c_void,
+    whence: u64,
+    name: *const c_char,
+    value: u64,
+) -> i32 {
+    let arg = &mut *(arg as *mut LibuzfsIterateDentryArg);
+    let size = (libc::strlen(name) + size_of::<u64>() * 2) as u32;
+    if arg.size < size {
+        return 1;
+    }
+
+    arg.size -= size;
+
+    let name = CStr::from_ptr(name).to_owned();
+    arg.dentries.push(UzfsDentry {
+        whence,
+        name,
+        value,
+    });
+
+    0
+}
+
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_iterate_dentry_c(arg: *mut c_void) {
+    let arg_ptr = arg;
     let arg = &mut *(arg as *mut LibuzfsIterateDentryArg);
 
-    arg.data.reserve(arg.size as usize);
+    arg.dentries.reserve(DEFAULT_NDENTRIES);
 
-    arg.err = libuzfs_dentry_iterate(
-        arg.dihp,
-        arg.whence,
-        arg.size,
-        arg.data.as_mut_ptr() as *mut c_char,
-        &mut arg.num,
-    );
+    arg.err = libuzfs_dentry_iterate(arg.dihp, arg.whence, arg_ptr, Some(dir_emit));
 
-    arg.data.set_len(arg.size as usize);
+    if arg.err == libc::ENOENT {
+        arg.done = true;
+        arg.err = 0;
+    }
 }
 
 #[allow(clippy::missing_safety_doc)]
@@ -1036,6 +1062,6 @@ pub unsafe extern "C" fn libuzfs_shrink_arc_c(arg: *mut c_void) {
 }
 
 #[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn libuzfs_wakeup_arc_evictor_c(arg: *mut c_void) {
+pub unsafe extern "C" fn libuzfs_wakeup_arc_evictor_c(_arg: *mut c_void) {
     libuzfs_wakeup_arc_evictor();
 }
