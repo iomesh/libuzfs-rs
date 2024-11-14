@@ -25,8 +25,8 @@ const UZFS_DNODESIZE_DATA: u32 = 512;
 /// Set arc parameters, which affects `arc_c`.
 /// `arc_c` is current limit of memory which can grow from `min` to `max`
 ///
-pub fn set_arc_limit(max: usize, min: usize, sys_reserved: usize) {
-    unsafe { libuzfs_config_arc(max, min, sys_reserved) };
+pub fn set_arc_limit(max: usize, min: usize) {
+    unsafe { libuzfs_config_arc(max, min) };
 }
 
 ///
