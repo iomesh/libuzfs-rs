@@ -68,7 +68,9 @@ pub struct CoroutineFuture {
     // in thread t2, which will fill tls stack pool of t2 but this
     // stack pool will never be popped, so we need the global flag
     // to return stack to global pool when coroutine is dropped
-    pub(super) global: bool,
+    global: bool,
+
+    lock_perf: bool,
 
     #[cfg(target_arch = "x86_64")]
     bottom_fpp: usize,
@@ -79,6 +81,8 @@ pub struct CoroutineFuture {
 // using 1m stack size can prevent gdb from reporting corrupted stack
 const STACK_SIZE: usize = 1 << 20;
 
+type CoFunc = unsafe extern "C" fn(arg1: *mut c_void);
+
 impl CoroutineFuture {
     #[inline(always)]
     pub fn tls_coroutine<'a>() -> &'a mut Self {
@@ -87,11 +91,7 @@ impl CoroutineFuture {
 
     #[inline]
     // this is only used in uzdb, other usage should call new
-    pub(crate) fn new_with_stack_size(
-        func: unsafe extern "C" fn(arg1: *mut c_void),
-        arg: usize,
-        stack_size: usize,
-    ) -> Self {
+    pub(crate) fn new_with_stack_size(func: CoFunc, arg: usize, stack_size: usize) -> Self {
         let stack = fetch_or_alloc_stack(stack_size);
         let pollee_context =
             unsafe { make_fcontext(stack.stack_bottom, stack_size, Some(task_runner_c)) };
@@ -115,6 +115,7 @@ impl CoroutineFuture {
             co_specific: HashMap::new(),
             saved_errno: 0,
             global: false,
+            lock_perf: false,
 
             #[cfg(target_arch = "x86_64")]
             bottom_fpp: 0,
@@ -124,8 +125,20 @@ impl CoroutineFuture {
     }
 
     #[inline]
-    pub fn new(func: unsafe extern "C" fn(arg1: *mut c_void), arg: usize) -> Self {
+    pub(crate) fn new(func: CoFunc, arg: usize) -> Self {
         Self::new_with_stack_size(func, arg, STACK_SIZE)
+    }
+
+    #[inline]
+    pub(crate) fn lock_perf(mut self) -> Self {
+        self.lock_perf = true;
+        self
+    }
+
+    #[inline]
+    pub(crate) fn global(mut self) -> Self {
+        self.global = true;
+        self
     }
 
     #[inline]
@@ -198,6 +211,13 @@ impl CoroutineFuture {
         self.co_specific
             .get(&k)
             .map_or(std::ptr::null_mut(), |v| *v)
+    }
+
+    #[inline(always)]
+    pub(crate) fn record_lock_contention(&self) {
+        if self.lock_perf {
+            unsafe { self.stack.record_lock_contention() };
+        }
     }
 
     // #[inline]

@@ -400,7 +400,9 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsZapUpdateArg as usize;
 
-        CoroutineFuture::new(libuzfs_zap_update_c, arg_usize).await;
+        CoroutineFuture::new(libuzfs_zap_update_c, arg_usize)
+            .lock_perf()
+            .await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -431,7 +433,9 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsZapUpdateArg as usize;
 
-        CoroutineFuture::new(libuzfs_zap_update_c, arg_usize).await;
+        CoroutineFuture::new(libuzfs_zap_update_c, arg_usize)
+            .lock_perf()
+            .await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -773,8 +777,6 @@ pub struct UzfsDentry {
 
 // inode functions
 impl Dataset {
-    // this function will return with hashed lock guard, get_inode_handle or release_inode_handle
-    // will be blocked within the lifetime of this lock guard
     pub async fn create_inode(&self, inode_type: InodeType) -> Result<InodeHandle> {
         let _guard = self.metrics.record(RequestMethod::CreateInode, 0);
         let mut arg = LibuzfsCreateInode {
@@ -789,7 +791,9 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsCreateInode as usize;
 
-        CoroutineFuture::new(libuzfs_create_inode_c, arg_usize).await;
+        CoroutineFuture::new(libuzfs_create_inode_c, arg_usize)
+            .lock_perf()
+            .await;
 
         if arg.err == 0 {
             Ok(InodeHandle {
@@ -837,7 +841,9 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsDeleteInode as usize;
 
-        CoroutineFuture::new(libuzfs_delete_inode_c, arg_usize).await;
+        CoroutineFuture::new(libuzfs_delete_inode_c, arg_usize)
+            .lock_perf()
+            .await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -886,7 +892,9 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsSetAttrArg as usize;
 
-        CoroutineFuture::new(libuzfs_set_attr_c, arg_usize).await;
+        CoroutineFuture::new(libuzfs_set_attr_c, arg_usize)
+            .lock_perf()
+            .await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -911,7 +919,9 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsGetKvattrArg as usize;
 
-        CoroutineFuture::new(libuzfs_inode_get_kvattr_c, arg_usize).await;
+        CoroutineFuture::new(libuzfs_inode_get_kvattr_c, arg_usize)
+            .lock_perf()
+            .await;
 
         if arg.err == 0 {
             Ok(arg.data)
@@ -941,7 +951,9 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsSetKvAttrArg as usize;
 
-        CoroutineFuture::new(libuzfs_set_kvattr_c, arg_usize).await;
+        CoroutineFuture::new(libuzfs_set_kvattr_c, arg_usize)
+            .lock_perf()
+            .await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -1010,7 +1022,9 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsCreateDentryArg as usize;
 
-        CoroutineFuture::new(libuzfs_create_dentry_c, arg_usize).await;
+        CoroutineFuture::new(libuzfs_create_dentry_c, arg_usize)
+            .lock_perf()
+            .await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -1035,7 +1049,9 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsDeleteDentryArg as usize;
 
-        CoroutineFuture::new(libuzfs_delete_entry_c, arg_usize).await;
+        CoroutineFuture::new(libuzfs_delete_entry_c, arg_usize)
+            .lock_perf()
+            .await;
 
         if arg.err == 0 {
             Ok(arg.txg)
@@ -1060,7 +1076,9 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsLookupDentryArg as usize;
 
-        CoroutineFuture::new(libuzfs_lookup_dentry_c, arg_usize).await;
+        CoroutineFuture::new(libuzfs_lookup_dentry_c, arg_usize)
+            .lock_perf()
+            .await;
 
         if arg.err == 0 {
             Ok(arg.ino)
