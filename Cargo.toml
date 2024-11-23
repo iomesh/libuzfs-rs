@@ -25,12 +25,12 @@ strum_macros = "0.26.4"
 crossbeam-utils = "0.8.20"
 timerfd = "1.6.0"
 pin-project = "1.0.12"
+petgraph = "0.7.1"
 
 [dev-dependencies]
 tokio-test = "0.4.2"
 rand = "0.8.5"
 tempfile = "3.3.0"
-petgraph = "0.6.3"
 nix = { version = "0.27.1", features = ["process"] }
 
 [[bin]]
