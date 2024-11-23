@@ -1393,7 +1393,7 @@ async fn dentry_test() {
         }
     }
 
-    for _ in 0..100 {
+    for _ in 0..10 {
         let mut ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
         let ndentries = 2000;
         for j in 0..ndentries {

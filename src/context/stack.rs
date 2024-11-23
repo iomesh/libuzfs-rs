@@ -1,6 +1,6 @@
-use crossbeam_utils::CachePadded;
-use libc::c_void;
+use std::arch::asm;
 use std::cell::{RefCell, UnsafeCell};
+use std::collections::HashMap;
 use std::ptr::null_mut;
 use std::{
     io::Error,
@@ -9,6 +9,9 @@ use std::{
         Mutex,
     },
 };
+
+use crossbeam_utils::CachePadded;
+use libc::c_void;
 
 static STACK_ID: AtomicU32 = AtomicU32::new(1);
 const MAX_STACK_ID: u64 = 256 << 10;
@@ -19,12 +22,14 @@ struct StackBacktrace {
     stack_bottom: *mut c_void,
     stack_top: *mut c_void,
     stack_id: u64,
+    lock_contentions: Mutex<Option<HashMap<Vec<u64>, u64>>>,
 }
 
 const EMPTY_STACK: CachePadded<StackBacktrace> = CachePadded::new(StackBacktrace {
     stack_bottom: null_mut(),
     stack_top: null_mut(),
     stack_id: 0,
+    lock_contentions: Mutex::new(None),
 });
 
 #[no_mangle]
@@ -62,11 +67,9 @@ impl Stack {
             let stack_bottom = mem.byte_add(stack_size);
 
             // register in global variable for backtrace
-            *STACKS.get_mut()[stack_id as usize] = StackBacktrace {
-                stack_bottom,
-                stack_top: null_mut(),
-                stack_id,
-            };
+            let stack = &mut STACKS.get_mut()[stack_id as usize];
+            stack.stack_bottom = stack_bottom;
+            stack.stack_id = stack_id;
 
             Ok(Self {
                 stack_bottom,
@@ -88,6 +91,45 @@ impl Stack {
     pub(super) unsafe fn remove_stack_record(&self) {
         let idx = self.stack_id & STACK_ID_MASK;
         STACKS.get_mut()[idx as usize].stack_top = null_mut();
+    }
+
+    #[inline(always)]
+    pub(super) unsafe fn record_lock_contention(&self) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let mut fp: u64;
+            asm!(
+                "mov {fp}, rbp",
+                fp = out(reg) fp
+            );
+
+            // there is 1 useless layer, co_mutex_lock
+            let mut ignore = 1;
+
+            let mut bt = Vec::with_capacity(10);
+            while fp + 16 != self.stack_bottom as u64 {
+                if ignore == 0 {
+                    bt.push(*((fp + 8) as *mut u64));
+                } else {
+                    ignore -= 1;
+                }
+                fp = *(fp as *const u64);
+            }
+
+            let idx = self.stack_id & STACK_ID_MASK;
+            let stack = &STACKS.get_mut()[idx as usize];
+            let mut contentions = stack.lock_contentions.lock().unwrap();
+            match contentions.as_mut() {
+                None => *contentions = Some(HashMap::from([(bt, 1)])),
+                Some(map) => {
+                    if let Some(v) = map.get_mut(&bt) {
+                        *v += 1;
+                    } else {
+                        map.insert(bt, 1);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -191,4 +233,26 @@ pub(super) fn return_stack(stack: Stack) {
 pub(super) fn return_stack_to_global(stack: Stack) {
     let mut global_pool = GLOBAL_STACK_POOL.lock().unwrap();
     global_pool.return_stack(stack).unwrap();
+}
+
+pub(crate) fn fetch_lock_contentions() -> HashMap<Vec<u64>, u64> {
+    let mut contentions = HashMap::with_capacity(128);
+    for i in 1..MAX_STACK_ID {
+        let stack = unsafe { &STACKS.get_mut()[i as usize] };
+        if stack.stack_bottom.is_null() {
+            break;
+        }
+        let map = stack.lock_contentions.lock().unwrap().take();
+        if let Some(map) = map {
+            for (bt, delta) in map {
+                if let Some(count) = contentions.get_mut(&bt) {
+                    *count += delta;
+                } else {
+                    contentions.insert(bt, delta);
+                }
+            }
+        }
+    }
+
+    contentions
 }
