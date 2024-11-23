@@ -53,6 +53,7 @@ impl Mutex {
             .is_err()
         {
             self.lock_contended();
+            CoroutineFuture::tls_coroutine().record_lock_contention();
         }
         self.owner = CoroutineFuture::tls_coroutine().id;
     }
