@@ -1,32 +1,42 @@
-use super::libcontext::*;
-use super::stack::*;
-use dashmap::DashMap;
-use futures::Future;
-use libc::{c_void, intptr_t};
-use once_cell::sync::OnceCell;
-use std::arch::asm;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::mem::transmute;
 use std::pin::Pin;
 use std::ptr::null_mut;
-use std::ptr::{self};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::Context;
 use std::task::Poll;
 
+use dashmap::DashMap;
+use futures::Future;
+use libc::{c_void, intptr_t};
+use once_cell::sync::OnceCell;
+
+use super::libcontext::*;
+use super::stack::*;
+
 unsafe extern "C" fn task_runner_c(_: intptr_t) {
     let tls_coroutine = CoroutineFuture::tls_coroutine();
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
+        use std::arch::asm;
         let mut fp: u64;
+
+        #[cfg(target_arch = "x86_64")]
         asm!(
-            "mov {fp}, rbp",
+            "mov {fp}, rbp",	// Move the value of rbp (frame pointer) into fp
             fp = out(reg) fp
         );
-        tls_coroutine.bottom_fpp = fp as usize;
-        *(fp as *mut usize) = tls_coroutine.saved_fp;
+
+        #[cfg(target_arch = "aarch64")]
+        asm!(
+            "mov {0}, x29",	// Move the value of x29 (frame pointer) into fp
+            out(reg) fp,
+        );
+
+        tls_coroutine.bottom_fpp = fp;
+        *(fp as *mut u64) = tls_coroutine.saved_fp;
     }
 
     (tls_coroutine.func)(tls_coroutine.arg);
@@ -37,7 +47,7 @@ pub(crate) static COROUTINE_KEY: AtomicU32 = AtomicU32::new(0);
 static KEY_DESTRUCTORS: OnceCell<DashMap<u32, unsafe extern "C" fn(*mut c_void)>> = OnceCell::new();
 
 thread_local! {
-    static TLS_COROUTINE: Cell<*mut CoroutineFuture> = const { Cell::new(ptr::null_mut()) };
+    static TLS_COROUTINE: Cell<*mut CoroutineFuture> = const { Cell::new(null_mut()) };
 }
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
@@ -72,10 +82,10 @@ pub struct CoroutineFuture {
 
     lock_perf: bool,
 
-    #[cfg(target_arch = "x86_64")]
-    bottom_fpp: usize,
-    #[cfg(target_arch = "x86_64")]
-    saved_fp: usize,
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    bottom_fpp: u64,
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    saved_fp: u64,
 }
 
 // using 1m stack size can prevent gdb from reporting corrupted stack
@@ -100,11 +110,17 @@ impl CoroutineFuture {
         // in order to backtrace to the poll function in backtrace, this addr is replaced with Self::poll
         #[cfg(target_arch = "x86_64")]
         unsafe {
-            *(stack.stack_bottom.byte_sub(8) as *mut usize) = Self::poll as usize + 8
+            *(stack.stack_bottom.byte_sub(0x08) as *mut u64) = Self::poll as u64 + 8
+        };
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            // The values `0x18` and `16` are both empirical values,
+            // and they need to be adjusted based on the specific instruction set.
+            *(stack.stack_bottom.byte_sub(0x18) as *mut u64) = Self::poll as u64 + 16
         };
 
         Self {
-            poller_context: ptr::null_mut(),
+            poller_context: null_mut(),
             pollee_context,
             id: stack.stack_id,
             stack,
@@ -117,9 +133,9 @@ impl CoroutineFuture {
             global: false,
             lock_perf: false,
 
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             bottom_fpp: 0,
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             saved_fp: 0,
         }
     }
@@ -167,12 +183,20 @@ impl CoroutineFuture {
         self.context = transmute(cx);
         *libc::__errno_location() = self.saved_errno;
 
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
+            use std::arch::asm;
             let mut fp: u64;
+            #[cfg(target_arch = "x86_64")]
             asm!(
-                "mov {fp}, rbp",
+                "mov {fp}, rbp",	// Move the value of rbp (frame pointer) into fp
                 fp = out(reg) fp
+            );
+
+            #[cfg(target_arch = "aarch64")]
+            asm!(
+                "mov {0}, x29",		// Move the value of x29 (frame pointer) into fp
+                out(reg) fp,
             );
 
             if self.bottom_fpp != 0 {
@@ -180,7 +204,7 @@ impl CoroutineFuture {
             } else {
                 // bottom_fpp == 0 means this is the first poll of self, so we shouldn't
                 // just overwrite the position because there stores the entry pointer
-                self.saved_fp = fp as usize;
+                self.saved_fp = fp;
             }
         }
 
