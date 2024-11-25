@@ -24,7 +24,7 @@ strum = "0.26.2"
 strum_macros = "0.26.4"
 crossbeam-utils = "0.8.20"
 kanal = "0.1.0-pre7"
-petgraph = "0.6.5"
+petgraph = "0.6"
 
 [dev-dependencies]
 tokio-test = "0.4.2"

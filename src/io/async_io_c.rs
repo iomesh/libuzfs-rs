@@ -18,7 +18,7 @@ pub unsafe extern "C" fn unregister_fd(aio_hdl: *mut libc::c_void) {
 pub unsafe extern "C" fn submit_read(
     aio_hdl: *const libc::c_void,
     offset: u64,
-    buf: *mut i8,
+    buf: *mut libc::c_char,
     size: u64,
     arg: *mut libc::c_void,
 ) {
@@ -42,7 +42,7 @@ pub unsafe extern "C" fn submit_read(
 pub unsafe extern "C" fn submit_write(
     aio_hdl: *const libc::c_void,
     offset: u64,
-    buf: *const i8,
+    buf: *const libc::c_char,
     size: u64,
     arg: *mut libc::c_void,
 ) {

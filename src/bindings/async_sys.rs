@@ -1,3 +1,7 @@
+use std::ffi::CStr;
+use std::mem::size_of;
+use std::os::raw::{c_char, c_void};
+
 use super::sys::*;
 use crate::context::coroutine_c::*;
 use crate::context::taskq;
@@ -6,9 +10,6 @@ use crate::metrics;
 use crate::metrics::stats::*;
 use crate::sync::sync_c::*;
 use crate::UzfsDentry;
-use std::ffi::CStr;
-use std::mem::size_of;
-use std::os::raw::{c_char, c_void};
 
 const MAX_POOL_NAME_SIZE: i32 = 32;
 const MAX_NAME_SIZE: usize = 256;
@@ -695,7 +696,7 @@ pub unsafe extern "C" fn libuzfs_delete_inode_c(arg: *mut c_void) {
 
 pub struct LibuzfsGetAttrArg {
     pub ihp: *mut libuzfs_inode_handle_t,
-    pub reserved: *mut i8,
+    pub reserved: *mut libc::c_char,
     pub size: i32,
 
     pub attr: uzfs_inode_attr_t,
@@ -718,7 +719,7 @@ pub unsafe extern "C" fn libuzfs_inode_getattr_c(arg: *mut c_void) {
 
 pub struct LibuzfsSetAttrArg {
     pub ihp: *mut libuzfs_inode_handle_t,
-    pub reserved: *const i8,
+    pub reserved: *const libc::c_char,
     pub size: u32,
 
     pub err: i32,
@@ -752,7 +753,7 @@ pub unsafe extern "C" fn libuzfs_inode_get_kvattr_c(arg: *mut c_void) {
     let rc = libuzfs_inode_get_kvattr(
         arg.ihp,
         arg.name,
-        arg.data.as_mut_ptr() as *mut i8,
+        arg.data.as_mut_ptr() as *mut libc::c_char,
         MAX_KVATTR_VALUE_SIZE as u64,
     );
 

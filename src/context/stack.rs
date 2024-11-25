@@ -1,4 +1,3 @@
-use std::arch::asm;
 use std::cell::{RefCell, UnsafeCell};
 use std::collections::HashMap;
 use std::ptr::null_mut;
@@ -95,19 +94,28 @@ impl Stack {
 
     #[inline(always)]
     pub(super) unsafe fn record_lock_contention(&self) {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
+            use std::arch::asm;
             let mut fp: u64;
+            #[cfg(target_arch = "x86_64")]
             asm!(
-                "mov {fp}, rbp",
+                "mov {fp}, rbp",	// Move the value of rbp (frame pointer) into fp
                 fp = out(reg) fp
             );
 
-            // there is 1 useless layer, co_mutex_lock
-            let mut ignore = 1;
+            #[cfg(target_arch = "aarch64")]
+            asm!(
+                "mov {0}, x29",		// Move the value of x29 (frame pointer) into fp
+                out(reg) fp,
+            );
 
-            let mut bt = Vec::with_capacity(10);
-            while fp + 16 != self.stack_bottom as u64 {
+            // there is 2 useless layer, co_mutex_lock and record_lock_contention
+            let mut ignore = 2;
+            let max_depth = 10;
+
+            let mut bt = Vec::with_capacity(max_depth);
+            while fp + 16 != self.stack_bottom as u64 && fp != 0 && bt.len() < max_depth {
                 if ignore == 0 {
                     bt.push(*((fp + 8) as *mut u64));
                 } else {
