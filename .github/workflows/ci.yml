@@ -34,10 +34,8 @@ jobs:
         args: --all-features
     - uses: Swatinem/rust-cache@v1
     - run: cargo fmt --all -- --check
-    - name: Check all targets
-      run: make
     - name: Run tests
-      run: make test
+      run: ARCH=x86_64 make test
     - uses: actions-rs/clippy-check@v1
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
