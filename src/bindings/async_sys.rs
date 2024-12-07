@@ -1,3 +1,7 @@
+use std::ffi::CStr;
+use std::mem::size_of;
+use std::os::raw::{c_char, c_void};
+
 use super::sys::*;
 use crate::context::coroutine_c::*;
 use crate::context::taskq;
@@ -6,9 +10,6 @@ use crate::metrics;
 use crate::metrics::stats::*;
 use crate::sync::sync_c::*;
 use crate::UzfsDentry;
-use std::ffi::CStr;
-use std::mem::size_of;
-use std::os::raw::{c_char, c_void};
 
 const MAX_POOL_NAME_SIZE: i32 = 32;
 const MAX_NAME_SIZE: usize = 256;
@@ -147,6 +148,7 @@ pub struct LibuzfsDatasetInitArg {
     pub max_blksize: u32,
     pub already_formatted: bool,
     pub metrics: *const c_void,
+    pub enable_autotrim: bool,
 
     pub ret: i32,
     pub dhp: *mut libuzfs_dataset_handle_t,
@@ -176,12 +178,7 @@ pub unsafe extern "C" fn libuzfs_dataset_init_c(arg: *mut c_void) {
     // only when already_formatted is false and no labels on disk can we format
     // this device, this is for data integrety
     if arg.ret == libc::ENOENT && !arg.already_formatted {
-        arg.ret = libuzfs_zpool_create(
-            arg.pool_name,
-            arg.dev_path,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        arg.ret = libuzfs_zpool_create(arg.pool_name, arg.dev_path);
         if arg.ret == 0 {
             arg.ret = libuzfs_dataset_create(arg.dsname);
         }
@@ -192,7 +189,7 @@ pub unsafe extern "C" fn libuzfs_dataset_init_c(arg: *mut c_void) {
         return;
     }
 
-    arg.zhp = libuzfs_zpool_open(arg.pool_name, &mut arg.ret);
+    arg.zhp = libuzfs_zpool_open(arg.pool_name, &mut arg.ret, arg.enable_autotrim as u32);
     if !arg.zhp.is_null() {
         assert_eq!(arg.ret, 0);
         arg.dhp = libuzfs_dataset_open(
@@ -1053,12 +1050,6 @@ pub unsafe extern "C" fn libuzfs_show_stats_c(arg: *mut c_void) {
     };
 
     libuzfs_show_stats(arg.stat_ptr, arg.stat_type, &generator);
-}
-
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn libuzfs_shrink_arc_c(arg: *mut c_void) {
-    let percent = arg as usize;
-    libuzfs_arc_shrink(percent);
 }
 
 #[allow(clippy::missing_safety_doc)]

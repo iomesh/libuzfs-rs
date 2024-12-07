@@ -1,3 +1,4 @@
+use super::UzfsTestEnv;
 use crate::bindings::sys::timespec;
 use crate::uzfs_env_fini;
 use crate::uzfs_env_init;
@@ -6,7 +7,6 @@ use crate::DatasetType;
 use crate::InodeType;
 use crate::KvSetOption;
 use crate::UzfsDentry;
-use crate::UzfsTestEnv;
 use crate::MAX_RESERVED_SIZE;
 use dashmap::DashMap;
 use nix::sys::wait::waitpid;
