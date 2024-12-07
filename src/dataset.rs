@@ -1,10 +1,3 @@
-use crate::bindings::async_sys::*;
-use crate::bindings::sys::*;
-use crate::context::coroutine::CoroutineFuture;
-use crate::metrics::{RequestMethod, UzfsMetrics};
-use cstr_argument::CStrArgument;
-use io::Result;
-use once_cell::sync::OnceCell;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::io;
@@ -12,7 +5,16 @@ use std::io::Error;
 use std::io::ErrorKind;
 use std::os::raw::{c_char, c_void};
 use std::ptr::null_mut;
+
+use cstr_argument::CStrArgument;
+use io::Result;
+use once_cell::sync::OnceCell;
 use tokio::sync::Mutex;
+
+use crate::bindings::async_sys::*;
+use crate::bindings::sys::*;
+use crate::context::coroutine::CoroutineFuture;
+use crate::metrics::{RequestMethod, UzfsMetrics};
 
 pub const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
 
@@ -25,15 +27,8 @@ const UZFS_DNODESIZE_DATA: u32 = 512;
 /// Set arc parameters, which affects `arc_c`.
 /// `arc_c` is current limit of memory which can grow from `min` to `max`
 ///
-pub fn set_arc_limit(max: usize, min: usize) {
-    unsafe { libuzfs_config_arc(max, min) };
-}
-
-///
-/// Shrink `percent`% current memory
-///
-pub async fn arc_shrink(percent: usize) {
-    CoroutineFuture::new(libuzfs_shrink_arc_c, percent).await;
+pub fn set_arc_limit(max: usize, meta_percent: usize, enable_compress: bool) {
+    unsafe { libuzfs_config(max, meta_percent, enable_compress as u32) };
 }
 
 ///
@@ -209,9 +204,9 @@ impl Dataset {
         let dev_path_c = dev_path.into_cstr();
         let dsname = dsname.into_cstr();
 
-        let dnodesize = match dstype {
-            DatasetType::Data => UZFS_DNODESIZE_DATA,
-            DatasetType::Meta => UZFS_DNODESIZE_META,
+        let (dnodesize, enable_autotrim) = match dstype {
+            DatasetType::Data => (UZFS_DNODESIZE_DATA, true),
+            DatasetType::Meta => (UZFS_DNODESIZE_META, false),
         };
 
         let mut arg = LibuzfsDatasetInitArg {
@@ -222,6 +217,7 @@ impl Dataset {
             max_blksize,
             already_formatted,
             metrics: metrics.as_ref() as *const _ as *const _,
+            enable_autotrim,
 
             ret: 0,
             dhp: std::ptr::null_mut(),
