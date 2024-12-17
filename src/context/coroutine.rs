@@ -110,13 +110,13 @@ impl CoroutineFuture {
         // in order to backtrace to the poll function in backtrace, this addr is replaced with Self::poll
         #[cfg(target_arch = "x86_64")]
         unsafe {
-            *(stack.stack_bottom.byte_sub(0x08) as *mut u64) = Self::poll as u64 + 8
+            *(stack.stack_bottom.byte_sub(0x08) as *mut usize) = Self::poll as usize + 8
         };
         #[cfg(target_arch = "aarch64")]
         unsafe {
             // The values `0x18` and `16` are both empirical values,
             // and they need to be adjusted based on the specific instruction set.
-            *(stack.stack_bottom.byte_sub(0x18) as *mut u64) = Self::poll as u64 + 16
+            *(stack.stack_bottom.byte_sub(0x18) as *mut usize) = Self::poll as usize + 16
         };
 
         Self {

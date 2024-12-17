@@ -24,6 +24,7 @@ struct StackBacktrace {
     lock_contentions: Mutex<Option<HashMap<Vec<u64>, u64>>>,
 }
 
+#[allow(clippy::declare_interior_mutable_const)]
 const EMPTY_STACK: CachePadded<StackBacktrace> = CachePadded::new(StackBacktrace {
     stack_bottom: null_mut(),
     stack_top: null_mut(),
@@ -242,7 +243,7 @@ pub(super) fn return_stack_to_global(stack: Stack) {
     global_pool.return_stack(stack).unwrap();
 }
 
-pub(crate) fn fetch_lock_contentions() -> HashMap<Vec<u64>, u64> {
+pub fn fetch_lock_contentions() -> HashMap<Vec<u64>, u64> {
     let mut contentions = HashMap::with_capacity(128);
     for i in 1..MAX_STACK_ID {
         let stack = unsafe { &STACKS.get_mut()[i as usize] };
