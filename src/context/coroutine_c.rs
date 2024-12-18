@@ -72,13 +72,12 @@ pub unsafe extern "C" fn thread_create(
     arg: *mut c_void,
     state: i32,
 ) -> u64 {
-    let mut coroutine = CoroutineFuture::new(thread_func.unwrap(), arg as usize);
+    let coroutine = CoroutineFuture::new(thread_func.unwrap(), arg as usize);
     let id = coroutine.id;
     let _guard = enter_background_rt();
     let handle = if (state & TS_BLOCKING) != 0 {
         tokio::task::spawn_blocking(move || {
-            coroutine.global = true;
-            Handle::current().block_on(coroutine);
+            Handle::current().block_on(coroutine.global());
         })
     } else {
         tokio::spawn(coroutine)

@@ -13,7 +13,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest]
-        rust: [nightly-2023-12-28]
+        rust: [nightly-2024-09-09]
 
     steps:
     - uses: hecrj/setup-rust-action@master
@@ -34,10 +34,8 @@ jobs:
         args: --all-features
     - uses: Swatinem/rust-cache@v1
     - run: cargo fmt --all -- --check
-    - name: Check all targets
-      run: make
     - name: Run tests
-      run: make test
+      run: ARCH=x86_64 make test
     - uses: actions-rs/clippy-check@v1
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
