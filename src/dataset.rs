@@ -770,10 +770,68 @@ pub struct UzfsDentry {
     pub value: u64,
 }
 
+struct InodeKVs(Vec<inode_kv>);
+unsafe impl Send for InodeKVs {}
+unsafe impl Sync for InodeKVs {}
+
+#[repr(C)]
+struct InodeCreateArgsWrapper(inode_create_args);
+unsafe impl Send for InodeCreateArgsWrapper {}
+unsafe impl Sync for InodeCreateArgsWrapper {}
+
 // inode functions
 impl Dataset {
-    // this function will return with hashed lock guard, get_inode_handle or release_inode_handle
-    // will be blocked within the lifetime of this lock guard
+    pub async fn create_inode_all(
+        &self,
+        dino_hdl: &mut InodeHandle,
+        name: &CStr,
+        pattr: &[u8],
+        attr: &[u8],
+        kvs: &[(&CStr, &[u8])],
+        inode_type: InodeType,
+    ) -> Result<InodeHandle> {
+        let inode_kvs = InodeKVs(
+            kvs.iter()
+                .map(|(k, v)| inode_kv {
+                    key: k.as_ptr(),
+                    value: v.as_ptr() as *mut c_void,
+                    value_size: v.len() as u32,
+                })
+                .collect(),
+        );
+
+        let mut args = InodeCreateArgsWrapper(inode_create_args {
+            dhp: self.dhp,
+            inode_type: inode_type as u32,
+            dihp: dino_hdl.ihp,
+            name: name.as_ptr(),
+            pattr: pattr.as_ptr() as *const c_char,
+            pattr_size: pattr.len() as u32,
+            attr: attr.as_ptr() as *const c_char,
+            attr_size: attr.len() as u32,
+            kvs: inode_kvs.0.as_ptr(),
+            num_kvs: kvs.len() as u32,
+
+            ihp: null_mut(),
+            ino: 0,
+            gen: 0,
+            err: 0,
+        });
+
+        let arg_usize = &mut args.0 as *mut _ as usize;
+        CoroutineFuture::new(libuzfs_inode_create_all, arg_usize).await;
+
+        if args.0.err == 0 {
+            Ok(InodeHandle {
+                ihp: args.0.ihp,
+                ino: args.0.ino,
+                gen: args.0.gen,
+            })
+        } else {
+            Err(io::Error::from_raw_os_error(args.0.err))
+        }
+    }
+
     pub async fn create_inode(&self, inode_type: InodeType) -> Result<InodeHandle> {
         let _guard = self.metrics.record(RequestMethod::CreateInode, 0);
         let mut arg = LibuzfsCreateInode {

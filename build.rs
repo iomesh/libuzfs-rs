@@ -45,6 +45,7 @@ fn main() {
         .allowlist_file("taskq*")
         .allowlist_var("dmu_ot.*")
         .allowlist_type("DMU_OT.*")
+        .allowlist_type("inode_create_args")
         .derive_default(true)
         .derive_copy(false)
         .generate()
