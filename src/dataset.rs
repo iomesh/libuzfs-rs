@@ -157,10 +157,25 @@ impl Default for InodeHandle {
 unsafe impl Send for InodeHandle {}
 unsafe impl Sync for InodeHandle {}
 
-pub enum KvSetOption {
-    None = 0,
-    HighPriority = 1 << 0,
-    NeedLog = 1 << 1,
+const HIGH_PRIORITY: u32 = 1 << 0;
+const NEED_LOG: u32 = 1 << 1;
+
+pub struct KvSetOption(u32);
+
+impl KvSetOption {
+    pub fn new() -> Self {
+        Self(0)
+    }
+
+    pub fn high_priority(mut self) -> Self {
+        self.0 |= HIGH_PRIORITY;
+        self
+    }
+
+    pub fn need_log(mut self) -> Self {
+        self.0 |= NEED_LOG;
+        self
+    }
 }
 
 pub struct ZPool {
@@ -1018,14 +1033,14 @@ impl Dataset {
         ino_hdl: &mut InodeHandle,
         name: P,
         value: &[u8],
-        option: u32,
+        option: KvSetOption,
     ) -> Result<u64> {
         let _guard = self.metrics.record(RequestMethod::SetKvattr, 0);
         let cname = name.into_cstr();
         let mut arg = SetKvAttrArg {
             ihp: ino_hdl.ihp,
             name: cname.as_ref().as_ptr(),
-            option,
+            option: option.0,
             value: value.as_ptr() as *const c_char,
             size: value.len() as u64,
             err: 0,

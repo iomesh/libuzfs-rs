@@ -81,7 +81,7 @@ async fn uzfs_test() {
                 &mut sb_hdl,
                 key,
                 value.as_bytes(),
-                KvSetOption::HighPriority as u32,
+                KvSetOption::new().high_priority(),
             )
             .await
             .unwrap();
@@ -188,7 +188,7 @@ async fn uzfs_test() {
                 &mut file_hdl,
                 key,
                 value.as_bytes(),
-                KvSetOption::HighPriority as u32,
+                KvSetOption::new().high_priority(),
             )
             .await
             .unwrap();
@@ -338,7 +338,7 @@ async fn uzfs_test() {
                 &mut ino_hdl,
                 key.as_str(),
                 &value,
-                KvSetOption::HighPriority as u32,
+                KvSetOption::new().high_priority(),
             )
             .await
             .unwrap();
@@ -775,33 +775,23 @@ async fn uzfs_attr_test() {
 
     let mut ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
     let value = vec![1; 512];
-    ds.set_kvattr(&mut ino_hdl, "name1", &value, KvSetOption::None as u32)
+    ds.set_kvattr(&mut ino_hdl, "name1", &value, KvSetOption::new())
+        .await
+        .unwrap();
+    ds.set_kvattr(&mut ino_hdl, "name2", &value, KvSetOption::new())
+        .await
+        .unwrap();
+    ds.release_inode_handle(&mut ino_hdl).await;
+
+    let mut ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
+    ds.set_kvattr(&mut ino_hdl, "name1", &vec![1; 1024], KvSetOption::new())
         .await
         .unwrap();
     ds.set_kvattr(
         &mut ino_hdl,
         "name2",
-        &value,
-        KvSetOption::HighPriority as u32,
-    )
-    .await
-    .unwrap();
-    ds.release_inode_handle(&mut ino_hdl).await;
-
-    let mut ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
-    ds.set_kvattr(
-        &mut ino_hdl,
-        "name1",
-        &vec![1; 1024],
-        KvSetOption::None as u32,
-    )
-    .await
-    .unwrap();
-    ds.set_kvattr(
-        &mut ino_hdl,
-        "name2",
         &vec![1; 512],
-        KvSetOption::HighPriority as u32,
+        KvSetOption::new().high_priority(),
     )
     .await
     .unwrap();
@@ -877,7 +867,7 @@ async fn uzfs_attr_test() {
                                 &mut ino_hdl,
                                 &key,
                                 &value,
-                                KvSetOption::HighPriority as u32,
+                                KvSetOption::new().high_priority(),
                             )
                             .await
                             .unwrap();
@@ -1220,7 +1210,7 @@ fn uzfs_sync_test() {
                     }
 
                     ds.sync_object(&obj_hdl).await;
-                    ds.set_kvattr(&mut obj_hdl, key, &value, KvSetOption::NeedLog as u32)
+                    ds.set_kvattr(&mut obj_hdl, key, &value, KvSetOption::new().need_log())
                         .await
                         .unwrap();
                     ds.set_object_mtime(&mut obj_hdl, mtime.tv_sec, mtime.tv_nsec)
