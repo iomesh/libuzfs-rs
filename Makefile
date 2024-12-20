@@ -21,9 +21,9 @@ build:
 test:
 	rustup default nightly-2024-09-09
 	ENABLE_ASAN=yes RUSTFLAGS="-Zsanitizer=address -C force-frame-pointers=yes" ASAN_OPTIONS=detect_leaks=1 \
-	  cargo test --target x86_64-unknown-linux-gnu --workspace  -- --nocapture
+	  cargo test --target ${ARCH}-unknown-linux-gnu --workspace  -- --nocapture
 	ENABLE_ASAN=yes RUSTFLAGS="-Zsanitizer=address -C force-frame-pointers=yes" ASAN_OPTIONS=detect_leaks=0 \
-	  cargo test --target x86_64-unknown-linux-gnu uzfs_sync_test -- --ignored --nocapture
+	  cargo test --target ${ARCH}-unknown-linux-gnu uzfs_sync_test -- --ignored --nocapture
 
 clean: clean_libuzfs_src
 	cargo clean

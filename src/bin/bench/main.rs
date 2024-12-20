@@ -64,8 +64,16 @@ async fn main() {
     let blksize = 1 << 20;
     let file_size = 1 << 30;
 
+    let mut zp = ZPool::open("testzp", &[&dev_path], true, true)
+        .await
+        .unwrap();
+
     let ds = Arc::new(
-        Dataset::init("testzp/ds", &dev_path, DatasetType::Data, 0, false)
+        zp.dataset_options()
+            .create(true)
+            .dnode_size(512)
+            .max_blksize(0)
+            .open("haha")
             .await
             .unwrap(),
     );
@@ -81,6 +89,7 @@ async fn main() {
         ds.release_inode_handle(&mut obj_hdl).await;
     }
 
-    ds.close().await.unwrap();
+    ds.close().await;
+    zp.close().await.unwrap();
     uzfs_env_fini().await;
 }

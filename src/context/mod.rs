@@ -1,6 +1,7 @@
 pub(crate) mod coroutine;
 pub(crate) mod coroutine_c;
-pub(super) mod stack;
+#[allow(static_mut_refs)]
+pub mod stack;
 pub(crate) mod taskq;
 
 #[allow(dead_code)]
