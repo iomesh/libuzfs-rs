@@ -282,6 +282,8 @@ pub unsafe extern "C" fn libuzfs_dataset_expand_c(arg: *mut c_void) {
 pub struct LibuzfsZapListArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
     pub obj: u64,
+    pub limit: usize,
+
     pub err: i32,
     pub list: Vec<(String, Vec<u8>)>,
 }
@@ -327,6 +329,10 @@ pub unsafe extern "C" fn libuzfs_zap_list_c(arg: *mut c_void) {
 
         let name = String::from_utf8(name).unwrap();
         arg.list.push((name, value));
+
+        if arg.list.len() >= arg.limit {
+            break;
+        }
 
         arg.err = libuzfs_zap_iterator_advance(iter);
         if arg.err != 0 {
