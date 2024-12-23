@@ -496,7 +496,7 @@ async fn uzfs_zap_iterator_test() {
     let remover_handle = tokio::task::spawn(async move {
         let mut total_ops = num_adders * num_ops_per_adder;
         while total_ops > 0 {
-            for (key, value) in ds_remover.zap_list(zap_obj).await.unwrap() {
+            for (key, value) in ds_remover.zap_list(zap_obj, usize::MAX).await.unwrap() {
                 ds_remover.zap_remove(zap_obj, &key).await.unwrap();
                 assert_eq!(key.as_bytes(), value.as_slice());
                 total_ops -= 1;

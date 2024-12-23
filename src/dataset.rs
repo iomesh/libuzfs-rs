@@ -365,10 +365,12 @@ impl Dataset {
         self.claim_inode(ino, gen, InodeType::DIR).await
     }
 
-    pub async fn zap_list(&self, zap_obj: u64) -> Result<Vec<(String, Vec<u8>)>> {
+    pub async fn zap_list(&self, zap_obj: u64, limit: usize) -> Result<Vec<(String, Vec<u8>)>> {
         let mut arg = LibuzfsZapListArg {
             dhp: self.dhp,
             obj: zap_obj,
+            limit,
+
             err: 0,
             list: Vec::new(),
         };
