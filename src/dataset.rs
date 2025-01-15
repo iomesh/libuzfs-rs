@@ -131,28 +131,11 @@ pub enum DatasetType {
 #[warn(unused_must_use)]
 pub struct InodeHandle {
     ihp: *mut libuzfs_inode_handle_t,
-    pub ino: u64,
-    pub gen: u64,
-}
-
-#[cfg(debug_assertions)]
-impl InodeHandle {
-    pub fn fake_handle(ino: u64, gen: u64) -> Self {
-        Self {
-            ihp: null_mut(),
-            ino,
-            gen,
-        }
-    }
 }
 
 impl Default for InodeHandle {
     fn default() -> Self {
-        Self {
-            ihp: null_mut(),
-            ino: 0,
-            gen: 0,
-        }
+        Self { ihp: null_mut() }
     }
 }
 
@@ -335,11 +318,7 @@ impl Dataset {
         CoroutineFuture::new(libuzfs_inode_handle_get_c, arg_usize).await;
 
         if arg.err == 0 {
-            Ok(InodeHandle {
-                ihp: arg.ihp,
-                ino,
-                gen,
-            })
+            Ok(InodeHandle { ihp: arg.ihp })
         } else {
             Err(io::Error::from_raw_os_error(arg.err))
         }
@@ -355,8 +334,7 @@ impl Dataset {
 // zap functions
 impl Dataset {
     pub async fn zap_create(&self) -> Result<(u64, u64)> {
-        let mut handle = self.create_inode(InodeType::DIR).await?;
-        let (ino, gen) = (handle.ino, handle.gen);
+        let (mut handle, ino, gen) = self.create_inode(InodeType::DIR).await?;
         self.release_inode_handle(&mut handle).await;
         Ok((ino, gen))
     }
@@ -772,11 +750,291 @@ pub struct UzfsDentry {
     pub value: u64,
 }
 
+impl Dataset {
+    /// Atomically links an inode to a directory in a filesystem.
+    ///
+    /// This function performs an atomic operation to link a file (inode) to a specified
+    /// directory (parent inode). It ensures consistency and avoids race conditions in a
+    /// concurrent environment.
+    ///
+    /// # Parameters
+    /// - `pino_hdl`: A mutable reference to the parent inode handle, representing the directory
+    ///   where the new link will be created.
+    /// - `pattr`: A vector of bytes representing attributes for the parent inode, such as metadata.
+    /// - `name`: A `CString` specifying the name of the link to be created in the parent directory.
+    /// - `ino_hdl`: A mutable reference to the inode handle for the file being linked.
+    /// - `attr`: A vector of bytes representing attributes for the inode being linked.
+    /// - `ino_mask`: A 64-bit mask used in conjunction with the inode number. The result of
+    ///   `ino_mask | ino` is stored within the directory entry.
+    ///
+    /// # Returns
+    ///
+    /// This function returns a `Result<u64>`:
+    /// * `Ok(u64)` - Represents the current sync epoch after the unlink operation. This value can be used to track
+    ///   the consistency state of the system.
+    /// * `Err(Error)` - Represents an error encountered during the operation.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn link_inode_atomic<P: CStrArgument>(
+        &self,
+        pino_hdl: &mut InodeHandle,
+        pattr: Vec<u8>,
+        name: P,
+        ino_hdl: &mut InodeHandle,
+        attr: Vec<u8>,
+        ino_mask: u64,
+    ) -> Result<u64> {
+        let name = name.into_cstr().as_ref().to_owned();
+        let mut args = InodeLinkArgs {
+            dhp: self.dhp,
+            dihp: pino_hdl.ihp,
+            pattr,
+            name,
+            ihp: ino_hdl.ihp,
+            attr,
+            ino_mask,
+
+            txg: 0,
+            err: 0,
+        };
+
+        let arg_usize = &mut args as *mut _ as usize;
+        CoroutineFuture::new(libuzfs_inode_link_atomic_c, arg_usize).await;
+        if args.err != 0 {
+            Err(Error::from_raw_os_error(args.err))
+        } else {
+            Ok(args.txg)
+        }
+    }
+
+    /// Atomically creates a new inode in the specified parent directory while ensuring metadata consistency.
+    ///
+    /// This function performs an atomic operation to create a new inode (file or directory) within a parent directory.
+    /// The operation updates the necessary metadata and handles hierarchical (high-priority) and local (low-priority)
+    /// key-value attributes for the inode.
+    ///
+    /// # Arguments
+    ///
+    /// * `inode_type` - Specifies the type of inode to be created (e.g., file or directory). Typically represented as an enum `InodeType`.
+    /// * `phdl` - A mutable reference to the inode handle of the parent directory where the new inode will be created.
+    /// * `name` - The name of the new file or directory, represented as a `CString`.
+    /// * `attr_func` - this callback filles given attr with caller defined attr
+    /// * `pattr` - A vector containing attributes of the parent directory (`phdl`). These attributes may be used
+    ///   for validation or metadata updates during the creation process.
+    /// * `hp_kvs` - A vector of key-value pairs (`CString`, `Vec<u8>`) representing high-priority attributes to be applied to the new inode.
+    ///
+    /// # Returns
+    ///
+    /// This function returns a `Result<InodeHandle>`:
+    /// * `Ok(InodeHandle)` - Represents the handle of the newly created inode. This handle can be used to interact
+    ///   with the newly created file or directory.
+    /// * `Err(Error)` - Represents an error encountered during the operation, such as conflicting names or invalid attributes.
+    ///
+    /// # Notes
+    ///
+    /// - The operation ensures atomicity, preventing partial updates or inconsistent states during inode creation.
+    /// - The `hp_kvs` and `lp_kvs` attributes are used to configure the new inode. High-priority attributes may take
+    ///   precedence in certain metadata updates.
+    /// - Ensure that the `name` is unique within the `phdl` parent directory to avoid conflicts.
+    /// - This function operates asynchronously and may involve I/O operations or locks.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_inode_atomic<F: FnMut(&mut [u8], &mut usize, &mut u64, u64)>(
+        &self,
+        inode_type: InodeType,
+        phdl: &mut InodeHandle,
+        name: CString,
+        attr_func: F,
+        pattr: Vec<u8>,
+        hp_kvs: Vec<(CString, Vec<u8>)>,
+    ) -> Result<InodeHandle> {
+        let mut args = InodeCreateArgs {
+            dhp: self.dhp,
+            inode_type: inode_type as u32,
+            dihp: phdl.ihp,
+            name,
+            pattr,
+            hp_kvs,
+
+            attr_func,
+            ihp: null_mut(),
+            err: 0,
+        };
+
+        let arg_usize = &mut args as *mut _ as usize;
+        CoroutineFuture::new(libuzfs_inode_create_atomic_c::<F>, arg_usize).await;
+        if args.err == 0 {
+            Ok(InodeHandle { ihp: args.ihp })
+        } else {
+            Err(io::Error::from_raw_os_error(args.err))
+        }
+    }
+
+    /// Atomically unlinks an inode, removing it from its parent directory while ensuring metadata consistency.
+    ///
+    /// This function performs an atomic unlink operation, removing a file or directory identified by its inode
+    /// from the specified parent directory. The operation ensures consistency in the underlying storage backend
+    /// and updates related metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `pino_hdl` - A mutable reference to the inode handle of the parent directory from which the inode will be unlinked.
+    /// * `pattr` - A vector of attributes associated with the parent directory (`pino_hdl`). These attributes may be used
+    ///   for validation or to update metadata during the unlink operation.
+    /// * `name` - The name of the file or directory to be unlinked, represented as a `CString`.
+    /// * `ino_hdl` - A mutable reference to the inode handle of the file or directory to be unlinked.
+    /// * `attr` - Optional attributes associated with the inode being unlinked:
+    ///   - `None` indicates that the file or directory should be deleted during the unlink operation.
+    ///   - `Some(Vec<u8>)` represents attributes that may need to be updated or validated during the operation.
+    ///
+    /// # Returns
+    ///
+    /// This function returns a `Result<u64>`:
+    /// * `Ok(u64)` - Represents the current sync epoch after the unlink operation. This value can be used to track
+    ///   the consistency state of the system.
+    /// * `Err(Error)` - Represents an error encountered during the operation.
+    ///
+    /// # Notes
+    ///
+    /// - The operation ensures atomicity, preventing partial updates or inconsistent states during the unlink process.
+    /// - When `attr` is `None`, the function will delete the file or directory represented by the inode.
+    /// - If `attr` is provided, ensure it matches the expected state of the inode to avoid conflicts or errors.
+    /// - The returned sync epoch (`u64`) indicates the system's state after the unlink operation and can be used for
+    ///   higher-level synchronization or consistency checks.
+    /// - This function operates asynchronously and may involve I/O operations or locks.
+    pub async fn unlink_inode_atomic(
+        &self,
+        pino_hdl: &mut InodeHandle,
+        pattr: Vec<u8>,
+        name: CString,
+        ino_hdl: &mut InodeHandle,
+        attr: Option<Vec<u8>>,
+    ) -> Result<u64> {
+        let mut args = InodeUnlinkArgs {
+            dhp: self.dhp,
+            dihp: pino_hdl.ihp,
+            pattr,
+            name,
+            ihp: ino_hdl.ihp,
+            attr,
+
+            txg: 0,
+            err: 0,
+        };
+
+        let args_uzie = &mut args as *mut _ as usize;
+        CoroutineFuture::new(libuzfs_inode_unlink_atomic_c, args_uzie).await;
+        if args.err != 0 {
+            Err(Error::from_raw_os_error(args.err))
+        } else {
+            Ok(args.txg)
+        }
+    }
+
+    /// Atomically renames an inode, allowing for potential movement across directories.
+    ///
+    /// This function performs an atomic operation to rename or move a file or directory
+    /// identified by an inode. It ensures consistent metadata updates and handles
+    /// edge cases such as overwriting existing targets or moving across different parent
+    /// directories.
+    ///
+    /// # Arguments
+    ///
+    /// * `old_parent` - A mutable reference to the inode handle of the source's parent directory.
+    /// * `op_attr` - A vector of attributes associated with the `old_parent` directory, used for validation
+    ///   or metadata updates during the operation.
+    /// * `src_name` - The name of the source file or directory to be renamed, represented as a `CString`.
+    /// * `src_inode` - A mutable reference to the inode handle of the source file or directory.
+    /// * `inode_kv` - A key-value pair (`CString`, `Vec<u8>`) representing the attributes of `src_inode` that
+    ///   may need to be updated as part of the rename operation.
+    /// * `src_attr` - A vector containing attributes of the source inode.
+    /// * `new_parent` - An optional tuple with:
+    ///   - A mutable reference to the inode handle of the target's parent directory (if moving across directories).
+    ///   - A vector of attributes for the target's parent directory.
+    ///   - `None` indicates that `old_parent` and `new_parent` are the same, implying no directory movement.
+    /// * `target_name` - The new name for the file or directory in the target location, represented as a `CString`.
+    /// * `ino_mask` - A 64-bit mask applied to the inode number of the source. The result of this operation
+    ///   (`ino_mask | ino`) will be stored in the directory entry of the `new_parent` (or `old_parent` if they are the same).
+    /// * `target_inode` - An optional tuple with:
+    ///   - A mutable reference to the inode handle of the target (if it exists).
+    ///   - Optional attributes associated with the target inode:
+    ///     - `None` indicates that the `target_inode` should be deleted.
+    ///     - If `target_inode` itself is `None`, it means no target inode exists, and the rename operation will not overwrite any existing entries.
+    ///
+    /// # Returns
+    ///
+    /// This function returns a `Result<u64, Error>`:
+    /// * `Ok(u64)` - Represents the current sync epoch after the operation. This can be used to track
+    ///   the consistency state of the system.
+    /// * `Err(Error)` - Represents an error encountered during the operation.
+    ///
+    /// # Notes
+    ///
+    /// - `inode_kv` directly represents the key-value attributes of `src_inode` that are involved in the operation.
+    /// - The operation ensures atomic updates, including storing the result of `ino_mask | ino` in the directory entry
+    ///   of `new_parent` (or `old_parent` if `new_parent` is `None`).
+    /// - When `target_inode` is `Some` and its attributes are `None`, the operation will delete the existing `target_inode`.
+    /// - This function operates asynchronously and may involve I/O operations or locks.
+    /// - Ensure proper handling of `Option` and `Result` types to account for cases like missing targets, overwriting targets, or directory movements.
+    /// - Atomicity guarantees depend on the underlying storage backend.
+    ///
+    /// # Sync Epoch
+    ///
+    /// The returned `u64` value represents the system's current sync epoch. This value is incremented or updated
+    /// to reflect the latest synchronization state after this rename operation. It can be used by higher-level
+    /// systems to determine data consistency or trigger further synchronization logic.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn rename_inode_atomic(
+        &self,
+        old_parent: &mut InodeHandle,
+        op_attr: Vec<u8>,
+        src_name: CString,
+        src_inode: &mut InodeHandle,
+        inode_kv: (CString, Vec<u8>),
+        src_attr: Vec<u8>,
+        new_parent: Option<(&mut InodeHandle, Vec<u8>)>,
+        target_name: CString,
+        ino_mask: u64,
+        target_inode: Option<(&mut InodeHandle, Option<Vec<u8>>)>,
+    ) -> Result<u64> {
+        let (target_inode, target_attr) =
+            target_inode.map_or_else(|| (null_mut(), None), |(inode, attr)| (inode.ihp, attr));
+        let (new_parent, np_attr) = new_parent.map_or_else(
+            || (null_mut(), None),
+            |(inode, attr)| (inode.ihp, Some(attr)),
+        );
+        let target_name = target_name.into_cstr().as_ref().to_owned();
+        let mut args = InodeRenameArgs {
+            dhp: self.dhp,
+            old_parent: old_parent.ihp,
+            op_attr,
+            src_name,
+            src_inode: src_inode.ihp,
+            key: inode_kv.0,
+            value: inode_kv.1,
+            src_attr,
+            new_parent,
+            np_attr,
+            target_name,
+            ino_mask,
+            target_inode,
+            target_attr,
+
+            txg: 0,
+            err: 0,
+        };
+
+        let args_usize = &mut args as *mut _ as usize;
+        CoroutineFuture::new(libuzfs_inode_rename_atomic_c, args_usize).await;
+        if args.err == 0 {
+            Ok(args.txg)
+        } else {
+            Err(Error::from_raw_os_error(args.err))
+        }
+    }
+}
+
 // inode functions
 impl Dataset {
-    // this function will return with hashed lock guard, get_inode_handle or release_inode_handle
-    // will be blocked within the lifetime of this lock guard
-    pub async fn create_inode(&self, inode_type: InodeType) -> Result<InodeHandle> {
+    pub async fn create_inode(&self, inode_type: InodeType) -> Result<(InodeHandle, u64, u64)> {
         let _guard = self.metrics.record(RequestMethod::CreateInode, 0);
         let mut arg = LibuzfsCreateInode {
             dhp: self.dhp,
@@ -793,11 +1051,7 @@ impl Dataset {
         CoroutineFuture::new(libuzfs_create_inode_c, arg_usize).await;
 
         if arg.err == 0 {
-            Ok(InodeHandle {
-                ihp: arg.ihp,
-                ino: arg.ino,
-                gen: arg.txg,
-            })
+            Ok((InodeHandle { ihp: arg.ihp }, arg.ino, arg.txg))
         } else {
             Err(io::Error::from_raw_os_error(arg.err))
         }

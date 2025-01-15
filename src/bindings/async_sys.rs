@@ -1,6 +1,7 @@
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::mem::size_of;
 use std::os::raw::{c_char, c_void};
+use std::ptr::{null, slice_from_raw_parts_mut};
 
 use super::sys::*;
 use crate::context::coroutine_c::*;
@@ -1061,4 +1062,227 @@ pub unsafe extern "C" fn libuzfs_show_stats_c(arg: *mut c_void) {
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_wakeup_arc_evictor_c(_arg: *mut c_void) {
     libuzfs_wakeup_arc_evictor();
+}
+
+pub struct InodeCreateArgs<F> {
+    pub dhp: *mut libuzfs_dataset_handle_t,
+    pub inode_type: libuzfs_inode_type_t,
+    pub dihp: *mut libuzfs_inode_handle_t,
+    pub name: CString,
+    pub pattr: Vec<u8>,
+    pub hp_kvs: Vec<(CString, Vec<u8>)>,
+
+    pub attr_func: F,
+    pub ihp: *mut libuzfs_inode_handle_t,
+    pub err: i32,
+}
+
+unsafe impl<F> Send for InodeCreateArgs<F> {}
+unsafe impl<F> Sync for InodeCreateArgs<F> {}
+
+unsafe extern "C" fn attr_init<F: FnMut(&mut [u8], &mut usize, &mut u64, u64)>(
+    attr: *mut c_void,
+    len: *mut usize,
+    ino: *mut u64,
+    gen: u64,
+    args: *mut c_void,
+) {
+    let args = &mut *(args as *mut InodeCreateArgs<F>);
+    let slice = &mut *slice_from_raw_parts_mut(attr as *mut u8, *len);
+    (args.attr_func)(slice, &mut *len, &mut *ino, gen);
+}
+
+pub unsafe extern "C" fn libuzfs_inode_create_atomic_c<
+    F: FnMut(&mut [u8], &mut usize, &mut u64, u64),
+>(
+    args_ptr: *mut c_void,
+) {
+    let args = &mut *(args_ptr as *mut InodeCreateArgs<F>);
+
+    let pattr = reserved_attr {
+        attr: args.pattr.as_ptr() as *const _,
+        size: args.pattr.len() as u32,
+    };
+    let hp_kvs: Vec<_> = args
+        .hp_kvs
+        .iter_mut()
+        .map(|(key, v)| inode_kv {
+            key: key.as_ptr(),
+            value: v.as_mut_ptr() as *mut _,
+            value_size: v.len() as u32,
+        })
+        .collect();
+
+    let mut ica = inode_create_args {
+        dhp: args.dhp,
+        inode_type: args.inode_type,
+        dihp: args.dihp,
+        name: args.name.as_ptr(),
+        pattr,
+        hp_kvs: hp_kvs.as_ptr(),
+        num_hp_kvs: hp_kvs.len() as u32,
+    };
+
+    args.err = libuzfs_inode_create_atomic(&mut ica, &mut args.ihp, Some(attr_init::<F>), args_ptr);
+}
+
+pub struct InodeUnlinkArgs {
+    pub dhp: *mut libuzfs_dataset_handle_t,
+    pub dihp: *mut libuzfs_inode_handle_t,
+    pub pattr: Vec<u8>,
+    pub name: CString,
+    pub ihp: *mut libuzfs_inode_handle_t,
+    pub attr: Option<Vec<u8>>,
+
+    pub txg: u64,
+    pub err: i32,
+}
+
+unsafe impl Send for InodeUnlinkArgs {}
+unsafe impl Sync for InodeUnlinkArgs {}
+
+pub unsafe extern "C" fn libuzfs_inode_unlink_atomic_c(args: *mut c_void) {
+    let args = &mut *(args as *mut InodeUnlinkArgs);
+
+    let attr = args.attr.as_ref().map_or_else(
+        || reserved_attr {
+            attr: null(),
+            size: 0,
+        },
+        |attr| reserved_attr {
+            attr: attr.as_ptr() as *const _,
+            size: attr.len() as u32,
+        },
+    );
+    let mut iua = inode_unlink_args {
+        dhp: args.dhp,
+        dihp: args.dihp,
+        pattr: reserved_attr {
+            attr: args.pattr.as_ptr() as *const _,
+            size: args.pattr.len() as u32,
+        },
+        name: args.name.as_ptr(),
+        ihp: args.ihp,
+        attr,
+    };
+
+    args.err = libuzfs_inode_unlink_atomic(&mut iua, &mut args.txg);
+}
+
+pub struct InodeRenameArgs {
+    pub dhp: *mut libuzfs_dataset_handle_t,
+
+    pub old_parent: *mut libuzfs_inode_handle_t,
+    pub op_attr: Vec<u8>,
+    pub src_name: CString,
+
+    pub src_inode: *mut libuzfs_inode_handle_t,
+    pub key: CString,
+    pub value: Vec<u8>,
+    pub src_attr: Vec<u8>,
+
+    pub new_parent: *mut libuzfs_inode_handle_t,
+    pub target_name: CString,
+    pub ino_mask: u64,
+    pub np_attr: Option<Vec<u8>>,
+
+    pub target_inode: *mut libuzfs_inode_handle_t,
+    pub target_attr: Option<Vec<u8>>,
+
+    pub txg: u64,
+    pub err: i32,
+}
+
+unsafe impl Send for InodeRenameArgs {}
+unsafe impl Sync for InodeRenameArgs {}
+
+pub unsafe extern "C" fn libuzfs_inode_rename_atomic_c(args: *mut c_void) {
+    let args = &mut *(args as *mut InodeRenameArgs);
+
+    let target_attr = args.target_attr.as_ref().map_or_else(
+        || reserved_attr {
+            attr: null(),
+            size: 0,
+        },
+        |attr| reserved_attr {
+            attr: attr.as_ptr() as *const _,
+            size: attr.len() as u32,
+        },
+    );
+
+    let np_attr = args.np_attr.as_ref().map_or_else(
+        || reserved_attr {
+            attr: null(),
+            size: 0,
+        },
+        |attr| reserved_attr {
+            attr: attr.as_ptr() as *const _,
+            size: attr.len() as u32,
+        },
+    );
+
+    let mut ira = inode_rename_args {
+        dhp: args.dhp,
+        old_parent: args.old_parent,
+        op_attr: reserved_attr {
+            attr: args.op_attr.as_ptr() as *const _,
+            size: args.op_attr.len() as u32,
+        },
+        src_name: args.src_name.as_ptr(),
+        src_inode: args.src_inode,
+        kv: inode_kv {
+            key: args.key.as_ptr(),
+            value: args.value.as_mut_ptr() as *mut _,
+            value_size: args.value.len() as u32,
+        },
+        src_attr: reserved_attr {
+            attr: args.src_attr.as_ptr() as *const _,
+            size: args.src_attr.len() as u32,
+        },
+        new_parent: args.new_parent,
+        target_name: args.target_name.as_ptr(),
+        ino_mask: args.ino_mask,
+        np_attr,
+        target_inode: args.target_inode,
+        target_attr,
+    };
+
+    args.err = libuzfs_inode_rename_atomic(&mut ira, &mut args.txg);
+}
+
+pub struct InodeLinkArgs {
+    pub dhp: *mut libuzfs_dataset_handle_t,
+    pub dihp: *mut libuzfs_inode_handle_t,
+    pub pattr: Vec<u8>,
+    pub name: CString,
+    pub ihp: *mut libuzfs_inode_handle_t,
+    pub attr: Vec<u8>,
+    pub ino_mask: u64,
+
+    pub txg: u64,
+    pub err: i32,
+}
+
+unsafe impl Send for InodeLinkArgs {}
+unsafe impl Sync for InodeLinkArgs {}
+
+pub unsafe extern "C" fn libuzfs_inode_link_atomic_c(arg: *mut c_void) {
+    let arg = &mut *(arg as *mut InodeLinkArgs);
+    let mut ila = inode_link_args {
+        dhp: arg.dhp,
+        dihp: arg.dihp,
+        pattr: reserved_attr {
+            attr: arg.pattr.as_ptr() as *const _,
+            size: arg.pattr.len() as u32,
+        },
+        name: arg.name.as_ptr(),
+        ihp: arg.ihp,
+        attr: reserved_attr {
+            attr: arg.attr.as_ptr() as *const _,
+            size: arg.attr.len() as u32,
+        },
+        ino_mask: arg.ino_mask,
+    };
+
+    arg.err = libuzfs_inode_link_atomic(&mut ila, &mut arg.txg);
 }

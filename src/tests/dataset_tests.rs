@@ -107,8 +107,8 @@ async fn uzfs_test() {
         assert_eq!(value_read.as_slice(), value.as_bytes());
         ds.wait_synced().await;
 
-        let mut tmp_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
-        (tmp_ino, gen) = (tmp_hdl.ino, tmp_hdl.gen);
+        let mut tmp_hdl;
+        (tmp_hdl, tmp_ino, gen) = ds.create_inode(InodeType::DIR).await.unwrap();
         ds.release_inode_handle(&mut tmp_hdl).await;
         let err = ds
             .get_inode_handle(tmp_ino, gen + 1, false)
@@ -172,10 +172,10 @@ async fn uzfs_test() {
         assert_eq!(ds.read_object(&rwobj_hdl, 0, size).await.unwrap(), t);
         ds.release_inode_handle(&mut rwobj_hdl).await;
 
-        let mut file_hdl = ds.create_inode(InodeType::FILE).await.unwrap();
-        let mut dir_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
-        (file_ino, file_gen) = (file_hdl.ino, file_hdl.gen);
-        (dir_ino, dir_gen) = (dir_hdl.ino, dir_hdl.gen);
+        let mut file_hdl;
+        (file_hdl, file_ino, file_gen) = ds.create_inode(InodeType::FILE).await.unwrap();
+        let mut dir_hdl;
+        (dir_hdl, dir_ino, dir_gen) = ds.create_inode(InodeType::DIR).await.unwrap();
 
         txg = ds
             .create_dentry(&mut dir_hdl, file_name, file_ino)
@@ -333,7 +333,7 @@ async fn uzfs_test() {
         .await
         .unwrap();
 
-        let mut ino_hdl = ds.create_inode(InodeType::FILE).await.unwrap();
+        let mut ino_hdl = ds.create_inode(InodeType::FILE).await.unwrap().0;
         let keys = ds.list_kvattrs(&ino_hdl).await.unwrap();
         assert!(keys.is_empty());
 
@@ -394,8 +394,7 @@ async fn uzfs_claim_test() {
         .await
         .unwrap();
 
-        let mut claim_ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
-        let (claim_ino, gen) = (claim_ino_hdl.ino, claim_ino_hdl.gen);
+        let (mut claim_ino_hdl, claim_ino, gen) = ds.create_inode(InodeType::DIR).await.unwrap();
         ds.delete_inode(&mut claim_ino_hdl, InodeType::DIR)
             .await
             .unwrap();
@@ -434,9 +433,9 @@ async fn uzfs_claim_test() {
         )
         .await
         .unwrap();
-        let mut ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
-        ino = ino_hdl.ino;
-        ds.release_inode_handle(&mut ino_hdl).await;
+        let mut res = ds.create_inode(InodeType::DIR).await.unwrap();
+        ino = res.1;
+        ds.release_inode_handle(&mut res.0).await;
 
         ds.wait_synced().await;
         ds.close().await.unwrap();
@@ -735,7 +734,7 @@ async fn uzfs_attr_test() {
         .unwrap(),
     );
 
-    let mut ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
+    let mut ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap().0;
     let value = vec![1; 512];
     ds.set_kvattr(&mut ino_hdl, "name1", &value, KvSetOption::None as u32)
         .await
@@ -750,7 +749,7 @@ async fn uzfs_attr_test() {
     .unwrap();
     ds.release_inode_handle(&mut ino_hdl).await;
 
-    let mut ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
+    let mut ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap().0;
     ds.set_kvattr(
         &mut ino_hdl,
         "name1",
@@ -782,7 +781,7 @@ async fn uzfs_attr_test() {
             } else {
                 InodeType::FILE
             };
-            let mut ino_hdl = ds_cloned.create_inode(inode_type).await.unwrap();
+            let mut ino_hdl = ds_cloned.create_inode(inode_type).await.unwrap().0;
             assert!(ds_cloned
                 .get_attr(&ino_hdl)
                 .await
@@ -1394,7 +1393,7 @@ async fn dentry_test() {
     }
 
     for _ in 0..100 {
-        let mut ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
+        let mut ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap().0;
         let ndentries = 2000;
         for j in 0..ndentries {
             ds.create_dentry(&mut ino_hdl, &format!("{PREFIX}{j}"), j)
@@ -1423,6 +1422,250 @@ async fn dentry_test() {
         ds.release_inode_handle(&mut ino_hdl).await;
     }
 
+    ds.close().await.unwrap();
+    uzfs_env_fini().await;
+}
+
+#[tokio::test]
+async fn atomic_test() {
+    let dsname = "atomic_test/ds";
+    let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+    uzfs_env_init().await;
+
+    let ds = Dataset::init(
+        dsname,
+        uzfs_test_env.get_dev_path(),
+        DatasetType::Meta,
+        0,
+        false,
+    )
+    .await
+    .unwrap();
+
+    let mut root = ds.create_inode(InodeType::DIR).await.unwrap().0;
+    let value = vec![0, 0, 0];
+    let hp_kvs: Vec<_> = vec![
+        (CString::new("parent").unwrap(), value.clone()),
+        (CString::new("delegation").unwrap(), value.clone()),
+    ];
+    let attr = vec![1, 2, 3, 4];
+    let ino_mask = 1 << 63;
+
+    let attr2 = vec![4, 3, 2, 1];
+
+    // test atomic create link unlink
+    for inode_type in vec![InodeType::FILE, InodeType::DIR] {
+        let file1 = CString::new("file1").unwrap();
+        let mut ino_out = 0;
+        let mut gen_out = 0;
+        let mut ino_hdl = ds
+            .create_inode_atomic(
+                inode_type,
+                &mut root,
+                file1.clone(),
+                |attr_slice, len, ino, gen| {
+                    gen_out = gen;
+                    ino_out = *ino;
+                    *ino |= ino_mask;
+                    *len = attr.len();
+                    attr_slice[..attr.len()].copy_from_slice(&attr);
+                },
+                attr.clone(),
+                hp_kvs.clone(),
+            )
+            .await
+            .unwrap();
+        let reserved = ds.get_attr(&ino_hdl).await.unwrap().reserved;
+        assert_eq!(reserved, attr);
+        let reserved = ds.get_attr(&root).await.unwrap().reserved;
+        assert_eq!(reserved, attr);
+        let masked_ino = ds.lookup_dentry(&root, file1.clone()).await.unwrap();
+        assert_eq!(masked_ino, ino_out | ino_mask);
+        for (key, _) in &hp_kvs {
+            let v = ds.get_kvattr(&ino_hdl, key.clone()).await.unwrap();
+            assert_eq!(v, value);
+        }
+
+        let link = CString::new("link").unwrap();
+        ds.link_inode_atomic(
+            &mut root,
+            attr2.clone(),
+            link.clone(),
+            &mut ino_hdl,
+            attr2.clone(),
+            ino_mask,
+        )
+        .await
+        .unwrap();
+        let reserved = ds.get_attr(&ino_hdl).await.unwrap().reserved;
+        assert_eq!(reserved, attr2);
+        let reserved = ds.get_attr(&root).await.unwrap().reserved;
+        assert_eq!(reserved, attr2);
+        let masked_ino = ds.lookup_dentry(&root, link.clone()).await.unwrap();
+        assert_eq!(masked_ino, ino_out | ino_mask);
+
+        ds.unlink_inode_atomic(
+            &mut root,
+            attr.clone(),
+            file1,
+            &mut ino_hdl,
+            Some(attr.clone()),
+        )
+        .await
+        .unwrap();
+        let reserved = ds.get_attr(&ino_hdl).await.unwrap().reserved;
+        assert_eq!(reserved, attr);
+        let reserved = ds.get_attr(&root).await.unwrap().reserved;
+        assert_eq!(reserved, attr);
+
+        ds.unlink_inode_atomic(&mut root, attr2.clone(), link.clone(), &mut ino_hdl, None)
+            .await
+            .unwrap();
+        let reserved = ds.get_attr(&root).await.unwrap().reserved;
+        assert_eq!(reserved, attr2);
+
+        ds.get_inode_handle(ino_out, gen_out, false)
+            .await
+            .unwrap_err();
+
+        let dentries = ds.iterate_dentry(&root, 0, 1 << 20).await.unwrap().0.len();
+        assert_eq!(dentries, 0);
+
+        ds.release_inode_handle(&mut ino_hdl).await;
+    }
+
+    // test atomic rename
+    let src_name = CString::new("src").unwrap();
+    let target_name = CString::new("target").unwrap();
+    let mut old_parent = ds.create_inode(InodeType::DIR).await.unwrap().0;
+    let mut new_parent = ds.create_inode(InodeType::DIR).await.unwrap().0;
+    let new_key = CString::new("parent").unwrap();
+    let new_value = vec![1, 2, 3, 4];
+
+    // false: old parent == new parent
+    // true: old parent != new parent
+    let np_types = vec![false, true];
+
+    // false, false: no target inode
+    // true, false: target existed and we want to deleted
+    // true, true: target existed and we need set attr for it
+    let target_types = vec![(false, false), (true, false), (true, true)];
+    for np_type in np_types.clone() {
+        for (target_type, attr_type) in target_types.clone() {
+            let mut src_ino = 0;
+            let mut src_gen = 0;
+            let mut src_inode = ds
+                .create_inode_atomic(
+                    InodeType::FILE,
+                    &mut old_parent,
+                    src_name.clone(),
+                    |attr_slice, len, ino, gen| {
+                        *len = attr.len();
+                        attr_slice[..attr.len()].copy_from_slice(&attr);
+                        src_ino = *ino;
+                        src_gen = gen;
+                    },
+                    attr.clone(),
+                    hp_kvs.clone(),
+                )
+                .await
+                .unwrap();
+            let mut target_ino = 0;
+            let mut target_gen = 0;
+            let mut target_inode = if target_type {
+                let np = match np_type {
+                    false => &mut old_parent,
+                    true => &mut new_parent,
+                };
+                let target_inode = ds
+                    .create_inode_atomic(
+                        InodeType::FILE,
+                        np,
+                        target_name.clone(),
+                        |attr_slice, len, ino, gen| {
+                            *len = attr.len();
+                            attr_slice[..attr.len()].copy_from_slice(&attr);
+                            target_ino = *ino;
+                            target_gen = gen;
+                        },
+                        attr.clone(),
+                        hp_kvs.clone(),
+                    )
+                    .await
+                    .unwrap();
+                Some(target_inode)
+            } else {
+                None
+            };
+
+            let after_attr = match attr_type {
+                true => Some(attr2.clone()),
+                false => None,
+            };
+
+            ds.rename_inode_atomic(
+                &mut old_parent,
+                attr2.clone(),
+                src_name.clone(),
+                &mut src_inode,
+                (new_key.clone(), new_value.clone()),
+                attr2.clone(),
+                np_type.then_some((&mut new_parent, attr2.clone())),
+                target_name.clone(),
+                ino_mask,
+                target_inode.as_mut().map(|inode| (inode, after_attr)),
+            )
+            .await
+            .unwrap();
+
+            // check dentries moved from old parent to new parent
+            ds.lookup_dentry(&old_parent, src_name.clone())
+                .await
+                .unwrap_err();
+            {
+                let np = match np_type {
+                    false => &old_parent,
+                    true => &new_parent,
+                };
+                let reserved = ds.get_attr(np).await.unwrap().reserved;
+                assert_eq!(reserved, attr2);
+                let ino = ds.lookup_dentry(np, target_name.clone()).await.unwrap();
+                assert_eq!(ino, src_ino | ino_mask);
+            }
+            // check attr set
+            let reserved = ds.get_attr(&old_parent).await.unwrap().reserved;
+            assert_eq!(reserved, attr2);
+            let reserved = ds.get_attr(&src_inode).await.unwrap().reserved;
+            assert_eq!(reserved, attr2);
+            if let Some(ref mut target_inode) = target_inode {
+                if attr_type {
+                    let reserved = ds.get_attr(target_inode).await.unwrap().reserved;
+                    assert_eq!(reserved, attr2);
+                    ds.delete_inode(target_inode, InodeType::FILE)
+                        .await
+                        .unwrap();
+                } else {
+                    ds.get_inode_handle(target_ino, target_gen, false)
+                        .await
+                        .unwrap_err();
+                }
+                ds.release_inode_handle(target_inode).await;
+            }
+
+            let np = match np_type {
+                false => &mut old_parent,
+                true => &mut new_parent,
+            };
+            ds.unlink_inode_atomic(np, attr.clone(), target_name.clone(), &mut src_inode, None)
+                .await
+                .unwrap();
+            ds.release_inode_handle(&mut src_inode).await;
+        }
+    }
+    ds.release_inode_handle(&mut new_parent).await;
+    ds.release_inode_handle(&mut old_parent).await;
+
+    ds.release_inode_handle(&mut root).await;
     ds.close().await.unwrap();
     uzfs_env_fini().await;
 }
