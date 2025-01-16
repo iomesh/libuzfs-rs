@@ -1,5 +1,4 @@
-use std::ffi::CStr;
-use std::mem::size_of;
+use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 
 use super::sys::*;
@@ -9,7 +8,6 @@ use crate::io::async_io_c::*;
 use crate::metrics;
 use crate::metrics::stats::*;
 use crate::sync::sync_c::*;
-use crate::UzfsDentry;
 
 const MAX_POOL_NAME_SIZE: i32 = 32;
 const MAX_NAME_SIZE: usize = 256;
@@ -899,56 +897,41 @@ pub unsafe extern "C" fn libuzfs_lookup_dentry_c(arg: *mut c_void) {
     arg.err = libuzfs_dentry_lookup(arg.dihp, arg.name, &mut arg.ino);
 }
 
-pub struct LibuzfsIterateDentryArg {
+pub struct LibuzfsIterateDentryArg<F> {
     pub dihp: *mut libuzfs_inode_handle_t,
     pub whence: u64,
-    pub size: u32,
+    pub dir_emit: F,
 
     pub err: i32,
-    pub done: bool,
-    pub dentries: Vec<UzfsDentry>,
+    pub eof: bool,
 }
 
-unsafe impl Send for LibuzfsIterateDentryArg {}
-unsafe impl Sync for LibuzfsIterateDentryArg {}
+unsafe impl<F> Send for LibuzfsIterateDentryArg<F> {}
+unsafe impl<F> Sync for LibuzfsIterateDentryArg<F> {}
 
-const DEFAULT_NDENTRIES: usize = 128;
-
-unsafe extern "C" fn dir_emit(
+unsafe extern "C" fn dir_emit<F: FnMut(CString, u64, u64) -> bool>(
     arg: *mut c_void,
     whence: u64,
     name: *const c_char,
     value: u64,
 ) -> i32 {
-    let arg = &mut *(arg as *mut LibuzfsIterateDentryArg);
-    let size = (libc::strlen(name) + size_of::<u64>() * 2) as u32;
-    if arg.size < size {
-        return 1;
-    }
-
-    arg.size -= size;
-
+    let arg = &mut *(arg as *mut LibuzfsIterateDentryArg<F>);
     let name = CStr::from_ptr(name).to_owned();
-    arg.dentries.push(UzfsDentry {
-        whence,
-        name,
-        value,
-    });
-
-    0
+    let done = (arg.dir_emit)(name, value, whence);
+    done as i32
 }
 
 #[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn libuzfs_iterate_dentry_c(arg: *mut c_void) {
+pub unsafe extern "C" fn libuzfs_iterate_dentry_c<F: FnMut(CString, u64, u64) -> bool>(
+    arg: *mut c_void,
+) {
     let arg_ptr = arg;
-    let arg = &mut *(arg as *mut LibuzfsIterateDentryArg);
+    let arg = &mut *(arg as *mut LibuzfsIterateDentryArg<F>);
 
-    arg.dentries.reserve(DEFAULT_NDENTRIES);
-
-    arg.err = libuzfs_dentry_iterate(arg.dihp, arg.whence, arg_ptr, Some(dir_emit));
+    arg.err = libuzfs_dentry_iterate(arg.dihp, arg.whence, arg_ptr, Some(dir_emit::<F>));
 
     if arg.err == libc::ENOENT {
-        arg.done = true;
+        arg.eof = true;
         arg.err = 0;
     }
 }
