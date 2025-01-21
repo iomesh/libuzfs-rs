@@ -1,12 +1,12 @@
 use super::aio::*;
 use crate::context::coroutine::CoroutineFuture;
-use kanal::*;
 use libc::timespec;
 use std::{
     io::{Error, ErrorKind},
+    mem::replace,
     sync::{
         atomic::{fence, AtomicBool, Ordering},
-        Arc,
+        Arc, Condvar, Mutex,
     },
     thread::JoinHandle,
 };
@@ -128,8 +128,57 @@ unsafe extern "C" fn process_completion(arg: *mut libc::c_void) {
     }
 }
 
+struct QueueInner {
+    tasks: Vec<AioCallback>,
+    closed: bool,
+}
+
+pub(super) struct BlockQueue {
+    inner: Mutex<QueueInner>,
+    cond: Condvar,
+}
+
+impl BlockQueue {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(QueueInner {
+                tasks: Vec::with_capacity(128),
+                closed: false,
+            }),
+            cond: Condvar::new(),
+        }
+    }
+
+    pub(super) fn push(&self, task: AioCallback) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.tasks.push(task);
+        self.cond.notify_one();
+    }
+
+    pub(super) fn close(&self) {
+        self.inner.lock().unwrap().closed = true;
+        self.cond.notify_all();
+    }
+
+    fn pop_all(&self) -> Option<Vec<AioCallback>> {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.tasks.is_empty() {
+            Some(replace(&mut inner.tasks, Vec::with_capacity(128)))
+        } else if inner.closed {
+            None
+        } else {
+            inner = self.cond.wait(inner).unwrap();
+            if inner.closed {
+                None
+            } else {
+                Some(replace(&mut inner.tasks, Vec::with_capacity(128)))
+            }
+        }
+    }
+}
+
 pub(super) struct AioContext {
-    pub(super) sender: Sender<AioCallback>,
+    pub(super) queue: Arc<BlockQueue>,
     reaper: Option<JoinHandle<()>>,
     submitter: Option<JoinHandle<()>>,
     stop: Arc<AtomicBool>,
@@ -140,21 +189,13 @@ const MAX_EVENTS: usize = 4096;
 const MAX_IDLE_MILLS: u64 = 10;
 
 impl AioContext {
-    pub(super) fn submit(io_fd: i32, receiver: Receiver<AioCallback>, io_ctx: aio_context_t) {
-        loop {
-            match receiver.recv() {
-                Ok(task) => {
-                    let mut iocbs = Vec::with_capacity(MAX_EVENTS);
-                    iocbs.push(task.into_iocb(io_fd));
-
-                    while let Ok(Some(task)) = receiver.try_recv() {
-                        iocbs.push(task.into_iocb(io_fd));
-                    }
-
-                    unsafe { io_submit(io_ctx, &iocbs).unwrap() };
-                }
-                _ => return,
-            }
+    pub(super) fn submit(io_fd: i32, queue: Arc<BlockQueue>, io_ctx: aio_context_t) {
+        while let Some(tasks) = queue.pop_all() {
+            let iocbs: Vec<_> = tasks
+                .into_iter()
+                .map(|task| task.into_iocb(io_fd))
+                .collect();
+            unsafe { io_submit(io_ctx, &iocbs).unwrap() };
         }
     }
 
@@ -213,8 +254,9 @@ impl AioContext {
         cb: unsafe extern "C" fn(arg: *mut libc::c_void, res: i64),
     ) -> Result<Self, Error> {
         let io_ctx = unsafe { io_setup(256)? };
-        let (sender, receiver) = unbounded();
-        let submitter = std::thread::spawn(move || Self::submit(io_fd, receiver, io_ctx));
+        let queue = Arc::new(BlockQueue::new());
+        let queue_cloned = queue.clone();
+        let submitter = std::thread::spawn(move || Self::submit(io_fd, queue_cloned, io_ctx));
         let stop = Arc::new(AtomicBool::new(false));
         let stop_cloned = stop.clone();
         let handle = Handle::current();
@@ -222,7 +264,7 @@ impl AioContext {
             Self::reap(io_ctx, stop_cloned, handle, cb).unwrap();
         });
         Ok(Self {
-            sender,
+            queue,
             reaper: Some(reaper),
             submitter: Some(submitter),
             stop,
@@ -234,7 +276,7 @@ impl AioContext {
 impl Drop for AioContext {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        self.sender.close();
+        self.queue.close();
         fence(Ordering::SeqCst);
         self.submitter.take().unwrap().join().unwrap();
         self.reaper.take().unwrap().join().unwrap();

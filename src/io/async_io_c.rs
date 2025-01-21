@@ -28,14 +28,11 @@ pub unsafe extern "C" fn submit_read(
         offset,
         size,
     };
-    aio_hdl
-        .sender
-        .send(AioCallback {
-            io_type: IoType::Read,
-            io_content,
-            arg,
-        })
-        .unwrap();
+    aio_hdl.queue.push(AioCallback {
+        io_type: IoType::Read,
+        io_content,
+        arg,
+    });
 }
 
 #[allow(clippy::missing_safety_doc)]
@@ -52,26 +49,20 @@ pub unsafe extern "C" fn submit_write(
         offset,
         size,
     };
-    aio_hdl
-        .sender
-        .send(AioCallback {
-            io_type: IoType::Write,
-            io_content,
-            arg,
-        })
-        .unwrap();
+    aio_hdl.queue.push(AioCallback {
+        io_type: IoType::Write,
+        io_content,
+        arg,
+    });
 }
 
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn submit_fsync(aio_hdl: *const libc::c_void, arg: *mut libc::c_void) {
     let aio_hdl = &*(aio_hdl as *const AioContext);
     let io_content = IoContent::default();
-    aio_hdl
-        .sender
-        .send(AioCallback {
-            io_type: IoType::Sync,
-            io_content,
-            arg,
-        })
-        .unwrap();
+    aio_hdl.queue.push(AioCallback {
+        io_type: IoType::Sync,
+        io_content,
+        arg,
+    });
 }
