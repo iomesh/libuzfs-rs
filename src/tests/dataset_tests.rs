@@ -16,6 +16,7 @@ use nix::unistd::ForkResult;
 use petgraph::algo::is_cyclic_directed;
 use petgraph::prelude::DiGraph;
 use rand::distributions::Alphanumeric;
+use rand::thread_rng;
 use rand::Rng;
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -34,7 +35,7 @@ async fn uzfs_test() {
     let tmp_ino;
     let tmp_name = "tmp_dir";
     let s = String::from("Hello uzfs!");
-    let t = vec!['H' as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let t = vec![b'H', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     let file_ino;
     let file_gen;
     let dir_ino;
@@ -554,7 +555,7 @@ async fn uzfs_expand_test() {
     for _ in 0..io_workers {
         let ds_clone = ds.clone();
         workers.push(tokio::task::spawn(async move {
-            let buf = vec![123 as u8; block_size];
+            let buf = vec![123_u8; block_size];
             let mut offset = 0;
             let (objs, gen) = ds_clone.create_objects(1).await.unwrap();
             let mut obj_hdl = ds_clone.get_inode_handle(objs[0], gen, true).await.unwrap();
@@ -876,7 +877,7 @@ async fn uzfs_attr_test() {
 }
 
 async fn test_reduce_max(dsname: &str, dev_path: &str) {
-    let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 4096, false)
+    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 4096, false)
         .await
         .unwrap();
     let (objs, gen) = ds.create_objects(4).await.unwrap();
@@ -922,7 +923,7 @@ async fn test_reduce_max(dsname: &str, dev_path: &str) {
     ds.release_inode_handle(&mut hdl3).await;
     ds.close().await.unwrap();
 
-    let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 1024, false)
+    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 1024, false)
         .await
         .unwrap();
     let mut hdl0 = ds.get_inode_handle(objs[0], gen, true).await.unwrap();
@@ -953,7 +954,7 @@ async fn test_reduce_max(dsname: &str, dev_path: &str) {
 }
 
 async fn test_increase_max(dsname: &str, dev_path: &str) {
-    let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 1024, false)
+    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 1024, false)
         .await
         .unwrap();
     let (objs, gen) = ds.create_objects(3).await.unwrap();
@@ -984,7 +985,7 @@ async fn test_increase_max(dsname: &str, dev_path: &str) {
     ds.release_inode_handle(&mut hdl2).await;
     ds.close().await.unwrap();
 
-    let ds = Dataset::init(dsname, &dev_path, DatasetType::Data, 4096, false)
+    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 4096, false)
         .await
         .unwrap();
     let mut hdl0 = ds.get_inode_handle(objs[0], gen, true).await.unwrap();
@@ -1246,7 +1247,7 @@ async fn uzfs_truncate_test() {
 
     let iters = 10000;
     let (objs, gen) = ds.create_objects(iters).await.unwrap();
-    let obj_groups: Vec<Vec<u64>> = objs.chunks(100).into_iter().map(|v| v.to_owned()).collect();
+    let obj_groups: Vec<Vec<u64>> = objs.chunks(100).map(|v| v.to_owned()).collect();
 
     let max_end_size = blksize * 2;
     let handles: Vec<_> = obj_groups
@@ -1421,6 +1422,63 @@ async fn dentry_test() {
         verify_dentries(dentries);
         ds.delete_inode(&mut ino_hdl, InodeType::DIR).await.unwrap();
         ds.release_inode_handle(&mut ino_hdl).await;
+    }
+
+    ds.close().await.unwrap();
+    uzfs_env_fini().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn read_zero_copy_test() {
+    let dsname = "read_zero_copy_test/ds";
+    let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+    uzfs_env_init().await;
+    let ds = Arc::new(
+        Dataset::init(
+            dsname,
+            uzfs_test_env.get_dev_path(),
+            DatasetType::Data,
+            0,
+            false,
+        )
+        .await
+        .unwrap(),
+    );
+
+    for _ in 0..128 {
+        let nobjs = 128;
+        let objs = ds.create_objects(nobjs).await.unwrap().0;
+        let handles: Vec<_> = objs
+            .into_iter()
+            .map(|obj| {
+                let ds = ds.clone();
+                tokio::spawn(async move {
+                    let mut ino_hdl = ds.get_inode_handle(obj, u64::MAX, true).await.unwrap();
+
+                    let off = thread_rng().gen_range(0..65536);
+                    let size = thread_rng().gen_range(16384..65536);
+                    let buf = vec![123; size];
+                    ds.write_object(&ino_hdl, off, false, vec![&buf])
+                        .await
+                        .unwrap();
+                    let read_buf = ds
+                        .read_object_zero_copy(&ino_hdl, off, size as u64)
+                        .await
+                        .unwrap();
+                    let mut data_read = Vec::new();
+                    for slice in read_buf.as_slices() {
+                        data_read.extend_from_slice(slice);
+                    }
+                    assert_eq!(data_read, buf, "slices: {:?}", read_buf.as_slices());
+
+                    ds.delete_object(&mut ino_hdl).await.unwrap();
+                    ds.release_inode_handle(&mut ino_hdl).await;
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.await.unwrap();
+        }
     }
 
     ds.close().await.unwrap();
