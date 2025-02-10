@@ -16,6 +16,7 @@ use nix::unistd::ForkResult;
 use petgraph::algo::is_cyclic_directed;
 use petgraph::prelude::DiGraph;
 use rand::distributions::Alphanumeric;
+use rand::thread_rng;
 use rand::Rng;
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -1421,6 +1422,63 @@ async fn dentry_test() {
         verify_dentries(dentries);
         ds.delete_inode(&mut ino_hdl, InodeType::DIR).await.unwrap();
         ds.release_inode_handle(&mut ino_hdl).await;
+    }
+
+    ds.close().await.unwrap();
+    uzfs_env_fini().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn read_zero_copy_test() {
+    let dsname = "read_zero_copy_test/ds";
+    let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+    uzfs_env_init().await;
+    let ds = Arc::new(
+        Dataset::init(
+            dsname,
+            uzfs_test_env.get_dev_path(),
+            DatasetType::Data,
+            0,
+            false,
+        )
+        .await
+        .unwrap(),
+    );
+
+    for _ in 0..128 {
+        let nobjs = 128;
+        let objs = ds.create_objects(nobjs).await.unwrap().0;
+        let handles: Vec<_> = objs
+            .into_iter()
+            .map(|obj| {
+                let ds = ds.clone();
+                tokio::spawn(async move {
+                    let mut ino_hdl = ds.get_inode_handle(obj, u64::MAX, true).await.unwrap();
+
+                    let off = thread_rng().gen_range(0..65536);
+                    let size = thread_rng().gen_range(16384..65536);
+                    let buf = vec![123; size];
+                    ds.write_object(&ino_hdl, off, false, vec![&buf])
+                        .await
+                        .unwrap();
+                    let read_buf = ds
+                        .read_object_zero_copy(&ino_hdl, off, size as u64)
+                        .await
+                        .unwrap();
+                    let mut data_read = Vec::new();
+                    for slice in read_buf.as_slices() {
+                        data_read.extend_from_slice(slice);
+                    }
+                    assert_eq!(data_read, buf, "slices: {:?}", read_buf.as_slices());
+
+                    ds.delete_object(&mut ino_hdl).await.unwrap();
+                    ds.release_inode_handle(&mut ino_hdl).await;
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.await.unwrap();
+        }
     }
 
     ds.close().await.unwrap();
