@@ -21,7 +21,9 @@ async fn worker(obj: u64, ds: Arc<Dataset>, blksize: u64, file_size: u64, sync: 
                         .unwrap();
                 }
                 BenchOp::Read => {
-                    ds.read_object(&ino_hdl, offset, blksize).await.unwrap();
+                    ds.read_object_zero_copy(&ino_hdl, offset, blksize)
+                        .await
+                        .unwrap();
                 }
             }
             ino_hdl
