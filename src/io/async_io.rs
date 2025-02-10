@@ -1,5 +1,6 @@
 use std::{
     io::{Error, ErrorKind, Result},
+    mem::size_of,
     os::fd::AsRawFd,
     ptr::{null_mut, slice_from_raw_parts},
     sync::{
@@ -59,7 +60,7 @@ unsafe fn io_submit(io_ctx: aio_context_t, iocbs: &[iocb]) -> Result<()> {
         let ret = libc::syscall(
             libc::SYS_io_submit,
             io_ctx,
-            iocbs.len() - nsubmitted,
+            1,
             iocb_ptrs.as_ptr().add(nsubmitted),
         );
         assert!(ret != 0);
@@ -302,8 +303,8 @@ impl AioReaper {
                 aio_ring.nr as usize,
             )
         };
-	let atomic_tail = unsafe { AtomicU32::from_ptr(&mut aio_ring.tail) };
-	let atomic_head = unsafe { AtomicU32::from_ptr(&mut aio_ring.head) };
+        let atomic_tail = unsafe { AtomicU32::from_ptr(&mut aio_ring.tail) };
+        let atomic_head = unsafe { AtomicU32::from_ptr(&mut aio_ring.head) };
 
         loop {
             self.eventfd.readable().await.unwrap().clear_ready();
