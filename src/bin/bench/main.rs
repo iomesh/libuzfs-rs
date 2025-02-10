@@ -21,7 +21,9 @@ async fn worker(obj: u64, ds: Arc<Dataset>, blksize: u64, file_size: u64, sync: 
                         .unwrap();
                 }
                 BenchOp::Read => {
-                    ds.read_object(&ino_hdl, offset, blksize).await.unwrap();
+                    ds.read_object_zero_copy(&ino_hdl, offset, blksize)
+                        .await
+                        .unwrap();
                 }
             }
             ino_hdl
@@ -60,6 +62,7 @@ async fn main() {
     uzfs_env_init().await;
     let dev_path = std::env::args().nth(1).unwrap();
     let sync: bool = std::env::args().nth(2).unwrap().parse().unwrap();
+    config_uzfs(4 << 30, 10);
     let concurrency = 64;
     let blksize = 1 << 20;
     let file_size = 1 << 30;

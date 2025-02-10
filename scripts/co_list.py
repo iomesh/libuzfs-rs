@@ -10,9 +10,11 @@ def print_backtrace(fp, stack_bottom, stack_id):
         gdb.execute("info symbol {}".format(func_addr))
         print("        ", end='')
         gdb.execute("info line *({})".format(func_addr))
-        if fp + 16 == stack_bottom:
+        if fp + 16 >= stack_bottom:
             break
         fp = gdb.parse_and_eval("*(uint64_t *)({})".format(fp))
+        if fp == 0:
+            break
         depth += 1
     print()
 
