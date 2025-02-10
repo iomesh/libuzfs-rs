@@ -577,6 +577,28 @@ pub unsafe extern "C" fn libuzfs_read_object_c(arg: *mut c_void) {
     }
 }
 
+pub struct ReadObjectZeroCopyArg {
+    pub ihp: *mut libuzfs_inode_handle_t,
+    pub offset: u64,
+    pub size: u64,
+
+    pub err: i32,
+    pub data: libuzfs_read_buf_t,
+}
+
+unsafe impl Send for ReadObjectZeroCopyArg {}
+unsafe impl Sync for ReadObjectZeroCopyArg {}
+
+pub unsafe extern "C" fn libuzfs_read_object_zero_copy_c(args: *mut c_void) {
+    let args = &mut *(args as *mut ReadObjectZeroCopyArg);
+    args.err = libuzfs_object_read_zero_copy(args.ihp, args.offset, args.size, &mut args.data);
+}
+
+pub unsafe extern "C" fn libuzfs_read_buf_rele_c(args: *mut c_void) {
+    let read_buf = args as *mut libuzfs_read_buf_t;
+    libuzfs_read_buf_rele(read_buf);
+}
+
 pub struct LibuzfsWriteObjectArg {
     pub ihp: *mut libuzfs_inode_handle_t,
     pub offset: u64,
