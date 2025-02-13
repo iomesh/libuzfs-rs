@@ -598,6 +598,11 @@ impl Dataset {
     }
 }
 
+pub enum WriteMode {
+    AppendToEnd,
+    OverwriteFrom(u64),
+}
+
 // object functions
 impl Dataset {
     pub async fn create_objects(&self, num_objs: usize) -> Result<(Vec<u64>, u64)> {
@@ -792,7 +797,7 @@ impl Dataset {
     pub async fn write_object(
         &self,
         ino_hdl: &InodeHandle,
-        offset: u64,
+        mode: WriteMode,
         sync: bool,
         data: Vec<&[u8]>,
     ) -> Result<()> {
@@ -809,7 +814,10 @@ impl Dataset {
             .collect();
         let mut arg = LibuzfsWriteObjectArg {
             ihp: ino_hdl.ihp,
-            offset,
+            offset: match mode {
+                WriteMode::AppendToEnd => u64::MAX,
+                WriteMode::OverwriteFrom(off) => off,
+            },
             iovs,
             sync,
             err: 0,

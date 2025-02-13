@@ -7,8 +7,10 @@ use crate::DatasetType;
 use crate::InodeType;
 use crate::KvSetOption;
 use crate::UzfsDentry;
+use crate::WriteMode;
 use crate::MAX_RESERVED_SIZE;
 use dashmap::DashMap;
+use futures::future::join_all;
 use nix::sys::wait::waitpid;
 use nix::sys::wait::WaitStatus;
 use nix::unistd::fork;
@@ -143,7 +145,7 @@ async fn uzfs_test() {
 
         let data = s.as_bytes();
         let size = s.len() as u64;
-        ds.write_object(&rwobj_hdl, 0, true, vec![data])
+        ds.write_object(&rwobj_hdl, WriteMode::OverwriteFrom(0), true, vec![data])
             .await
             .unwrap();
         assert_eq!(ds.get_object_attr(&rwobj_hdl).await.unwrap().size, size);
@@ -222,12 +224,17 @@ async fn uzfs_test() {
         let size = 1 << 18;
         let mut data = Vec::<u8>::with_capacity(size);
         data.resize(size, 1);
-        ds.write_object(&obj_hdl, 0, false, vec![&data])
+        ds.write_object(&obj_hdl, WriteMode::OverwriteFrom(0), false, vec![&data])
             .await
             .unwrap();
-        ds.write_object(&obj_hdl, (size * 2) as u64, false, vec![&data])
-            .await
-            .unwrap();
+        ds.write_object(
+            &obj_hdl,
+            WriteMode::OverwriteFrom((size * 2) as u64),
+            false,
+            vec![&data],
+        )
+        .await
+        .unwrap();
         ds.wait_synced().await;
         assert!(!ds
             .object_has_hole_in_range(&obj_hdl, 0, size as u64)
@@ -561,7 +568,12 @@ async fn uzfs_expand_test() {
             let mut obj_hdl = ds_clone.get_inode_handle(objs[0], gen, true).await.unwrap();
             while offset < size {
                 while ds_clone
-                    .write_object(&obj_hdl, offset, false, vec![&buf])
+                    .write_object(
+                        &obj_hdl,
+                        WriteMode::OverwriteFrom(offset),
+                        false,
+                        vec![&buf],
+                    )
                     .await
                     .is_err()
                 {
@@ -644,7 +656,12 @@ async fn uzfs_rangelock_test() {
                 buf_u16.resize(write_size, my_version);
                 let buf_u8 = unsafe { buf_u16.align_to::<u8>().1 };
                 ds_clone
-                    .write_object(&obj_hdl, offset as u64 * 2, false, vec![buf_u8])
+                    .write_object(
+                        &obj_hdl,
+                        WriteMode::OverwriteFrom(offset as u64 * 2),
+                        false,
+                        vec![buf_u8],
+                    )
                     .await
                     .unwrap();
             }
@@ -889,28 +906,28 @@ async fn test_reduce_max(dsname: &str, dev_path: &str) {
 
     // original max > blksize of obj0 > reduced max, but is not power of 2
     let data0 = vec![1; 3 << 9];
-    ds.write_object(&hdl0, 0, false, vec![&data0])
+    ds.write_object(&hdl0, WriteMode::OverwriteFrom(0), false, vec![&data0])
         .await
         .unwrap();
     let obj_attr0 = ds.get_object_attr(&hdl0).await.unwrap();
     assert_eq!(obj_attr0.blksize, data0.len() as u32);
     // original max > blksize of obj1 > reduced max, is power of 2
     let data1 = vec![1; 4 << 9];
-    ds.write_object(&hdl1, 0, false, vec![&data1])
+    ds.write_object(&hdl1, WriteMode::OverwriteFrom(0), false, vec![&data1])
         .await
         .unwrap();
     let blksize1 = ds.get_object_attr(&hdl1).await.unwrap().blksize;
     assert_eq!(blksize1, data1.len() as u32);
     // blksize of obj2 > original max > reduced max
     let data2 = vec![1; 9 << 9];
-    ds.write_object(&hdl2, 0, false, vec![&data2])
+    ds.write_object(&hdl2, WriteMode::OverwriteFrom(0), false, vec![&data2])
         .await
         .unwrap();
     let blksize2 = ds.get_object_attr(&hdl2).await.unwrap().blksize;
     assert_eq!(blksize2, 4096);
     // original max > reduced max > blksize of obj3
     let data3 = vec![1; 1 << 9];
-    ds.write_object(&hdl3, 0, false, vec![&data3])
+    ds.write_object(&hdl3, WriteMode::OverwriteFrom(0), false, vec![&data3])
         .await
         .unwrap();
     assert_eq!(
@@ -930,19 +947,34 @@ async fn test_reduce_max(dsname: &str, dev_path: &str) {
     let mut hdl1 = ds.get_inode_handle(objs[1], gen, true).await.unwrap();
     let mut hdl2 = ds.get_inode_handle(objs[2], gen, true).await.unwrap();
     let mut hdl3 = ds.get_inode_handle(objs[3], gen, true).await.unwrap();
-    ds.write_object(&hdl0, data0.len() as u64, false, vec![&data0])
-        .await
-        .unwrap();
+    ds.write_object(
+        &hdl0,
+        WriteMode::OverwriteFrom(data0.len() as u64),
+        false,
+        vec![&data0],
+    )
+    .await
+    .unwrap();
     assert_eq!(ds.get_object_attr(&hdl0).await.unwrap().blksize, 2048);
-    ds.write_object(&hdl1, data1.len() as u64, false, vec![&data1])
-        .await
-        .unwrap();
+    ds.write_object(
+        &hdl1,
+        WriteMode::OverwriteFrom(data1.len() as u64),
+        false,
+        vec![&data1],
+    )
+    .await
+    .unwrap();
     assert_eq!(ds.get_object_attr(&hdl1).await.unwrap().blksize, blksize1);
-    ds.write_object(&hdl2, data2.len() as u64, false, vec![&data2])
-        .await
-        .unwrap();
+    ds.write_object(
+        &hdl2,
+        WriteMode::OverwriteFrom(data2.len() as u64),
+        false,
+        vec![&data2],
+    )
+    .await
+    .unwrap();
     assert_eq!(ds.get_object_attr(&hdl2).await.unwrap().blksize, blksize2);
-    ds.write_object(&hdl3, 0, false, vec![&data2])
+    ds.write_object(&hdl3, WriteMode::OverwriteFrom(0), false, vec![&data2])
         .await
         .unwrap();
     assert_eq!(ds.get_object_attr(&hdl3).await.unwrap().blksize, 1024);
@@ -964,19 +996,19 @@ async fn test_increase_max(dsname: &str, dev_path: &str) {
     let mut hdl2 = ds.get_inode_handle(objs[2], gen, true).await.unwrap();
     // blksize of obj0 > increased max > original max
     let data0 = vec![1; 9 << 9];
-    ds.write_object(&hdl0, 0, false, vec![&data0])
+    ds.write_object(&hdl0, WriteMode::OverwriteFrom(0), false, vec![&data0])
         .await
         .unwrap();
     assert_eq!(ds.get_object_attr(&hdl0).await.unwrap().blksize, 1024);
     // increased max > blksize of obj1 > original max
     let data1 = vec![1; 3 << 9];
-    ds.write_object(&hdl1, 0, false, vec![&data1])
+    ds.write_object(&hdl1, WriteMode::OverwriteFrom(0), false, vec![&data1])
         .await
         .unwrap();
     assert_eq!(ds.get_object_attr(&hdl1).await.unwrap().blksize, 1024);
     // increased max > orignal max > blksize of obj2
     let data2 = vec![1; 1 << 9];
-    ds.write_object(&hdl2, 0, false, vec![&data2])
+    ds.write_object(&hdl2, WriteMode::OverwriteFrom(0), false, vec![&data2])
         .await
         .unwrap();
     assert_eq!(ds.get_object_attr(&hdl2).await.unwrap().blksize, 512);
@@ -991,17 +1023,32 @@ async fn test_increase_max(dsname: &str, dev_path: &str) {
     let mut hdl0 = ds.get_inode_handle(objs[0], gen, true).await.unwrap();
     let mut hdl1 = ds.get_inode_handle(objs[1], gen, true).await.unwrap();
     let mut hdl2 = ds.get_inode_handle(objs[2], gen, true).await.unwrap();
-    ds.write_object(&hdl0, data0.len() as u64, false, vec![&data0])
-        .await
-        .unwrap();
+    ds.write_object(
+        &hdl0,
+        WriteMode::OverwriteFrom(data0.len() as u64),
+        false,
+        vec![&data0],
+    )
+    .await
+    .unwrap();
     assert_eq!(ds.get_object_attr(&hdl0).await.unwrap().blksize, 1024);
-    ds.write_object(&hdl1, data1.len() as u64, false, vec![&data1])
-        .await
-        .unwrap();
+    ds.write_object(
+        &hdl1,
+        WriteMode::OverwriteFrom(data1.len() as u64),
+        false,
+        vec![&data1],
+    )
+    .await
+    .unwrap();
     assert_eq!(ds.get_object_attr(&hdl1).await.unwrap().blksize, 1024);
-    ds.write_object(&hdl2, data2.len() as u64, false, vec![&data0])
-        .await
-        .unwrap();
+    ds.write_object(
+        &hdl2,
+        WriteMode::OverwriteFrom(data2.len() as u64),
+        false,
+        vec![&data0],
+    )
+    .await
+    .unwrap();
     assert_eq!(ds.get_object_attr(&hdl2).await.unwrap().blksize, 4096);
     ds.release_inode_handle(&mut hdl0).await;
     ds.release_inode_handle(&mut hdl1).await;
@@ -1135,7 +1182,12 @@ fn uzfs_sync_test() {
                                 .await
                                 .unwrap();
                             ds_cloned
-                                .write_object(&obj_hdl, offset, sync, vec![&data])
+                                .write_object(
+                                    &obj_hdl,
+                                    WriteMode::OverwriteFrom(offset),
+                                    sync,
+                                    vec![&data],
+                                )
                                 .await
                                 .unwrap();
                             ds_cloned.release_inode_handle(&mut obj_hdl).await;
@@ -1202,9 +1254,14 @@ async fn uzfs_write_read_test() {
             handles.push(tokio::spawn(async move {
                 let data: Vec<_> = (0..blksize).map(|_| rand::thread_rng().gen()).collect();
                 let mut obj_hdl = ds.get_inode_handle(obj, u64::MAX, true).await.unwrap();
-                ds.write_object(&obj_hdl, offset as u64, false, vec![&data])
-                    .await
-                    .unwrap();
+                ds.write_object(
+                    &obj_hdl,
+                    WriteMode::OverwriteFrom(offset as u64),
+                    false,
+                    vec![&data],
+                )
+                .await
+                .unwrap();
                 let read = ds
                     .read_object(&obj_hdl, offset as u64, blksize as u64)
                     .await
@@ -1266,9 +1323,14 @@ async fn uzfs_truncate_test() {
                     let end_size = if rand::thread_rng().gen_bool(0.5) {
                         total_data[..data.len()].copy_from_slice(&data);
                         total_data[(truncate_size as usize)..].fill(0);
-                        ds.write_object(&mut obj_hdl, 0, false, vec![&data])
-                            .await
-                            .unwrap();
+                        ds.write_object(
+                            &mut obj_hdl,
+                            WriteMode::OverwriteFrom(0),
+                            false,
+                            vec![&data],
+                        )
+                        .await
+                        .unwrap();
                         ds.truncate_object(&mut obj_hdl, 0, truncate_size)
                             .await
                             .unwrap();
@@ -1279,7 +1341,7 @@ async fn uzfs_truncate_test() {
                         ds.truncate_object(&mut obj_hdl, 0, truncate_size)
                             .await
                             .unwrap();
-                        ds.write_object(&obj_hdl, 0, false, vec![&data])
+                        ds.write_object(&obj_hdl, WriteMode::OverwriteFrom(0), false, vec![&data])
                             .await
                             .unwrap();
                         std::cmp::max(write_size, truncate_size)
@@ -1339,12 +1401,22 @@ async fn next_block_test() {
     let obj = ds.create_objects(1).await.unwrap().0[0];
     let mut ino_hdl = ds.get_inode_handle(obj, u64::MAX, true).await.unwrap();
     let data = vec![1; 65536];
-    ds.write_object(&ino_hdl, 65536, false, vec![&data])
-        .await
-        .unwrap();
-    ds.write_object(&ino_hdl, 262144, false, vec![&data])
-        .await
-        .unwrap();
+    ds.write_object(
+        &ino_hdl,
+        WriteMode::OverwriteFrom(65536),
+        false,
+        vec![&data],
+    )
+    .await
+    .unwrap();
+    ds.write_object(
+        &ino_hdl,
+        WriteMode::OverwriteFrom(262144),
+        false,
+        vec![&data],
+    )
+    .await
+    .unwrap();
 
     ds.wait_synced().await;
     let (off, size) = ds.object_next_block(&ino_hdl, 0).await.unwrap().unwrap();
@@ -1429,6 +1501,64 @@ async fn dentry_test() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn append_write_test() {
+    let dsname = "append_write_test/ds";
+    let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+    uzfs_env_init().await;
+    let ds = Arc::new(
+        Dataset::init(
+            dsname,
+            uzfs_test_env.get_dev_path(),
+            DatasetType::Data,
+            0,
+            false,
+        )
+        .await
+        .unwrap(),
+    );
+
+    let concurrency = 16;
+    let blksize = 64 << 10;
+    let ncalls = 32;
+
+    let obj = ds.create_objects(1).await.unwrap().0[0];
+    let handles: Vec<_> = (0..concurrency)
+        .map(|i| {
+            let ds = ds.clone();
+            tokio::spawn(async move {
+                let data = vec![i as u8; blksize];
+                let mut ino_hdl = ds.get_inode_handle(obj, u64::MAX, true).await.unwrap();
+                for _ in 0..ncalls {
+                    ds.write_object(&ino_hdl, WriteMode::AppendToEnd, false, vec![&data])
+                        .await
+                        .unwrap();
+                }
+                ds.release_inode_handle(&mut ino_hdl).await;
+            })
+        })
+        .collect();
+
+    join_all(handles).await;
+
+    let mut ino_hdl = ds.get_inode_handle(obj, u64::MAX, true).await.unwrap();
+    let size = ds.get_object_attr(&ino_hdl).await.unwrap().size;
+    assert_eq!(size, concurrency * blksize as u64 * ncalls);
+    for i in 0..(concurrency * ncalls) {
+        let data = ds
+            .read_object(&ino_hdl, i * blksize as u64, blksize as u64)
+            .await
+            .unwrap();
+        for byte in &data {
+            assert_eq!(byte, &data[0]);
+        }
+    }
+    ds.release_inode_handle(&mut ino_hdl).await;
+
+    ds.close().await.unwrap();
+    uzfs_env_fini().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn read_zero_copy_test() {
     let dsname = "read_zero_copy_test/ds";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
@@ -1458,7 +1588,7 @@ async fn read_zero_copy_test() {
                     let off = thread_rng().gen_range(0..65536);
                     let size = thread_rng().gen_range(16384..65536);
                     let buf = vec![123; size];
-                    ds.write_object(&ino_hdl, off, false, vec![&buf])
+                    ds.write_object(&ino_hdl, WriteMode::OverwriteFrom(off), false, vec![&buf])
                         .await
                         .unwrap();
                     let read_buf = ds
