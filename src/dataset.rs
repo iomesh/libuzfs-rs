@@ -248,6 +248,10 @@ impl ReadBufReleaser {
 
         let stop_cloned = stop.clone();
         let (sender, mut receiver) = unbounded_channel::<ReadBuf>();
+
+	#[cfg(test)]
+	let _guard = crate::context::coroutine_c::enter_background_rt();
+
         let handle = tokio::spawn(async move {
             loop {
                 let mut bufs = Vec::with_capacity(256);

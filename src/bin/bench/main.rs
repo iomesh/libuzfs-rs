@@ -67,12 +67,13 @@ async fn main() {
     uzfs_env_init().await;
     let dev_path = std::env::args().nth(1).unwrap();
     let sync: bool = std::env::args().nth(2).unwrap().parse().unwrap();
-    let concurrency = 48;
+    let concurrency = 10;
     let blksize = 1 << 20;
-    let file_size = 1 << 30;
+    let file_size = 10 << 30;
+    config_uzfs(8 << 30, 10, true);
 
     let ds = Arc::new(
-        Dataset::init("testzp/ds", &dev_path, DatasetType::Data, 0, false)
+        Dataset::init("testzp/ds", &dev_path, DatasetType::Data, 1 << 20, false)
             .await
             .unwrap(),
     );
@@ -80,6 +81,7 @@ async fn main() {
     let objs = ds.create_objects(concurrency).await.unwrap().0;
 
     bench(&objs, ds.clone(), blksize, file_size, sync, BenchOp::Write).await;
+    ds.wait_synced().await;
     bench(&objs, ds.clone(), blksize, file_size, sync, BenchOp::Read).await;
 
     for obj in objs {
