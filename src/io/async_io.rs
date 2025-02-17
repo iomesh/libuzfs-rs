@@ -1,6 +1,3 @@
-use super::aio::*;
-use crate::context::coroutine::CoroutineFuture;
-use libc::{c_char, c_int, c_void, timespec};
 use std::{
     io::{Error, ErrorKind},
     ptr::null_mut,
@@ -8,13 +5,18 @@ use std::{
         atomic::{fence, AtomicBool, AtomicPtr, Ordering},
         Arc, Condvar, Mutex,
     },
-    thread::JoinHandle,
 };
-use tokio::runtime::Handle;
+
+use libc::{c_char, c_int, c_void, timespec};
+use tokio::task::yield_now;
+
+use crate::context::coroutine::CoroutineFuture;
+
+use super::aio::*;
 
 type DoneFunc = unsafe extern "C" fn(arg: *mut libc::c_void, res: i64);
 type InitArgsFunc =
-    unsafe extern "C" fn(*mut c_void, *mut u64, *mut *mut c_char, *mut usize) -> c_int;
+    unsafe extern "C" fn(*mut c_void, *mut u64, *mut *mut c_char, *mut usize, *mut c_int) -> c_int;
 
 #[inline]
 unsafe fn io_setup(nr_events: i64) -> Result<aio_context_t, Error> {
@@ -123,17 +125,15 @@ pub(super) struct TaskList {
     sem: Semaphore,
     next_off: usize,
     init_io_arg: InitArgsFunc,
-    io_fd: i32,
 }
 
 impl TaskList {
-    pub(super) fn new_arc(next_off: usize, init_io_arg: InitArgsFunc, io_fd: i32) -> Arc<Self> {
+    pub(super) fn new_arc(next_off: usize, init_io_arg: InitArgsFunc) -> Arc<Self> {
         Arc::new(Self {
             head: AtomicPtr::new(null_mut()),
             sem: Semaphore::new(0),
             next_off,
             init_io_arg,
-            io_fd,
         })
     }
 
@@ -179,7 +179,8 @@ impl TaskList {
             let mut off = 0;
             let mut data = null_mut();
             let mut len = 0;
-            let io_type = (self.init_io_arg)(cur, &mut off, &mut data, &mut len);
+            let mut fd = 0;
+            let io_type = (self.init_io_arg)(cur, &mut off, &mut data, &mut len, &mut fd);
 
             let opcode = match io_type {
                 AIO_READ => IOCB_CMD_PREAD,
@@ -194,7 +195,7 @@ impl TaskList {
                 aio_rw_flags: 0,
                 aio_lio_opcode: opcode as u16,
                 aio_reqprio: 0,
-                aio_fildes: self.io_fd as u32,
+                aio_fildes: fd as u32,
                 aio_buf: data as u64,
                 aio_nbytes: len as u64,
                 aio_offset: off as i64,
@@ -236,8 +237,8 @@ unsafe extern "C" fn process_completion(arg: *mut libc::c_void) {
 
 pub(super) struct AioContext {
     pub(super) task_list: Arc<TaskList>,
-    reaper: Option<JoinHandle<()>>,
-    submitter: Option<JoinHandle<()>>,
+    reaper: tokio::task::JoinHandle<()>,
+    submitter: std::thread::JoinHandle<()>,
     stop: Arc<AtomicBool>,
     io_ctx: aio_context_t,
 }
@@ -252,12 +253,7 @@ impl AioContext {
         }
     }
 
-    pub fn reap(
-        io_ctx: aio_context_t,
-        stop: Arc<AtomicBool>,
-        handle: Handle,
-        io_done: DoneFunc,
-    ) -> Result<(), Error> {
+    pub async fn reap(io_ctx: aio_context_t, stop: Arc<AtomicBool>, io_done: DoneFunc) {
         while !stop.load(Ordering::Acquire) {
             let mut ts = timespec {
                 tv_sec: 0,
@@ -277,67 +273,59 @@ impl AioContext {
             };
 
             if ret > 0 {
-                handle.block_on(async move {
-                    unsafe { completions.set_len(ret as usize) };
-                    let mut completions = IoCompletions {
-                        completions,
-                        io_done,
-                    };
-                    let arg = &mut completions as *mut _ as usize;
-                    CoroutineFuture::new(process_completion, arg).await;
-                });
-                continue;
+                unsafe { completions.set_len(ret as usize) };
+                let mut completions = IoCompletions {
+                    completions,
+                    io_done,
+                };
+                let arg = &mut completions as *mut _ as usize;
+                CoroutineFuture::new(process_completion, arg).await;
+            } else if ret < 0 {
+                let err = Error::last_os_error();
+                if err.kind() != ErrorKind::Interrupted
+                    && err.kind() != ErrorKind::WouldBlock
+                    && err.kind() != ErrorKind::TimedOut
+                {
+                    panic!("unexpected error when reaping complted ios {err}");
+                }
             }
 
-            if ret == 0 {
-                continue;
-            }
-
-            let err = Error::last_os_error();
-            if err.kind() != ErrorKind::Interrupted
-                && err.kind() != ErrorKind::WouldBlock
-                && err.kind() != ErrorKind::TimedOut
-            {
-                return Err(err);
-            }
+            yield_now().await;
         }
-
-        Ok(())
     }
 
     pub(super) fn start(
-        io_fd: i32,
         io_done: DoneFunc,
         next_off: usize,
         init_io_args: InitArgsFunc,
     ) -> Result<Self, Error> {
-        let io_ctx = unsafe { io_setup(256)? };
-        let task_list = TaskList::new_arc(next_off, init_io_args, io_fd);
+        let io_ctx = unsafe { io_setup(MAX_EVENTS as i64)? };
+        let task_list = TaskList::new_arc(next_off, init_io_args);
         let task_list_cloned = task_list.clone();
         let submitter = std::thread::spawn(move || Self::submit(task_list_cloned, io_ctx));
         let stop = Arc::new(AtomicBool::new(false));
         let stop_cloned = stop.clone();
-        let handle = Handle::current();
-        let reaper = std::thread::spawn(move || {
-            Self::reap(io_ctx, stop_cloned, handle, io_done).unwrap();
-        });
+
+        #[cfg(test)]
+        let _guard = crate::context::coroutine_c::enter_background_rt();
+
+        let reaper = tokio::spawn(Self::reap(io_ctx, stop_cloned, io_done));
+
         Ok(Self {
             task_list: task_list,
-            reaper: Some(reaper),
-            submitter: Some(submitter),
+            reaper,
+            submitter,
             stop,
             io_ctx,
         })
     }
-}
 
-impl Drop for AioContext {
-    fn drop(&mut self) {
+    pub(super) async fn exit(self) {
         self.stop.store(true, Ordering::Release);
         self.task_list.close();
         fence(Ordering::SeqCst);
-        self.submitter.take().unwrap().join().unwrap();
-        self.reaper.take().unwrap().join().unwrap();
+        self.submitter.join().unwrap();
+        self.reaper.await.unwrap();
         unsafe { io_destroy(self.io_ctx).unwrap() }
     }
 }

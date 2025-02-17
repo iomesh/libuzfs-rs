@@ -1,4 +1,5 @@
 use std::{sync::Arc, time::Instant};
+
 use uzfs::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -26,7 +27,7 @@ async fn worker(obj: u64, ds: Arc<Dataset>, blksize: u64, file_size: u64, sync: 
                     .unwrap();
                 }
                 BenchOp::Read => {
-                    ds.read_object_zero_copy(&ino_hdl, offset, blksize)
+                    ds.read_object(&ino_hdl, offset, blksize)
                         .await
                         .unwrap();
                 }
@@ -62,14 +63,14 @@ async fn bench(
     println!("{op:?} throughput: {throughput}MB/s");
 }
 
-#[tokio::main]
-async fn main() {
+async fn bench_main() {
     uzfs_env_init().await;
     let dev_path = std::env::args().nth(1).unwrap();
     let sync: bool = std::env::args().nth(2).unwrap().parse().unwrap();
-    let concurrency = 48;
+    let concurrency = 10;
     let blksize = 1 << 20;
-    let file_size = 1 << 30;
+    let file_size = 10 << 30;
+    config_uzfs(8 << 30, 10, true);
 
     let ds = Arc::new(
         Dataset::init("testzp/ds", &dev_path, DatasetType::Data, 0, false)
@@ -80,6 +81,7 @@ async fn main() {
     let objs = ds.create_objects(concurrency).await.unwrap().0;
 
     bench(&objs, ds.clone(), blksize, file_size, sync, BenchOp::Write).await;
+    ds.wait_synced().await;
     bench(&objs, ds.clone(), blksize, file_size, sync, BenchOp::Read).await;
 
     for obj in objs {
@@ -90,4 +92,13 @@ async fn main() {
 
     ds.close().await.unwrap();
     uzfs_env_fini().await;
+}
+
+fn main() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(9)
+        .build()
+        .unwrap();
+    rt.block_on(bench_main());
 }

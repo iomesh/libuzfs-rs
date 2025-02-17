@@ -80,8 +80,8 @@ pub(crate) unsafe fn set_libuzfs_ops(log_func: Option<unsafe extern "C" fn(*cons
     };
 
     let aio_ops = aio_ops {
-        register_aio_fd: Some(register_fd),
-        unregister_aio_fd: Some(unregister_fd),
+        aio_init: Some(aio_init),
+        aio_fini: Some(aio_fini),
         submit_aio: Some(submit_aio),
     };
 

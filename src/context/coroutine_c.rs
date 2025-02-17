@@ -1,10 +1,13 @@
-use super::coroutine::CoroutineFuture;
-use crate::bindings::sys;
+use std::time::Duration;
+
 use dashmap::DashMap;
 use libc::c_void;
 use once_cell::sync::OnceCell;
-use std::time::Duration;
-use tokio::runtime::{EnterGuard, Handle, Runtime};
+use tokio::runtime::Handle;
+
+use crate::bindings::sys;
+
+use super::coroutine::CoroutineFuture;
 
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn co_sched_yield() {
@@ -54,9 +57,9 @@ const TS_JOINABLE: i32 = 0x00000004;
 const TS_BLOCKING: i32 = 0x00000008;
 
 static ID_TASK_HANDLE_MAP: OnceCell<DashMap<u64, tokio::task::JoinHandle<()>>> = OnceCell::new();
-static BACKGROUND_RT: OnceCell<Runtime> = OnceCell::new();
+static BACKGROUND_RT: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
 
-fn enter_background_rt<'a>() -> EnterGuard<'a> {
+pub(crate) fn enter_background_rt<'a>() -> tokio::runtime::EnterGuard<'a> {
     let rt = BACKGROUND_RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
