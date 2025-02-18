@@ -80,11 +80,9 @@ pub(crate) unsafe fn set_libuzfs_ops(log_func: Option<unsafe extern "C" fn(*cons
     };
 
     let aio_ops = aio_ops {
-        register_aio_fd: Some(register_fd),
-        unregister_aio_fd: Some(unregister_fd),
-        submit_aio_read: Some(submit_read),
-        submit_aio_write: Some(submit_write),
-        submit_aio_fsync: Some(submit_fsync),
+        aio_init: Some(aio_init),
+        aio_fini: Some(aio_fini),
+        submit_aio: Some(submit_aio),
     };
 
     let thread_ops = thread_ops {
@@ -530,6 +528,28 @@ pub unsafe extern "C" fn libuzfs_read_object_c(arg: *mut c_void) {
     } else {
         arg.err = -rc;
     }
+}
+
+pub struct ReadObjectZeroCopyArg {
+    pub ihp: *mut libuzfs_inode_handle_t,
+    pub offset: u64,
+    pub size: u64,
+
+    pub err: i32,
+    pub data: libuzfs_read_buf_t,
+}
+
+unsafe impl Send for ReadObjectZeroCopyArg {}
+unsafe impl Sync for ReadObjectZeroCopyArg {}
+
+pub unsafe extern "C" fn libuzfs_read_object_zero_copy_c(args: *mut c_void) {
+    let args = &mut *(args as *mut ReadObjectZeroCopyArg);
+    args.err = libuzfs_object_read_zero_copy(args.ihp, args.offset, args.size, &mut args.data);
+}
+
+pub unsafe extern "C" fn libuzfs_read_buf_rele_c(args: *mut c_void) {
+    let read_buf = args as *mut libuzfs_read_buf_t;
+    libuzfs_read_buf_rele(read_buf);
 }
 
 pub struct LibuzfsWriteObjectArg {
