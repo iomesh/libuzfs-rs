@@ -582,6 +582,28 @@ impl Dataset {
         CoroutineFuture::new(libuzfs_inode_handle_rele_c, ino_hdl.ihp as usize).await;
         ino_hdl.ihp = null_mut();
     }
+
+    pub async fn get_inode_handle_and_run<T, F, Fut>(
+        &self,
+        ino: u64,
+        gen: u64,
+        is_data_inode: bool,
+        f: F,
+    ) -> Result<T>
+    where
+        F: FnOnce(&'static mut InodeHandle) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let mut handle = self.get_inode_handle(ino, gen, is_data_inode).await?;
+        let handle_ref = unsafe {
+            std::mem::transmute::<&mut InodeHandle, &'static mut InodeHandle>(&mut handle)
+        };
+
+        //Note: The life cycle of a closure must end before release_inode_handle is called.
+        let res = f(handle_ref).await;
+        self.release_inode_handle(&mut handle).await;
+        res
+    }
 }
 
 // zap functions
