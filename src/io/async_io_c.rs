@@ -1,11 +1,16 @@
-use super::async_io::{AioCallback, AioContext, IoContent, IoType};
+use crate::bindings::sys::{aio_done_func_t, init_io_args_func_t};
+
+use super::async_io::AioContext;
 
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn register_fd(
     fd: i32,
-    cb: Option<unsafe extern "C" fn(arg: *mut libc::c_void, res: i64)>,
+    next_off: usize,
+    io_done: aio_done_func_t,
+    init_io_args: init_io_args_func_t,
 ) -> *mut libc::c_void {
-    let aio_context = Box::new(AioContext::start(fd, cb.unwrap()).unwrap());
+    let aio_context =
+        Box::new(AioContext::start(fd, io_done.unwrap(), next_off, init_io_args.unwrap()).unwrap());
     Box::into_raw(aio_context) as *mut libc::c_void
 }
 
@@ -15,63 +20,7 @@ pub unsafe extern "C" fn unregister_fd(aio_hdl: *mut libc::c_void) {
 }
 
 #[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn submit_read(
-    aio_hdl: *const libc::c_void,
-    offset: u64,
-    buf: *mut i8,
-    size: u64,
-    arg: *mut libc::c_void,
-) {
+pub unsafe extern "C" fn submit_aio(aio_hdl: *const libc::c_void, arg: *mut libc::c_void) {
     let aio_hdl = &*(aio_hdl as *const AioContext);
-    let io_content = IoContent {
-        data_ptr: buf as usize,
-        offset,
-        size,
-    };
-    aio_hdl
-        .sender
-        .send(AioCallback {
-            io_type: IoType::Read,
-            io_content,
-            arg,
-        })
-        .unwrap();
-}
-
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn submit_write(
-    aio_hdl: *const libc::c_void,
-    offset: u64,
-    buf: *const i8,
-    size: u64,
-    arg: *mut libc::c_void,
-) {
-    let aio_hdl = &*(aio_hdl as *const AioContext);
-    let io_content = IoContent {
-        data_ptr: buf as usize,
-        offset,
-        size,
-    };
-    aio_hdl
-        .sender
-        .send(AioCallback {
-            io_type: IoType::Write,
-            io_content,
-            arg,
-        })
-        .unwrap();
-}
-
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn submit_fsync(aio_hdl: *const libc::c_void, arg: *mut libc::c_void) {
-    let aio_hdl = &*(aio_hdl as *const AioContext);
-    let io_content = IoContent::default();
-    aio_hdl
-        .sender
-        .send(AioCallback {
-            io_type: IoType::Sync,
-            io_content,
-            arg,
-        })
-        .unwrap();
+    aio_hdl.task_list.push(arg);
 }
