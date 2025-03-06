@@ -1,5 +1,5 @@
 use crate::bindings::sys::*;
-use std::{ptr::NonNull, time::Duration};
+use std::ptr::NonNull;
 
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn co_mutex_held(mutex: *mut Mutex) -> i32 {
@@ -60,8 +60,13 @@ pub unsafe extern "C" fn co_cond_timedwait(
     duration: *const timespec,
 ) -> i32 {
     let duration = &*duration;
-    let duration = Duration::new(duration.tv_sec as u64, duration.tv_nsec as u32);
-    if (*cond).wait_timeout(NonNull::new_unchecked(mutex), duration) {
+    if (*cond).wait_timeout(
+        NonNull::new_unchecked(mutex),
+        libc::timespec {
+            tv_sec: duration.tv_sec,
+            tv_nsec: duration.tv_nsec,
+        },
+    ) {
         0
     } else {
         libc::ETIMEDOUT

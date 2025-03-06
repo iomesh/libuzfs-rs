@@ -15,6 +15,7 @@ use crate::bindings::async_sys::*;
 use crate::bindings::sys::*;
 use crate::context::coroutine::CoroutineFuture;
 use crate::metrics::{RequestMethod, UzfsMetrics};
+use crate::time::init_timer;
 
 pub const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
 
@@ -81,6 +82,7 @@ pub async fn uzfs_env_init() {
     let mut guard = UZFS_INIT_REF.get_or_init(|| Mutex::new(0)).lock().await;
 
     if *guard == 0 {
+        init_timer();
         unsafe { set_libuzfs_ops(Some(print_log)) };
         CoroutineFuture::new(libuzfs_init_c, 0).await;
     }

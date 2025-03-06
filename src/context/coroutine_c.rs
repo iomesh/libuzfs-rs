@@ -1,9 +1,8 @@
 use super::coroutine::CoroutineFuture;
-use crate::bindings::sys;
+use crate::{bindings::sys, time::sleep};
 use dashmap::DashMap;
 use libc::c_void;
 use once_cell::sync::OnceCell;
-use std::time::Duration;
 use tokio::runtime::{EnterGuard, Handle, Runtime};
 
 #[allow(clippy::missing_safety_doc)]
@@ -43,8 +42,10 @@ pub unsafe extern "C" fn co_self() -> u64 {
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn co_sleep(duration: *const sys::timespec) {
     let duration = &*duration;
-    let duration = Duration::new(duration.tv_sec as u64, duration.tv_nsec as u32);
-    CoroutineFuture::poll_until_ready(tokio::time::sleep(duration));
+    CoroutineFuture::poll_until_ready(sleep(libc::timespec {
+        tv_sec: duration.tv_sec,
+        tv_nsec: duration.tv_nsec,
+    }));
 }
 
 // const TS_RUN: i32 = 0x00000002;
@@ -56,7 +57,7 @@ const TS_BLOCKING: i32 = 0x00000008;
 static ID_TASK_HANDLE_MAP: OnceCell<DashMap<u64, tokio::task::JoinHandle<()>>> = OnceCell::new();
 static BACKGROUND_RT: OnceCell<Runtime> = OnceCell::new();
 
-fn enter_background_rt<'a>() -> EnterGuard<'a> {
+pub(crate) fn enter_background_rt<'a>() -> EnterGuard<'a> {
     let rt = BACKGROUND_RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()

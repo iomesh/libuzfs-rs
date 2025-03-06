@@ -1,5 +1,6 @@
 use crate::bindings::sys::*;
 use crate::context::coroutine::CoroutineFuture;
+use crate::time::timeout;
 use futures::Future;
 use std::hint;
 use std::pin::Pin;
@@ -7,8 +8,6 @@ use std::ptr::null_mut;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::task::{Context, Poll, Waker};
-use std::time::Duration;
-use tokio::time::timeout;
 
 #[repr(C)]
 struct WaiterNode {
@@ -223,11 +222,11 @@ impl Futex {
     pub(crate) unsafe fn wait_until(
         &mut self,
         expected_value: u32,
-        duration: Option<Duration>,
+        duration: Option<libc::timespec>,
     ) -> bool {
         let waiter = self.wait(expected_value);
         if let Some(duration) = duration {
-            CoroutineFuture::poll_until_ready(timeout(duration, waiter)).is_ok()
+            CoroutineFuture::poll_until_ready(timeout(duration, waiter)).is_some()
         } else {
             CoroutineFuture::poll_until_ready(waiter);
             true

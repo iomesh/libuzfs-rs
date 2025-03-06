@@ -18,8 +18,8 @@
 // Modifications made by IOMesh Inc in 2024.
 
 use crate::bindings::sys::*;
+use std::ptr::NonNull;
 use std::sync::atomic::Ordering::*;
-use std::{ptr::NonNull, time::Duration};
 
 impl CondVar {
     // All the memory orderings here are `Relaxed`,
@@ -45,14 +45,14 @@ impl CondVar {
     }
 
     #[allow(clippy::missing_safety_doc)]
-    pub unsafe fn wait_timeout(&mut self, mutex: NonNull<Mutex>, duration: Duration) -> bool {
+    pub unsafe fn wait_timeout(&mut self, mutex: NonNull<Mutex>, duration: libc::timespec) -> bool {
         self.wait_optional_timeout(mutex, Some(duration))
     }
 
     unsafe fn wait_optional_timeout(
         &mut self,
         mut mutex: NonNull<Mutex>,
-        duration: Option<Duration>,
+        duration: Option<libc::timespec>,
     ) -> bool {
         // Examine the notification counter _before_ we unlock the mutex.
         let futex_value = self.futex.value().load(Relaxed);

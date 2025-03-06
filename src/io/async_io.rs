@@ -323,7 +323,7 @@ impl AioContext {
             Self::reap(io_ctx, stop_cloned, handle, io_done).unwrap();
         });
         Ok(Self {
-            task_list: task_list,
+            task_list,
             reaper: Some(reaper),
             submitter: Some(submitter),
             stop,

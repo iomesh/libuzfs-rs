@@ -7,3 +7,4 @@ pub mod metrics;
 pub(crate) mod sync;
 #[cfg(test)]
 mod tests;
+pub(crate) mod time;
