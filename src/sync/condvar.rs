@@ -18,8 +18,9 @@
 // Modifications made by IOMesh Inc in 2024.
 
 use crate::bindings::sys::*;
+use std::ptr::NonNull;
 use std::sync::atomic::Ordering::*;
-use std::{ptr::NonNull, time::Duration};
+use std::time::Duration;
 
 impl CondVar {
     // All the memory orderings here are `Relaxed`,

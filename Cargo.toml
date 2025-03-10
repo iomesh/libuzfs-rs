@@ -23,6 +23,8 @@ prometheus-client = { git = "https://github.com/iomesh/client_rust.git", tag = "
 strum = "0.26.2"
 strum_macros = "0.26.4"
 crossbeam-utils = "0.8.20"
+timerfd = "1.6.0"
+pin-project = "1.0.12"
 
 [dev-dependencies]
 tokio-test = "0.4.2"
