@@ -1,5 +1,6 @@
 mod dataset_tests;
 mod sync_tests;
+mod timer_tests;
 
 #[cfg(test)]
 pub struct UzfsTestEnv {

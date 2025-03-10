@@ -53,6 +53,8 @@ unsafe fn io_submit(io_ctx: aio_context_t, iocbs: &[iocb]) -> Result<(), Error> 
         let ret = libc::syscall(
             libc::SYS_io_submit,
             io_ctx,
+            // Logically, batch submissions should offer better performance here;
+            // however, testing revealed that single submissions perform better.
             1,
             iocb_ptrs.as_ptr().add(nsubmitted),
         );
@@ -247,13 +249,13 @@ const MAX_EVENTS: usize = 4096;
 const MAX_IDLE_MILLS: u64 = 10;
 
 impl AioContext {
-    pub(super) fn submit(task_list: Arc<TaskList>, io_ctx: aio_context_t) {
+    fn submit(task_list: Arc<TaskList>, io_ctx: aio_context_t) {
         while let Some(tasks) = unsafe { task_list.pop_all() } {
             unsafe { io_submit(io_ctx, &tasks).unwrap() };
         }
     }
 
-    pub fn reap(
+    fn reap(
         io_ctx: aio_context_t,
         stop: Arc<AtomicBool>,
         handle: Handle,
@@ -323,7 +325,7 @@ impl AioContext {
             Self::reap(io_ctx, stop_cloned, handle, io_done).unwrap();
         });
         Ok(Self {
-            task_list: task_list,
+            task_list,
             reaper: Some(reaper),
             submitter: Some(submitter),
             stop,
