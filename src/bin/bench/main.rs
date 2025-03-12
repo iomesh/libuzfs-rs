@@ -1,3 +1,5 @@
+use std::io::Result;
+use std::ops::Deref;
 use std::{sync::Arc, time::Instant};
 use uzfs::*;
 
@@ -7,7 +9,14 @@ enum BenchOp {
     Read,
 }
 
-async fn worker(obj: u64, ds: Arc<Dataset>, blksize: u64, file_size: u64, sync: bool, op: BenchOp) {
+async fn worker(
+    obj: u64,
+    ds: Arc<DatasetWrapper>,
+    blksize: u64,
+    file_size: u64,
+    sync: bool,
+    op: BenchOp,
+) {
     let mut offset = 0;
     let mut ino_hdl = ds.get_inode_handle(obj, u64::MAX, true).await.unwrap();
     while offset < file_size {
@@ -35,7 +44,7 @@ async fn worker(obj: u64, ds: Arc<Dataset>, blksize: u64, file_size: u64, sync: 
 
 async fn bench(
     objs: &[u64],
-    ds: Arc<Dataset>,
+    ds: Arc<DatasetWrapper>,
     blksize: u64,
     file_size: u64,
     sync: bool,
@@ -55,6 +64,26 @@ async fn bench(
     println!("{op:?} throughput: {throughput}MB/s");
 }
 
+struct DatasetWrapper(Dataset);
+
+impl FileSystem for DatasetWrapper {
+    async fn init(ds: Dataset, _fsid: u32, _poolname: &str) -> Result<Self> {
+        Ok(Self(ds))
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        self.0.close().await;
+        Ok(())
+    }
+}
+
+impl Deref for DatasetWrapper {
+    type Target = Dataset;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 #[tokio::main]
 async fn main() {
     uzfs_env_init().await;
@@ -64,11 +93,14 @@ async fn main() {
     let blksize = 1 << 20;
     let file_size = 1 << 30;
 
-    let ds = Arc::new(
-        Dataset::init("testzp/ds", &dev_path, DatasetType::Data, 0, false)
-            .await
-            .unwrap(),
-    );
+    let mut zp = ZpoolOpenOptions::new(ZpoolType::Data)
+        .create(true)
+        .open::<DatasetWrapper>("testzp", &[&dev_path])
+        .await
+        .unwrap();
+
+    zp.create_filesystem(0).await.unwrap();
+    let ds = zp.get_filesystem(0).unwrap();
 
     let objs = ds.create_objects(concurrency).await.unwrap().0;
 
@@ -81,6 +113,6 @@ async fn main() {
         ds.release_inode_handle(&mut obj_hdl).await;
     }
 
-    ds.close().await.unwrap();
+    zp.close().await;
     uzfs_env_fini().await;
 }

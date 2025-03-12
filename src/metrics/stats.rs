@@ -4,7 +4,7 @@ use once_cell::sync::OnceCell;
 use std::{ffi::CStr, sync::Arc, time::Duration};
 
 use crate::{
-    bindings::async_sys::{libuzfs_show_stats_c, LibuzfsShowStatsArgs},
+    bindings::async_sys::{libuzfs_show_stats_c, ShowStatsArgs},
     context::coroutine::CoroutineFuture,
 };
 
@@ -46,7 +46,7 @@ pub async fn show_stat(name: &str) -> Option<String> {
             let stat = v.value().clone();
             drop(v);
             let (stat_ptr, stat_type) = stat.0;
-            let mut arg = LibuzfsShowStatsArgs {
+            let mut arg = ShowStatsArgs {
                 stat_ptr: stat_ptr as *mut c_void,
                 stat_type,
                 formatted_strings: Vec::new(),
