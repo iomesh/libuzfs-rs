@@ -1,23 +1,29 @@
-use super::aio::*;
-use crate::context::coroutine::CoroutineFuture;
-use libc::{c_char, c_int, c_void, timespec};
 use std::{
-    io::{Error, ErrorKind},
-    ptr::null_mut,
+    io::{Error, ErrorKind, Result},
+    os::fd::AsRawFd,
+    ptr::{null_mut, slice_from_raw_parts},
     sync::{
-        atomic::{fence, AtomicBool, AtomicPtr, Ordering},
+        atomic::{fence, AtomicPtr, AtomicU32, Ordering},
         Arc, Condvar, Mutex,
     },
-    thread::JoinHandle,
+    thread,
 };
-use tokio::runtime::Handle;
+
+use libc::{c_char, c_int, c_void};
+use tokio::{
+    io::{unix::AsyncFd, Interest},
+    task::JoinHandle,
+};
+
+use super::aio::*;
+use crate::context::coroutine::CoroutineFuture;
 
 type DoneFunc = unsafe extern "C" fn(arg: *mut libc::c_void, res: i64);
 type InitArgsFunc =
     unsafe extern "C" fn(*mut c_void, *mut u64, *mut *mut c_char, *mut usize) -> c_int;
 
 #[inline]
-unsafe fn io_setup(nr_events: i64) -> Result<aio_context_t, Error> {
+unsafe fn io_setup(nr_events: i64) -> Result<aio_context_t> {
     let mut io_ctx: aio_context_t = 0;
     let res = libc::syscall(
         libc::SYS_io_setup,
@@ -33,7 +39,7 @@ unsafe fn io_setup(nr_events: i64) -> Result<aio_context_t, Error> {
 }
 
 #[inline]
-unsafe fn io_destroy(io_ctx: aio_context_t) -> Result<(), Error> {
+unsafe fn io_destroy(io_ctx: aio_context_t) -> Result<()> {
     if libc::syscall(libc::SYS_io_destroy, io_ctx) != 0 {
         Err(Error::last_os_error())
     } else {
@@ -42,7 +48,7 @@ unsafe fn io_destroy(io_ctx: aio_context_t) -> Result<(), Error> {
 }
 
 #[inline]
-unsafe fn io_submit(io_ctx: aio_context_t, iocbs: &[iocb]) -> Result<(), Error> {
+unsafe fn io_submit(io_ctx: aio_context_t, iocbs: &[iocb]) -> Result<()> {
     if iocbs.is_empty() {
         return Ok(());
     }
@@ -53,9 +59,7 @@ unsafe fn io_submit(io_ctx: aio_context_t, iocbs: &[iocb]) -> Result<(), Error> 
         let ret = libc::syscall(
             libc::SYS_io_submit,
             io_ctx,
-            // Logically, batch submissions should offer better performance here;
-            // however, testing revealed that single submissions perform better.
-            1,
+            iocbs.len() - nsubmitted,
             iocb_ptrs.as_ptr().add(nsubmitted),
         );
         assert!(ret != 0);
@@ -100,7 +104,7 @@ impl Semaphore {
         self.cond.notify_all();
     }
 
-    fn acquire_all(&self) -> Result<(), ()> {
+    fn acquire_all(&self) -> std::result::Result<(), ()> {
         let mut count = self.count.lock().unwrap();
         loop {
             if *count == SEM_CLOSED {
@@ -127,16 +131,23 @@ pub(super) struct TaskList {
     next_off: usize,
     init_io_arg: InitArgsFunc,
     io_fd: i32,
+    eventfd: i32,
 }
 
 impl TaskList {
-    pub(super) fn new_arc(next_off: usize, init_io_arg: InitArgsFunc, io_fd: i32) -> Arc<Self> {
+    pub(super) fn new_arc(
+        next_off: usize,
+        init_io_arg: InitArgsFunc,
+        io_fd: i32,
+        eventfd: i32,
+    ) -> Arc<Self> {
         Arc::new(Self {
             head: AtomicPtr::new(null_mut()),
             sem: Semaphore::new(0),
             next_off,
             init_io_arg,
             io_fd,
+            eventfd,
         })
     }
 
@@ -202,8 +213,8 @@ impl TaskList {
                 aio_nbytes: len as u64,
                 aio_offset: off as i64,
                 aio_reserved2: 0,
-                aio_flags: 0,
-                aio_resfd: 0,
+                aio_flags: IOCB_FLAG_RESFD,
+                aio_resfd: self.eventfd as u32,
             });
 
             cur = *(cur.byte_add(self.next_off) as *mut *mut c_void);
@@ -222,6 +233,31 @@ impl Drop for TaskList {
 unsafe impl Send for TaskList {}
 unsafe impl Sync for TaskList {}
 
+struct Eventfd(i32);
+
+impl Eventfd {
+    fn new() -> Result<Self> {
+        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        if fd >= 0 {
+            Ok(Self(fd))
+        } else {
+            Err(Error::last_os_error())
+        }
+    }
+}
+
+impl Drop for Eventfd {
+    fn drop(&mut self) {
+        unsafe { libc::close(self.0) };
+    }
+}
+
+impl AsRawFd for Eventfd {
+    fn as_raw_fd(&self) -> std::os::unix::prelude::RawFd {
+        self.0
+    }
+}
+
 struct IoCompletions {
     completions: Vec<io_event>,
     io_done: DoneFunc,
@@ -237,16 +273,74 @@ unsafe extern "C" fn process_completion(arg: *mut libc::c_void) {
     }
 }
 
+#[repr(C)]
+struct AioRing {
+    id: u32,
+    nr: u32,
+    head: u32,
+    tail: u32,
+    magic: u32,
+    compat_features: u32,
+    incompat_features: u32,
+    header_length: u32,
+}
+
+const AIO_RING_MAGIC: u32 = 0xa10a10a1;
+
+struct AioReaper {
+    io_ctx: aio_context_t,
+    eventfd: AsyncFd<Eventfd>,
+    io_done: DoneFunc,
+}
+
+impl AioReaper {
+    async fn reap(self) {
+        let aio_ring = unsafe { &mut *(self.io_ctx as *mut AioRing) };
+        let events_slice = unsafe {
+            &*slice_from_raw_parts(
+                (self.io_ctx as usize + size_of::<AioRing>()) as *const io_event,
+                aio_ring.nr as usize,
+            )
+        };
+	let atomic_tail = unsafe { AtomicU32::from_ptr(&mut aio_ring.tail) };
+	let atomic_head = unsafe { AtomicU32::from_ptr(&mut aio_ring.head) };
+
+        loop {
+            self.eventfd.readable().await.unwrap().clear_ready();
+            assert_eq!(aio_ring.magic, AIO_RING_MAGIC);
+
+            let mut events = Vec::with_capacity(MAX_EVENTS);
+            loop {
+                let head = aio_ring.head;
+                if head == atomic_tail.load(Ordering::Acquire) {
+                    break;
+                }
+
+                events.push(events_slice[head as usize]);
+                atomic_head.store((head + 1) % aio_ring.nr, Ordering::Release);
+            }
+
+            if !events.is_empty() {
+                let mut completions = IoCompletions {
+                    completions: events,
+                    io_done: self.io_done,
+                };
+
+                let arg_usize = &mut completions as *mut _ as usize;
+                CoroutineFuture::new(process_completion, arg_usize).await;
+            }
+        }
+    }
+}
+
 pub(super) struct AioContext {
     pub(super) task_list: Arc<TaskList>,
-    reaper: Option<JoinHandle<()>>,
-    submitter: Option<JoinHandle<()>>,
-    stop: Arc<AtomicBool>,
+    reaper: JoinHandle<()>,
+    submitter: thread::JoinHandle<()>,
     io_ctx: aio_context_t,
 }
 
 const MAX_EVENTS: usize = 4096;
-const MAX_IDLE_MILLS: u64 = 10;
 
 impl AioContext {
     fn submit(task_list: Arc<TaskList>, io_ctx: aio_context_t) {
@@ -255,92 +349,39 @@ impl AioContext {
         }
     }
 
-    fn reap(
-        io_ctx: aio_context_t,
-        stop: Arc<AtomicBool>,
-        handle: Handle,
-        io_done: DoneFunc,
-    ) -> Result<(), Error> {
-        while !stop.load(Ordering::Acquire) {
-            let mut ts = timespec {
-                tv_sec: 0,
-                tv_nsec: MAX_IDLE_MILLS as i64 * 1000000,
-            };
-
-            let mut completions: Vec<io_event> = Vec::with_capacity(MAX_EVENTS);
-            let ret = unsafe {
-                libc::syscall(
-                    libc::SYS_io_getevents,
-                    io_ctx,
-                    1,
-                    MAX_EVENTS,
-                    completions.as_mut_ptr(),
-                    &mut ts,
-                )
-            };
-
-            if ret > 0 {
-                handle.block_on(async move {
-                    unsafe { completions.set_len(ret as usize) };
-                    let mut completions = IoCompletions {
-                        completions,
-                        io_done,
-                    };
-                    let arg = &mut completions as *mut _ as usize;
-                    CoroutineFuture::new(process_completion, arg).await;
-                });
-                continue;
-            }
-
-            if ret == 0 {
-                continue;
-            }
-
-            let err = Error::last_os_error();
-            if err.kind() != ErrorKind::Interrupted
-                && err.kind() != ErrorKind::WouldBlock
-                && err.kind() != ErrorKind::TimedOut
-            {
-                return Err(err);
-            }
-        }
-
-        Ok(())
-    }
-
     pub(super) fn start(
         io_fd: i32,
         io_done: DoneFunc,
         next_off: usize,
         init_io_args: InitArgsFunc,
-    ) -> Result<Self, Error> {
-        let io_ctx = unsafe { io_setup(256)? };
-        let task_list = TaskList::new_arc(next_off, init_io_args, io_fd);
+    ) -> Result<Self> {
+        let io_ctx = unsafe { io_setup(MAX_EVENTS as i64)? };
+        let eventfd = AsyncFd::with_interest(Eventfd::new()?, Interest::READABLE)?;
+        let task_list = TaskList::new_arc(next_off, init_io_args, io_fd, eventfd.as_raw_fd());
         let task_list_cloned = task_list.clone();
         let submitter = std::thread::spawn(move || Self::submit(task_list_cloned, io_ctx));
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_cloned = stop.clone();
-        let handle = Handle::current();
-        let reaper = std::thread::spawn(move || {
-            Self::reap(io_ctx, stop_cloned, handle, io_done).unwrap();
-        });
+
+        let reaper = AioReaper {
+            io_ctx,
+            eventfd,
+            io_done,
+        };
+        let reaper = tokio::spawn(reaper.reap());
+
         Ok(Self {
             task_list,
-            reaper: Some(reaper),
-            submitter: Some(submitter),
-            stop,
+            reaper,
+            submitter,
             io_ctx,
         })
     }
-}
 
-impl Drop for AioContext {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
+    pub(super) async fn exit(self) {
         self.task_list.close();
         fence(Ordering::SeqCst);
-        self.submitter.take().unwrap().join().unwrap();
-        self.reaper.take().unwrap().join().unwrap();
+        self.submitter.join().unwrap();
+        self.reaper.abort();
+        self.reaper.await.unwrap_err();
         unsafe { io_destroy(self.io_ctx).unwrap() }
     }
 }
