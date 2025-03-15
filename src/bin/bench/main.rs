@@ -10,12 +10,12 @@ enum BenchOp {
 async fn worker(obj: u64, ds: Arc<Dataset>, blksize: u64, file_size: u64, sync: bool, op: BenchOp) {
     let mut offset = 0;
     let mut ino_hdl = ds.get_inode_handle(obj, u64::MAX, true).await.unwrap();
+    let mut data = vec![1; blksize as usize];
     while offset < file_size {
         let ds = ds.clone();
-        ino_hdl = tokio::spawn(async move {
+        (ino_hdl, data) = tokio::spawn(async move {
             match op {
                 BenchOp::Write => {
-                    let data = vec![1; blksize as usize];
                     ds.write_object(&ino_hdl, offset, sync, vec![&data])
                         .await
                         .unwrap();
@@ -24,7 +24,7 @@ async fn worker(obj: u64, ds: Arc<Dataset>, blksize: u64, file_size: u64, sync: 
                     ds.read_object(&ino_hdl, offset, blksize).await.unwrap();
                 }
             }
-            ino_hdl
+            (ino_hdl, data)
         })
         .await
         .unwrap();
@@ -60,9 +60,10 @@ async fn main() {
     uzfs_env_init().await;
     let dev_path = std::env::args().nth(1).unwrap();
     let sync: bool = std::env::args().nth(2).unwrap().parse().unwrap();
+    config_uzfs(4 << 30, 10, true);
     let concurrency = 64;
     let blksize = 1 << 20;
-    let file_size = 1 << 30;
+    let file_size = 256 << 20;
 
     let ds = Arc::new(
         Dataset::init("testzp/ds", &dev_path, DatasetType::Data, 0, false)
@@ -73,6 +74,7 @@ async fn main() {
     let objs = ds.create_objects(concurrency).await.unwrap().0;
 
     bench(&objs, ds.clone(), blksize, file_size, sync, BenchOp::Write).await;
+    ds.wait_synced().await;
     bench(&objs, ds.clone(), blksize, file_size, sync, BenchOp::Read).await;
 
     for obj in objs {
