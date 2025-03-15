@@ -6,10 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tokio::{
-    io::AsyncReadExt,
-    sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use super::timer_fd::AsyncTimerFd;
 
@@ -78,7 +75,7 @@ impl TimerDriver {
         loop {
             tokio::select! {
                 _ = self.handle_timer_events() => {},
-                _ = timerfd.read_u64() => {}
+                _ = timerfd.wait_until_next_wakeup() => {}
             }
 
             let now = Instant::now();
