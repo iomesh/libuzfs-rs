@@ -542,6 +542,10 @@ impl Dataset {
 
 // inode handle functions
 impl Dataset {
+    pub async fn get_superblock_ino(&self) -> u64 {
+        unsafe { libuzfs_dataset_get_superblock_ino(self.dhp) }
+    }
+
     // when the inode handle is useless, release_inode_handle should be called
     pub async fn get_superblock_inode_handle(&self) -> Result<InodeHandle> {
         let ino = unsafe { libuzfs_dataset_get_superblock_ino(self.dhp) };
