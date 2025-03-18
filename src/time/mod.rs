@@ -29,6 +29,7 @@ impl Future for Sleep {
     type Output = ();
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         if self.finished || self.timer.expired() {
+            self.timer.check_bias();
             Poll::Ready(())
         } else if self.registered {
             let mut waker = self.timer.waker.lock().unwrap();
@@ -36,6 +37,7 @@ impl Future for Sleep {
                 None => {
                     drop(waker);
                     self.finished = true;
+                    self.timer.check_bias();
                     Poll::Ready(())
                 }
                 Some(waker) => {

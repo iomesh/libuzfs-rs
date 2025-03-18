@@ -23,6 +23,13 @@ impl Timer {
     pub(super) fn expired(&self) -> bool {
         Instant::now() >= self.expiration
     }
+
+    pub(super) fn check_bias(&self) {
+        let bias = Instant::now().saturating_duration_since(self.expiration);
+        if bias.as_secs() > 1 {
+            println!("bias: {bias:?}");
+        }
+    }
 }
 
 impl PartialEq for Timer {
