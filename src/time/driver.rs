@@ -82,6 +82,9 @@ impl TimerDriver {
             let now = Instant::now();
             while let Some(first) = self.set.first() {
                 if let Some(duration) = first.expiration.checked_duration_since(now) {
+                    if duration.as_nanos() == 0 {
+                        println!("aha, you are gonna be blocked forever!");
+                    }
                     timerfd.set_next_wakeup(duration);
                     break;
                 }
