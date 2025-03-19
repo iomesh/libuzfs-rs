@@ -53,6 +53,8 @@ enum TimerEvent {
     Unregister(Arc<Timer>),
 }
 
+const MIN_SLEEP_US: u128 = 1;
+
 struct TimerDriver {
     set: BTreeSet<Arc<Timer>>,
     event_receiver: UnboundedReceiver<TimerEvent>,
@@ -82,8 +84,13 @@ impl TimerDriver {
             let now = Instant::now();
             while let Some(first) = self.set.first() {
                 if let Some(duration) = first.expiration.checked_duration_since(now) {
-                    timerfd.set_next_wakeup(duration);
-                    break;
+                    // only wait timerfd when duration > MIN_SLEEP_US microseconds
+                    // if duration == 0, this set_next_wakeup will take no effect,
+                    // also it won't cause timerfd to be readable because tokio epoll uses edge trigger
+                    if duration.as_micros() >= MIN_SLEEP_US {
+                        timerfd.set_next_wakeup(duration);
+                        break;
+                    }
                 }
 
                 first.waker.lock().unwrap().take().unwrap().wake();
