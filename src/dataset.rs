@@ -516,6 +516,13 @@ impl<FS: FileSystem> Zpool<FS> {
             .get(&fsid)
             .map_or(Err(Error::from(ErrorKind::NotFound)), |fs| Ok(fs.clone()))
     }
+
+    pub fn get_filesystems(&self) -> Vec<Arc<FS>> {
+        self.filesystems
+            .iter()
+            .map(|fs| fs.clone())
+            .collect::<Vec<_>>()
+    }
 }
 
 pub struct Dataset {
