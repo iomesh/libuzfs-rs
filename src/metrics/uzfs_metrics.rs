@@ -43,8 +43,14 @@ pub struct RequestMetrics {
     pub request_concurrency: Family<RequestLabels, Gauge>,
 }
 
+impl Default for RequestMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RequestMetrics {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let request_size_bytes = Family::<RequestLabels, Histogram>::new_with_constructor(|| {
             Histogram::new(exponential_buckets(1.0, 2.0, 32))
         });
@@ -59,6 +65,10 @@ impl RequestMetrics {
             request_latency_ns,
             request_concurrency,
         }
+    }
+
+    pub(crate) fn record(&self, method: RequestMethod, request_size: usize) -> MetricsGuard {
+        MetricsGuard::new(method, request_size, self)
     }
 }
 
@@ -203,14 +213,14 @@ pub struct ZioLabel {
 }
 
 #[derive(Clone)]
-pub struct IoMetrics {
+pub struct ZpoolMetrics {
     pub txg_delays: Family<TxgLabel, Histogram>,
     pub read_delays: Family<ZioLabel, Histogram>,
     pub write_delays: Family<ZioLabel, Histogram>,
 }
 
-impl IoMetrics {
-    fn new() -> Self {
+impl ZpoolMetrics {
+    pub fn new_boxed() -> Box<Self> {
         let txg_delays = Family::<TxgLabel, Histogram>::new_with_constructor(|| {
             Histogram::new(exponential_buckets(1.0, 2.0, 40))
         });
@@ -221,11 +231,11 @@ impl IoMetrics {
             Histogram::new(exponential_buckets(1.0, 2.0, 30))
         });
 
-        Self {
+        Box::new(Self {
             txg_delays,
             read_delays,
             write_delays,
-        }
+        })
     }
 
     fn record_txg_delay(&self, stage: TxgStage, delay_ns: u64) {
@@ -262,37 +272,13 @@ impl IoMetrics {
     }
 }
 
-#[derive(Clone)]
-pub struct UzfsMetrics {
-    pub io_metrics: IoMetrics,
-    pub req_metrics: RequestMetrics,
-}
-
-impl UzfsMetrics {
-    pub fn new_boxed() -> Box<Self> {
-        let io_metrics = IoMetrics::new();
-        let req_metrics = RequestMetrics::new();
-
-        Box::new(Self {
-            io_metrics,
-            req_metrics,
-        })
-    }
-
-    pub(crate) fn record(&self, method: RequestMethod, request_size: usize) -> MetricsGuard {
-        MetricsGuard::new(method, request_size, &self.req_metrics)
-    }
-}
-
 pub(crate) unsafe extern "C" fn record_txg_delay(
     metrics: *const libc::c_void,
     txg_stage: i32,
     delay_ns: u64,
 ) {
-    let metrics = &*(metrics as *const UzfsMetrics);
-    metrics
-        .io_metrics
-        .record_txg_delay(txg_stage.try_into().unwrap(), delay_ns);
+    let metrics = &*(metrics as *const ZpoolMetrics);
+    metrics.record_txg_delay(txg_stage.try_into().unwrap(), delay_ns);
 }
 
 pub(crate) unsafe extern "C" fn record_zio(
@@ -300,7 +286,7 @@ pub(crate) unsafe extern "C" fn record_zio(
     stages: *const i64,
     read: i32,
 ) {
-    let metrics = &*(metrics as *const UzfsMetrics);
+    let metrics = &*(metrics as *const ZpoolMetrics);
     let stages = &*slice_from_raw_parts(stages, ZIO_STAGES);
-    metrics.io_metrics.record_zio(stages, read != 0);
+    metrics.record_zio(stages, read != 0);
 }
