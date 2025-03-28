@@ -16,7 +16,7 @@ def print_backtrace(fp, stack_bottom, stack_id):
         depth += 1
     print()
 
-max_coroutines = 65536
+max_coroutines = 262144
 
 class ListPendingCoroutines(gdb.Command):
     '''list all pending coroutines'''
@@ -24,6 +24,11 @@ class ListPendingCoroutines(gdb.Command):
         gdb.Command.__init__(self, 'co-list-pending', gdb.COMMAND_DATA, gdb.COMPLETE_NONE)
 
     def invoke(self, arg, from_tty):
+        args = arg.split()
+        if len(args) != 2 and args[0] != "aarch64" and args[0] != "amd64":
+            print("Usage: co-list-pending <aarch64/amd64>")
+            return
+        offset = 144 if args[0] == "aarch64" else 48
         for i in range(1, max_coroutines):
             gdb.execute("set language rust")
             stack_top = gdb.parse_and_eval("uzfs::context::stack::STACKS.value[{}].value.stack_top".format(i))
@@ -32,7 +37,7 @@ class ListPendingCoroutines(gdb.Command):
             if stack_bottom == 0:
                 return
             if stack_top != 0:
-                print_backtrace(stack_top + 48, stack_bottom, stack_id)       
+                print_backtrace(stack_top + offset, stack_bottom, stack_id)       
 
 if __name__ == "__main__":
     ListPendingCoroutines()
