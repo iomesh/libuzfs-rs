@@ -862,7 +862,7 @@ impl Dataset {
 
         let mut arg = LibuzfsGetAttrArg {
             ihp: ino_hdl.ihp,
-            reserved: attr.reserved.as_mut_ptr() as *mut i8,
+            reserved: attr.reserved.as_mut_ptr() as *mut libc::c_char,
             size: 0,
             attr: uzfs_inode_attr_t::default(),
             err: 0,
@@ -887,7 +887,7 @@ impl Dataset {
         assert!(reserved.len() <= MAX_RESERVED_SIZE);
         let mut arg = LibuzfsSetAttrArg {
             ihp: ino_hdl.ihp,
-            reserved: reserved.as_ptr() as *mut i8,
+            reserved: reserved.as_ptr() as *const libc::c_char,
             size: reserved.len() as u32,
             err: 0,
             txg: 0,
