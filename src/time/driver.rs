@@ -6,10 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tokio::{
-    io::AsyncReadExt,
-    sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use super::timer_fd::AsyncTimerFd;
 
@@ -78,7 +75,7 @@ impl TimerDriver {
         loop {
             tokio::select! {
                 _ = self.handle_timer_events() => {},
-                _ = timerfd.read_u64() => {}
+                _ = timerfd.wait_until_next_wakeup() => {}
             }
 
             let now = Instant::now();
@@ -107,7 +104,6 @@ pub(super) struct TimerManager {
 
 impl TimerManager {
     pub(super) fn new() -> Self {
-        let timerfd = AsyncTimerFd::new().unwrap();
         let (event_sender, event_receiver) = unbounded_channel();
         let driver = TimerDriver {
             event_receiver,
@@ -119,11 +115,11 @@ impl TimerManager {
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(driver.serve(timerfd))
+            rt.block_on(async move { driver.serve(AsyncTimerFd::new().unwrap()).await })
         });
 
         #[cfg(not(debug_assertions))]
-        tokio::spawn(driver.serve(timerfd));
+        tokio::spawn(driver.serve(AsyncTimerFd::new().unwrap()));
 
         Self {
             event_sender,
