@@ -62,7 +62,7 @@ async fn main() {
     uzfs_env_init().await;
     let dev_path = std::env::args().nth(1).unwrap();
     let sync: bool = std::env::args().nth(2).unwrap().parse().unwrap();
-    config_uzfs(4 << 30, 10, true);
+    config_uzfs(4 << 30, 10);
     let concurrency = 64;
     let blksize = 1 << 20;
     let file_size = 256 << 20;

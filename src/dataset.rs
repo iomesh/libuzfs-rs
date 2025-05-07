@@ -41,8 +41,8 @@ const UZFS_DNODESIZE_DATA: u32 = 512;
 /// - `arc_c`: Current ARC memory limit, dynamically adjustable between `arc_min` and `arc_max`.
 /// - `meta_percent`: Percentage of total memory allocated for metadata (e.g., dnodes and dentries).
 /// - `enable_compress`: Enables or disables data compression during TXG syncing.
-pub fn config_uzfs(mem_max: usize, meta_percent: usize, enable_compress: bool) {
-    unsafe { libuzfs_config(mem_max, meta_percent, enable_compress as u32) };
+pub fn config_uzfs(mem_max: usize, meta_percent: usize) {
+    unsafe { libuzfs_config(mem_max, meta_percent) };
 }
 
 ///
