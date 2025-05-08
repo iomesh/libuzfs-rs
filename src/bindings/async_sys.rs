@@ -15,28 +15,62 @@ const MAX_POOL_NAME_SIZE: i32 = 32;
 const MAX_NAME_SIZE: usize = 256;
 const MAX_KVATTR_VALUE_SIZE: usize = 8192;
 
+#[repr(C)]
+struct Frame {
+    next: *const Frame,
+    return_addr: *mut c_void,
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe fn get_current_frame() -> *const Frame {
+    let fp: *const Frame;
+    std::arch::asm!("mov {}, rbp", out(reg) fp);
+    fp
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn get_current_frame() -> *const Frame {
+    let fp: *const Frame;
+    std::arch::asm!("mov {}, x29", out(reg) fp);
+    fp
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 unsafe extern "C" fn print_backtrace() {
+    const MAX_DEPTH: usize = 100;
+    let mut cur = get_current_frame();
+    let mut backtrace = String::new();
+
     let mut depth = 0;
-    backtrace::trace(|frame| {
-        backtrace::resolve_frame(frame, |symbol| {
-            let name = match symbol.name() {
-                Some(name) => name.as_str().unwrap(),
-                None => "",
-            };
+    while depth < MAX_DEPTH {
+        if cur.is_null() {
+            break;
+        }
 
-            let file_name = match symbol.filename() {
-                Some(path) => path.to_str().unwrap(),
-                None => "",
-            };
+        let mut end = false;
+        backtrace::resolve((*cur).return_addr, |frame| {
+            if frame.filename().is_none() || frame.lineno().is_none() || frame.name().is_none() {
+                end = true;
+                return;
+            }
 
-            let line = symbol.lineno().unwrap_or(0);
+            backtrace.push_str(&format!(
+                "#{depth} {:?}:{}:{}\r\n",
+                frame.filename().unwrap(),
+                frame.lineno().unwrap(),
+                frame.name().unwrap()
+            ));
 
-            println!("#{depth}  {file_name}:{line}:{name}");
             depth += 1;
         });
 
-        true // keep going to the next frame
-    });
+        if end {
+            break;
+        }
+        cur = (*cur).next;
+    }
+
+    print!("{backtrace}");
 }
 
 pub(crate) unsafe fn set_libuzfs_ops(log_func: Option<unsafe extern "C" fn(*const c_char, i32)>) {
