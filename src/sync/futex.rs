@@ -255,12 +255,13 @@ impl Futex {
     #[inline]
     pub(crate) unsafe fn destroy(&mut self) {
         let mut nspin = 0;
+        let tls_coroutine = CoroutineFuture::tls_coroutine();
         let ref_cnt = unsafe { AtomicU32::from_ptr(&mut self.ref_cnt) };
         while ref_cnt.load(Ordering::Acquire) > 0 {
             hint::spin_loop();
             nspin += 1;
             if nspin % 100 == 0 {
-                CoroutineFuture::tls_coroutine().sched_yield();
+                tls_coroutine.sched_yield();
             }
         }
         assert_eq!(libc::pthread_spin_destroy(&mut self.waiters.lock), 0);
