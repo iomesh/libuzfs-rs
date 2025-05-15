@@ -3,13 +3,23 @@ use std::ffi::CString;
 use std::io;
 use std::io::Error;
 use std::io::ErrorKind;
+use std::mem;
 use std::os::raw::{c_char, c_void};
 use std::ptr::null_mut;
+use std::ptr::slice_from_raw_parts;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
 
 use cstr_argument::CStrArgument;
 use io::Result;
 use once_cell::sync::OnceCell;
+use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
+use tokio::time::timeout;
 
 use crate::bindings::async_sys::*;
 use crate::bindings::sys::*;
@@ -167,11 +177,133 @@ pub enum KvSetOption {
     NeedLog = 1 << 1,
 }
 
+struct ReadBuf(libuzfs_read_buf_t);
+
+impl Default for ReadBuf {
+    fn default() -> Self {
+        Self(libuzfs_read_buf {
+            ihp: null_mut(),
+            lr: null_mut(),
+            offset: 0,
+            nread: 0,
+            dbpp: null_mut(),
+            num_bufs: 0,
+        })
+    }
+}
+
+impl ReadBuf {
+    async fn release(mut self) {
+        let buf_usize = &mut self.0 as *mut _ as usize;
+        CoroutineFuture::new(libuzfs_read_buf_rele_c, buf_usize).await;
+        mem::forget(self);
+    }
+}
+
+impl Drop for ReadBuf {
+    fn drop(&mut self) {
+        assert!(
+            self.0.lr.is_null() && self.0.dbpp.is_null(),
+            "non-empty read buf {:?} cannot be dropped!",
+            self.0
+        )
+    }
+}
+
+unsafe impl Send for ReadBuf {}
+unsafe impl Sync for ReadBuf {}
+
+pub struct ReadBufWrapper {
+    data: ReadBuf,
+    sender: UnboundedSender<ReadBuf>,
+}
+
+impl ReadBufWrapper {
+    #[inline]
+    pub fn as_slices(&self) -> Vec<&[u8]> {
+        let len = self.data.0.num_bufs as usize;
+        let mut slices = Vec::with_capacity(len);
+        unsafe { libuzfs_read_buf_to_slices(&self.data.0, slices.as_mut_ptr()) };
+        unsafe { slices.set_len(len) };
+        slices
+            .into_iter()
+            .map(|slice| unsafe { &*slice_from_raw_parts(slice.buf as *const u8, slice.len) })
+            .collect()
+    }
+}
+
+impl Drop for ReadBufWrapper {
+    fn drop(&mut self) {
+        self.sender.send(std::mem::take(&mut self.data)).unwrap();
+    }
+}
+
+struct ReadBufReleaser {
+    sender: UnboundedSender<ReadBuf>,
+    stop: Arc<AtomicBool>,
+    handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl ReadBufReleaser {
+    fn new() -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let stop_cloned = stop.clone();
+        let (sender, mut receiver) = unbounded_channel::<ReadBuf>();
+        let handle = tokio::spawn(async move {
+            loop {
+                let mut bufs = Vec::with_capacity(256);
+                if let Ok(nrecv) = timeout(
+                    Duration::from_millis(100),
+                    receiver.recv_many(&mut bufs, 256),
+                )
+                .await
+                {
+                    assert_ne!(nrecv, 0);
+                    for buf in bufs {
+                        buf.release().await;
+                    }
+                }
+
+                if stop_cloned.load(Ordering::Acquire) {
+                    break;
+                }
+            }
+        });
+
+        Self {
+            sender,
+            stop,
+            handle: Mutex::new(Some(handle)),
+        }
+    }
+
+    fn wrap_read_buf(&self, data: libuzfs_read_buf_t) -> ReadBufWrapper {
+        ReadBufWrapper {
+            data: ReadBuf(data),
+            sender: self.sender.clone(),
+        }
+    }
+
+    async fn exit(&self) {
+        while self.sender.strong_count() > 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        self.stop.fetch_or(true, Ordering::AcqRel);
+        let mut handle = self.handle.lock().await;
+        if let Some(task) = handle.take() {
+            task.await.unwrap();
+        }
+    }
+}
+
 pub struct Dataset {
     dhp: *mut libuzfs_dataset_handle_t,
     zhp: *mut libuzfs_zpool_handle_t,
     poolname: CString,
     metrics: Box<UzfsMetrics>,
+    buf_releaser: ReadBufReleaser,
 }
 
 // metrics
@@ -243,6 +375,7 @@ impl Dataset {
                 zhp: arg.zhp,
                 poolname,
                 metrics,
+                buf_releaser: ReadBufReleaser::new(),
             })
         }
     }
@@ -281,6 +414,8 @@ impl Dataset {
     }
 
     pub async fn close(&self) -> Result<()> {
+        self.buf_releaser.exit().await;
+
         let mut arg = LibuzfsDatasetFiniArg {
             dhp: self.dhp,
             zhp: self.zhp,
@@ -587,6 +722,70 @@ impl Dataset {
 
         if arg.err == 0 {
             Ok(arg.data)
+        } else {
+            Err(io::Error::from_raw_os_error(arg.err))
+        }
+    }
+
+    /// Reads an object from storage without copying the data.
+    ///
+    /// This function performs a zero-copy read operation, retrieving the specified
+    /// portion of an object associated with the given inode handle. It directly references
+    /// the underlying ZFS ARC buffer and includes a range lock, ensuring safe concurrent access.
+    ///
+    /// # Constraints
+    /// - The `size` must not exceed `32 MiB` (`32 << 20` bytes).  
+    /// - `ino_hdl` cannot be released before returned ReadBufWrapper is dropped
+    ///
+    /// # Parameters
+    /// - `ino_hdl`: A reference to the [`InodeHandle`] that identifies the object.
+    /// - `offset`: The byte offset within the object from where the read should start.
+    /// - `size`: The number of bytes to read (must be ≤ 32 MiB).
+    ///
+    /// # Returns
+    /// - `Ok(ReadBufWrapper)`: A wrapper containing the read data on success.
+    /// - `Err(...)`: An error if the read operation fails.
+    ///
+    /// # Resource Management
+    /// - `ReadBufWrapper` holds references to the underlying range lock and ZFS ARC buffer.
+    /// - It **must be dropped as soon as it is no longer needed** to avoid blocking other operations.
+    ///
+    /// # Async Behavior
+    /// This function is asynchronous and must be awaited.
+    ///
+    /// # Errors
+    /// Returns an error if the read operation encounters issues, such as:
+    /// - Underlying storage failures.
+    pub async fn read_object_zero_copy(
+        &self,
+        ino_hdl: &InodeHandle,
+        offset: u64,
+        size: u64,
+    ) -> Result<ReadBufWrapper> {
+        let _guard = self
+            .metrics
+            .record(RequestMethod::ReadObject, size as usize);
+        let mut arg = ReadObjectZeroCopyArg {
+            ihp: ino_hdl.ihp,
+            offset,
+            size,
+            err: 0,
+            data: libuzfs_read_buf {
+                ihp: null_mut(),
+                lr: null_mut(),
+                offset: 0,
+                nread: 0,
+                dbpp: null_mut(),
+                num_bufs: 0,
+            },
+        };
+
+        let arg_usize = &mut arg as *mut _ as usize;
+
+        CoroutineFuture::new(libuzfs_read_object_zero_copy_c, arg_usize).await;
+
+        if arg.err == 0 {
+            Ok(self.buf_releaser.wrap_read_buf(arg.data))
         } else {
             Err(io::Error::from_raw_os_error(arg.err))
         }
