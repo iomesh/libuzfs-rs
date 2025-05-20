@@ -90,7 +90,7 @@ pub struct CoroutineFuture {
 const STACK_SIZE: usize = 1 << 20;
 
 impl CoroutineFuture {
-    #[inline(always)]
+    #[inline(never)]
     pub fn tls_coroutine<'a>() -> &'a mut Self {
         unsafe { &mut *TLS_COROUTINE.get() }
     }
@@ -244,7 +244,7 @@ impl CoroutineFuture {
     // because the two tls_get are called in the same function, the compiler may
     // think the second get is useless and optimize it, such that the second tls_get
     // gets the address of tls in last thread, resulting in polluted memory
-    #[inline(never)]
+    #[inline]
     pub unsafe fn poll_until_ready<F: Future<Output = T>, T>(mut f: F) -> T {
         let tls_coroutine = Self::tls_coroutine();
         loop {
