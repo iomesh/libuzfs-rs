@@ -513,6 +513,12 @@ impl Dataset {
         CoroutineFuture::new(libuzfs_wait_log_commit_c, arg_usize).await;
     }
 
+    pub async fn submit_log(&self, ino: u64) {
+        let mut arg = LibuzfsLogSubmitArg { dhp: self.dhp, ino };
+        let arg_usize = &mut arg as *mut _ as usize;
+        CoroutineFuture::new(libuzfs_log_submit_c, arg_usize).await;
+    }
+
     pub async fn get_object_attr(&self, ino_hdl: &InodeHandle) -> Result<uzfs_object_attr_t> {
         let _guard = self.metrics.record(RequestMethod::GetObjectAttr, 0);
         let mut arg = LibuzfsGetObjectAttrArg {

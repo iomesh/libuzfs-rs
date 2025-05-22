@@ -460,7 +460,6 @@ pub unsafe extern "C" fn libuzfs_objects_create_c(arg: *mut c_void) {
         arg.num_objs as i32,
         &mut arg.gen,
     );
-    libuzfs_wait_log_commit(arg.dhp);
 }
 
 pub struct LibuzfsDeleteObjectArg {
@@ -482,6 +481,20 @@ pub unsafe extern "C" fn libuzfs_delete_object_c(arg: *mut c_void) {
 pub unsafe extern "C" fn libuzfs_wait_log_commit_c(arg: *mut c_void) {
     let dhp = arg as *mut libuzfs_dataset_handle_t;
     libuzfs_wait_log_commit(dhp);
+}
+
+pub struct LibuzfsLogSubmitArg {
+    pub dhp: *mut libuzfs_dataset_handle_t,
+    pub ino: u64,
+}
+
+unsafe impl Send for LibuzfsLogSubmitArg {}
+unsafe impl Sync for LibuzfsLogSubmitArg {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_log_submit_c(arg: *mut c_void) {
+    let arg = &mut *(arg as *mut LibuzfsLogSubmitArg);
+    libuzfs_log_submit(arg.dhp, arg.ino);
 }
 
 pub struct LibuzfsGetObjectAttrArg {
