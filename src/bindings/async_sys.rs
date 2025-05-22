@@ -460,7 +460,6 @@ pub unsafe extern "C" fn libuzfs_objects_create_c(arg: *mut c_void) {
         arg.num_objs as i32,
         &mut arg.gen,
     );
-    libuzfs_wait_log_commit(arg.dhp);
 }
 
 pub struct LibuzfsDeleteObjectArg {
@@ -482,6 +481,20 @@ pub unsafe extern "C" fn libuzfs_delete_object_c(arg: *mut c_void) {
 pub unsafe extern "C" fn libuzfs_wait_log_commit_c(arg: *mut c_void) {
     let dhp = arg as *mut libuzfs_dataset_handle_t;
     libuzfs_wait_log_commit(dhp);
+}
+
+pub struct LibuzfsLogSubmitArg {
+    pub dhp: *mut libuzfs_dataset_handle_t,
+    pub ino: u64,
+}
+
+unsafe impl Send for LibuzfsLogSubmitArg {}
+unsafe impl Sync for LibuzfsLogSubmitArg {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_log_submit_c(arg: *mut c_void) {
+    let arg = &mut *(arg as *mut LibuzfsLogSubmitArg);
+    libuzfs_log_submit(arg.dhp, arg.ino);
 }
 
 pub struct LibuzfsGetObjectAttrArg {
@@ -562,6 +575,28 @@ pub unsafe extern "C" fn libuzfs_read_object_c(arg: *mut c_void) {
     } else {
         arg.err = -rc;
     }
+}
+
+pub struct ReadObjectZeroCopyArg {
+    pub ihp: *mut libuzfs_inode_handle_t,
+    pub offset: u64,
+    pub size: u64,
+
+    pub err: i32,
+    pub data: libuzfs_read_buf_t,
+}
+
+unsafe impl Send for ReadObjectZeroCopyArg {}
+unsafe impl Sync for ReadObjectZeroCopyArg {}
+
+pub unsafe extern "C" fn libuzfs_read_object_zero_copy_c(args: *mut c_void) {
+    let args = &mut *(args as *mut ReadObjectZeroCopyArg);
+    args.err = libuzfs_object_read_zero_copy(args.ihp, args.offset, args.size, &mut args.data);
+}
+
+pub unsafe extern "C" fn libuzfs_read_buf_rele_c(args: *mut c_void) {
+    let read_buf = args as *mut libuzfs_read_buf_t;
+    libuzfs_read_buf_rele(read_buf);
 }
 
 pub struct LibuzfsWriteObjectArg {

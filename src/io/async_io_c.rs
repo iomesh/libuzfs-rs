@@ -1,4 +1,7 @@
-use crate::bindings::sys::{aio_done_func_t, init_io_args_func_t};
+use crate::{
+    bindings::sys::{aio_done_func_t, init_io_args_func_t},
+    context::coroutine::CoroutineFuture,
+};
 
 use super::async_io::AioContext;
 
@@ -16,7 +19,7 @@ pub unsafe extern "C" fn register_fd(
 
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn unregister_fd(aio_hdl: *mut libc::c_void) {
-    drop(Box::from_raw(aio_hdl as *mut AioContext));
+    CoroutineFuture::poll_until_ready(Box::from_raw(aio_hdl as *mut AioContext).exit());
 }
 
 #[allow(clippy::missing_safety_doc)]
