@@ -70,11 +70,11 @@ pub async fn uzfs_debug_main() {
 
 pub async fn uzfs_env_init() {
     unsafe extern "C" fn print_log(buf: *const c_char, new_line: i32) {
-        let buf = CStr::from_ptr(buf);
+        let buf = CStr::from_ptr(buf).to_str().unwrap();
         if new_line != 0 {
-            println!("{}", buf.to_bytes().escape_ascii());
+            println!("{buf}");
         } else {
-            print!("{}", buf.to_bytes().escape_ascii());
+            print!("{buf}");
         }
     }
 

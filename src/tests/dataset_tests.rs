@@ -1,4 +1,5 @@
 use super::UzfsTestEnv;
+use crate::bindings::sys::libuzfs_enable_debug_msg;
 use crate::bindings::sys::timespec;
 use crate::uzfs_env_fini;
 use crate::uzfs_env_init;
@@ -1366,6 +1367,7 @@ const PREFIX: &str = "qwertyuiopasdfghjkl-";
 
 #[tokio::test]
 async fn dentry_test() {
+    unsafe { libuzfs_enable_debug_msg() };
     let dsname = "dentry_test/ds";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
     uzfs_env_init().await;
