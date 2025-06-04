@@ -1548,6 +1548,8 @@ async fn multi_dataset_test() {
         zpool.get_filesystem(fsid).unwrap();
     }
 
+    assert_eq!(zpool.list_filesystems().len(), 99);
+
     zpool.close().await;
     uzfs_env_fini().await;
 }
