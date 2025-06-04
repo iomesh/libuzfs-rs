@@ -542,6 +542,10 @@ impl Dataset {
 
 // inode handle functions
 impl Dataset {
+    pub async fn get_superblock_ino(&self) -> u64 {
+        unsafe { libuzfs_dataset_get_superblock_ino(self.dhp) }
+    }
+
     // when the inode handle is useless, release_inode_handle should be called
     pub async fn get_superblock_inode_handle(&self) -> Result<InodeHandle> {
         let ino = unsafe { libuzfs_dataset_get_superblock_ino(self.dhp) };
@@ -581,6 +585,28 @@ impl Dataset {
     pub async fn release_inode_handle(&self, ino_hdl: &mut InodeHandle) {
         CoroutineFuture::new(libuzfs_inode_handle_rele_c, ino_hdl.ihp as usize).await;
         ino_hdl.ihp = null_mut();
+    }
+
+    pub async fn get_inode_handle_and_run<T, F, Fut>(
+        &self,
+        ino: u64,
+        gen: u64,
+        is_data_inode: bool,
+        f: F,
+    ) -> Result<T>
+    where
+        F: FnOnce(&'static mut InodeHandle) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let mut handle = self.get_inode_handle(ino, gen, is_data_inode).await?;
+        let handle_ref = unsafe {
+            std::mem::transmute::<&mut InodeHandle, &'static mut InodeHandle>(&mut handle)
+        };
+
+        //Note: The life cycle of a closure must end before release_inode_handle is called.
+        let res = f(handle_ref).await;
+        self.release_inode_handle(&mut handle).await;
+        res
     }
 }
 
