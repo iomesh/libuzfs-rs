@@ -139,15 +139,17 @@ pub enum DatasetType {
 #[warn(unused_must_use)]
 pub struct InodeHandle {
     ihp: *mut libuzfs_inode_handle_t,
+    pub fsid: u32,
     pub ino: u64,
     pub gen: u64,
 }
 
 #[cfg(debug_assertions)]
 impl InodeHandle {
-    pub fn fake_handle(ino: u64, gen: u64) -> Self {
+    pub fn fake_handle(fsid: u32, ino: u64, gen: u64) -> Self {
         Self {
             ihp: null_mut(),
+            fsid,
             ino,
             gen,
         }
@@ -158,6 +160,7 @@ impl Default for InodeHandle {
     fn default() -> Self {
         Self {
             ihp: null_mut(),
+            fsid: 0,
             ino: 0,
             gen: 0,
         }
@@ -330,6 +333,7 @@ impl<FS: FileSystem> Zpool<FS> {
                     dsname.parse().unwrap(),
                     Dataset {
                         dhp,
+                        fsid: dsname.parse().unwrap(),
                         metrics: RequestMetrics::new(),
                     },
                 )
@@ -453,6 +457,7 @@ impl<FS: FileSystem> Zpool<FS> {
 
         if args.res == 0 {
             Ok(Dataset {
+                fsid,
                 dhp: args.dhp,
                 metrics: RequestMetrics::new(),
             })
@@ -516,10 +521,18 @@ impl<FS: FileSystem> Zpool<FS> {
             .get(&fsid)
             .map_or(Err(Error::from(ErrorKind::NotFound)), |fs| Ok(fs.clone()))
     }
+
+    pub fn list_filesystems(&self) -> Vec<Arc<FS>> {
+        self.filesystems
+            .iter()
+            .map(|kv| kv.value().clone())
+            .collect()
+    }
 }
 
 pub struct Dataset {
     dhp: *mut libuzfs_dataset_handle_t,
+    pub fsid: u32,
     pub metrics: RequestMetrics,
 }
 
@@ -573,6 +586,7 @@ impl Dataset {
         if arg.err == 0 {
             Ok(InodeHandle {
                 ihp: arg.ihp,
+                fsid: self.fsid,
                 ino,
                 gen,
             })
@@ -1053,6 +1067,7 @@ impl Dataset {
         if arg.err == 0 {
             Ok(InodeHandle {
                 ihp: arg.ihp,
+                fsid: self.fsid,
                 ino: arg.ino,
                 gen: arg.txg,
             })

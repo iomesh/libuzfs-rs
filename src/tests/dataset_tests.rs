@@ -1507,6 +1507,7 @@ async fn multi_dataset_test() {
         assert_eq!(err.kind(), ErrorKind::AlreadyExists);
     }
     let ds0 = zpool.get_filesystem(fsid0).unwrap();
+    assert_eq!(ds0.fsid, fsid0);
 
     let fsid1 = 1;
     if let Err(err) = zpool.create_filesystem(fsid1).await {
@@ -1515,6 +1516,8 @@ async fn multi_dataset_test() {
     let ds1 = zpool.get_filesystem(fsid1).unwrap();
     println!("space: {:?}", ds0.space().await);
     let mut ino_hdl = ds1.create_inode(InodeType::DATAOBJ).await.unwrap();
+    assert_eq!(ino_hdl.fsid, fsid1);
+
     let data = vec![1; 256 << 10];
     ds1.write_object(&ino_hdl, 0, false, vec![&data])
         .await
@@ -1544,6 +1547,8 @@ async fn multi_dataset_test() {
         }
         zpool.get_filesystem(fsid).unwrap();
     }
+
+    assert_eq!(zpool.list_filesystems().len(), 99);
 
     zpool.close().await;
     uzfs_env_fini().await;
