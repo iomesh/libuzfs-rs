@@ -112,6 +112,7 @@ impl CoroutineFuture {
         // in order to backtrace to the poll function in backtrace, this addr is replaced with Self::poll
         #[cfg(target_arch = "x86_64")]
         #[allow(clippy::fn_to_numeric_cast)]
+        #[allow(function_casts_as_integer)]
         unsafe {
             *(stack.stack_bottom.byte_sub(0x08) as *mut u64) = Self::poll as u64 + 8
         };
