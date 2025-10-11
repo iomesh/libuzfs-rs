@@ -247,7 +247,7 @@ impl TaskQueue {
 
     pub(super) async fn wait(&self) {
         while !self.task_map.is_empty() {
-            let notifies: Vec<_> = self.task_map.iter().map(|v| (v.clone())).collect();
+            let notifies: Vec<_> = self.task_map.iter().map(|v| v.clone()).collect();
             for notify in notifies {
                 notify.notified().await;
             }

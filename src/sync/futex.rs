@@ -210,7 +210,7 @@ impl Futex {
     }
 
     #[inline]
-    fn wait(&mut self, expected_value: u32) -> FutexWaiter {
+    fn wait(&'_ mut self, expected_value: u32) -> FutexWaiter<'_> {
         FutexWaiter {
             node: WaiterNode::new(),
             expected_value,
