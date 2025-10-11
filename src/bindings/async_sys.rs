@@ -931,6 +931,25 @@ pub unsafe extern "C" fn libuzfs_create_dentry_c(arg: *mut c_void) {
     arg.err = libuzfs_dentry_create(arg.dihp, arg.name, arg.ino, &mut arg.txg);
 }
 
+pub struct LibuzfsUpdateDentryArg {
+    pub dihp: *mut libuzfs_inode_handle_t,
+    pub name: *const c_char,
+    pub ino: u64,
+
+    pub err: i32,
+    pub txg: u64,
+}
+
+unsafe impl Send for LibuzfsUpdateDentryArg {}
+unsafe impl Sync for LibuzfsUpdateDentryArg {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_update_dentry_c(arg: *mut c_void) {
+    let arg = &mut *(arg as *mut LibuzfsUpdateDentryArg);
+
+    arg.err = libuzfs_dentry_update(arg.dihp, arg.name, arg.ino, &mut arg.txg);
+}
+
 pub struct LibuzfsDeleteDentryArg {
     pub dihp: *mut libuzfs_inode_handle_t,
     pub name: *const c_char,
