@@ -80,6 +80,8 @@ pub struct CoroutineFuture {
     // to return stack to global pool when coroutine is dropped
     pub(super) global: bool,
 
+    record_pending_time: bool,
+
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     bottom_fpp: u64,
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -133,6 +135,7 @@ impl CoroutineFuture {
             co_specific: HashMap::new(),
             saved_errno: 0,
             global: false,
+            record_pending_time: false,
 
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             bottom_fpp: 0,
@@ -144,6 +147,12 @@ impl CoroutineFuture {
     #[inline]
     pub fn new(func: unsafe extern "C" fn(arg1: *mut c_void), arg: usize) -> Self {
         Self::new_with_stack_size(func, arg, STACK_SIZE)
+    }
+
+    #[inline]
+    pub fn record_pending_time(mut self) -> Self {
+        self.record_pending_time = true;
+        self
     }
 
     #[inline]
@@ -286,11 +295,17 @@ impl Future for CoroutineFuture {
         match unsafe { self.run(cx) } {
             RunState::Runnable => unreachable!("runnable unexpected"),
             RunState::Pending => {
-                unsafe { self.stack.record_stack(self.pollee_context) };
+                unsafe {
+                    self.stack
+                        .record_stack(self.pollee_context, self.record_pending_time)
+                };
                 Poll::Pending
             }
             RunState::Yielded => {
-                unsafe { self.stack.record_stack(self.pollee_context) };
+                unsafe {
+                    self.stack
+                        .record_stack(self.pollee_context, self.record_pending_time)
+                };
                 let fut = tokio::task::yield_now();
                 tokio::pin!(fut);
                 fut.poll(cx)

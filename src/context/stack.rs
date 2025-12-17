@@ -2,6 +2,7 @@ use crossbeam_utils::CachePadded;
 use libc::c_void;
 use std::cell::{RefCell, UnsafeCell};
 use std::ptr::null_mut;
+use std::time::SystemTime;
 use std::{
     io::Error,
     sync::{
@@ -19,12 +20,14 @@ struct StackBacktrace {
     stack_bottom: *mut c_void,
     stack_top: *mut c_void,
     stack_id: u64,
+    last_pending: String,
 }
 
 const EMPTY_STACK: CachePadded<StackBacktrace> = CachePadded::new(StackBacktrace {
     stack_bottom: null_mut(),
     stack_top: null_mut(),
     stack_id: 0,
+    last_pending: String::new(),
 });
 
 #[no_mangle]
@@ -66,6 +69,7 @@ impl Stack {
                 stack_bottom,
                 stack_top: null_mut(),
                 stack_id,
+                last_pending: String::new(),
             };
 
             Ok(Self {
@@ -76,18 +80,27 @@ impl Stack {
         }
     }
 
+    #[cold]
+    fn now() -> String {
+        format!("{:?}", SystemTime::now())
+    }
+
     #[inline(always)]
-    pub(super) unsafe fn record_stack(&self, stack_top: *mut c_void) {
+    pub(super) unsafe fn record_stack(&self, stack_top: *mut c_void, record_time: bool) {
         let idx = self.stack_id & STACK_ID_MASK;
         let stack = &mut STACKS.get_mut()[idx as usize];
         stack.stack_top = stack_top;
         stack.stack_id = self.stack_id;
+        if record_time {
+            stack.last_pending = Self::now();
+        }
     }
 
     #[inline(always)]
     pub(super) unsafe fn remove_stack_record(&self) {
         let idx = self.stack_id & STACK_ID_MASK;
         STACKS.get_mut()[idx as usize].stack_top = null_mut();
+        STACKS.get_mut()[idx as usize].last_pending = String::new();
     }
 }
 
