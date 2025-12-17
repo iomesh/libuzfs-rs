@@ -397,7 +397,9 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsDatasetFiniArg as usize;
 
-        CoroutineFuture::new(libuzfs_dataset_fini_c, arg_usize).await;
+        CoroutineFuture::new(libuzfs_dataset_fini_c, arg_usize)
+            .record_pending_time()
+            .await;
 
         if arg.err != 0 {
             Err(io::Error::from_raw_os_error(arg.err))

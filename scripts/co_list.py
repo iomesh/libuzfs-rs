@@ -1,8 +1,8 @@
 import gdb
 
-def print_backtrace(fp, stack_bottom, stack_id):
+def print_backtrace(fp, stack_bottom, stack_id, last_pending):
     gdb.execute("set language c")
-    print("coroutine {}, fp: {}, bottom: {}".format(stack_id, fp, stack_bottom))
+    print("coroutine {}, fp: {}, bottom: {}, last_pending_time: {}".format(stack_id, fp, stack_bottom, last_pending))
     depth = 1
     while True:
         print("#{}".format(depth), end="  ")
@@ -36,10 +36,11 @@ class ListPendingCoroutines(gdb.Command):
             stack_top = gdb.parse_and_eval("uzfs::context::stack::STACKS.value[{}].value.stack_top".format(i))
             stack_id = gdb.parse_and_eval("uzfs::context::stack::STACKS.value[{}].value.stack_id".format(i))
             stack_bottom = gdb.parse_and_eval("uzfs::context::stack::STACKS.value[{}].value.stack_bottom".format(i))
+            last_pending = gdb.parse_and_eval("uzfs::context::stack::STACKS.value[{}].value.last_pending".format(i))
             if stack_bottom == 0:
                 return
             if stack_top != 0:
-                print_backtrace(stack_top + offset, stack_bottom, stack_id)       
+                print_backtrace(stack_top + offset, stack_bottom, stack_id, last_pending)       
 
 if __name__ == "__main__":
     ListPendingCoroutines()
