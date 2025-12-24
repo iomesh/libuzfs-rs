@@ -684,9 +684,8 @@ async fn uzfs_rangelock_test() {
                 }
 
                 // add edges to dependency_graph
-                let size = data_u16.len();
-                for idx in 0..size {
-                    let version = data_u16[idx];
+                for (idx, version) in data_u16.iter().enumerate() {
+                    let version = *version;
                     if version == 0 {
                         continue;
                     }
@@ -1154,7 +1153,7 @@ fn uzfs_sync_test() {
                     ds.set_object_mtime(&mut obj_hdl, mtime.tv_sec, mtime.tv_nsec)
                         .await
                         .unwrap();
-                    ds.sync_object(&mut obj_hdl).await;
+                    ds.sync_object(&obj_hdl).await;
 
                     assert_eq!(ds.get_object_attr(&obj_hdl).await.unwrap().size, offset);
                     ds.release_inode_handle(&mut obj_hdl).await;
@@ -1266,7 +1265,7 @@ async fn uzfs_truncate_test() {
                     let end_size = if rand::thread_rng().gen_bool(0.5) {
                         total_data[..data.len()].copy_from_slice(&data);
                         total_data[(truncate_size as usize)..].fill(0);
-                        ds.write_object(&mut obj_hdl, 0, false, vec![&data])
+                        ds.write_object(&obj_hdl, 0, false, vec![&data])
                             .await
                             .unwrap();
                         ds.truncate_object(&mut obj_hdl, 0, truncate_size)

@@ -57,7 +57,7 @@ impl WaiterList {
         if self.head.is_null() {
             false
         } else {
-            if self.head == self.tail {
+            if std::ptr::eq(self.head, self.tail) {
                 self.tail = null_mut();
             }
             let waiter = &*(self.head as *mut WaiterNode);
@@ -73,10 +73,10 @@ impl WaiterList {
 
     #[inline]
     unsafe fn remove(&mut self, node: &mut WaiterNode) {
-        if self.head == node as *mut _ as *mut libc::c_void {
+        if std::ptr::eq(self.head, node as *mut _ as *mut libc::c_void) {
             self.head = node.next as *mut libc::c_void;
         }
-        if self.tail == node as *mut _ as *mut libc::c_void {
+        if std::ptr::eq(self.tail, node as *mut _ as *mut libc::c_void) {
             self.tail = node.prev as *mut libc::c_void;
         }
 
