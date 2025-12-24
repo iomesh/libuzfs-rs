@@ -1201,6 +1201,33 @@ impl Dataset {
         }
     }
 
+    pub async fn update_dentry<P: CStrArgument>(
+        &self,
+        ino_hdl: &mut InodeHandle,
+        name: P,
+        value: u64,
+    ) -> Result<u64> {
+        let _guard = self.metrics.record(RequestMethod::CreateDentry, 0);
+        let cname = name.into_cstr();
+        let mut arg = LibuzfsUpdateDentryArg {
+            dihp: ino_hdl.ihp,
+            name: cname.as_ref().as_ptr(),
+            ino: value,
+            err: 0,
+            txg: 0,
+        };
+
+        let arg_usize = &mut arg as *mut _ as usize;
+
+        CoroutineFuture::new(libuzfs_update_dentry_c, arg_usize).await;
+
+        if arg.err == 0 {
+            Ok(arg.txg)
+        } else {
+            Err(io::Error::from_raw_os_error(arg.err))
+        }
+    }
+
     pub async fn delete_dentry<P: CStrArgument>(
         &self,
         ino_hdl: &mut InodeHandle,
