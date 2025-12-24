@@ -56,7 +56,9 @@ impl Stack {
             0,
         );
 
-        if mem == libc::MAP_FAILED || libc::mprotect(mem, page_size, libc::PROT_NONE) < 0 {
+        if std::ptr::eq(mem, libc::MAP_FAILED)
+            || libc::mprotect(mem, page_size, libc::PROT_NONE) < 0
+        {
             Err(Error::last_os_error())
         } else {
             assert!(mem as usize % page_size == 0);
