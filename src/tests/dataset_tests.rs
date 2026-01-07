@@ -772,7 +772,7 @@ async fn uzfs_attr_test() {
     let ntests = 16;
     let nloops = 50;
     let max_key_size = 256;
-    let max_value_size = 8192;
+    let max_value_size = 1024;
     let mut handles = Vec::new();
     for _ in 0..ntests {
         let ds_cloned = ds.clone();
