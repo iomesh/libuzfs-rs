@@ -922,6 +922,7 @@ pub struct IterateDentryArg {
     pub err: i32,
     pub done: bool,
     pub dentries: Vec<UzfsDentry>,
+    pub prefetch: Option<u64>,
 }
 
 unsafe impl Send for IterateDentryArg {}
@@ -959,7 +960,14 @@ pub unsafe extern "C" fn libuzfs_iterate_dentry_c(arg: *mut c_void) {
 
     arg.dentries.reserve(DEFAULT_NDENTRIES);
 
-    arg.err = libuzfs_dentry_iterate(arg.dihp, arg.whence, arg_ptr, Some(dir_emit));
+    arg.err = libuzfs_dentry_iterate(
+        arg.dihp,
+        arg.whence,
+        arg_ptr,
+        Some(dir_emit),
+        arg.prefetch.is_some() as _,
+        arg.prefetch.unwrap_or(u64::MAX),
+    );
 
     if arg.err == libc::ENOENT {
         arg.done = true;
