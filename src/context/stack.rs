@@ -23,6 +23,7 @@ struct StackBacktrace {
     last_pending: String,
 }
 
+#[allow(clippy::declare_interior_mutable_const)]
 const EMPTY_STACK: CachePadded<StackBacktrace> = CachePadded::new(StackBacktrace {
     stack_bottom: null_mut(),
     stack_top: null_mut(),

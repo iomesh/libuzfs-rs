@@ -3,10 +3,12 @@ use crate::bindings::sys::timespec;
 use crate::uzfs_env_fini;
 use crate::uzfs_env_init;
 use crate::Dataset;
-use crate::DatasetType;
+use crate::FileSystem;
 use crate::InodeType;
 use crate::KvSetOption;
 use crate::UzfsDentry;
+use crate::ZpoolOpenOptions;
+use crate::ZpoolType;
 use crate::MAX_RESERVED_SIZE;
 use dashmap::DashMap;
 use nix::sys::wait::waitpid;
@@ -20,13 +22,34 @@ use rand::thread_rng;
 use rand::Rng;
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Result};
+use std::ops::Deref;
 use std::process::abort;
 use std::process::exit;
 use std::sync::atomic::AtomicU16;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
+
+struct DatasetWrapper(Dataset);
+
+impl FileSystem for DatasetWrapper {
+    async fn init(ds: Dataset, _fsid: u32, _snapid: Option<u32>, _poolname: &str) -> Result<Self> {
+        Ok(Self(ds))
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        self.0.close().await;
+        Ok(())
+    }
+}
+
+impl Deref for DatasetWrapper {
+    type Target = Dataset;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn uzfs_test() {
@@ -47,48 +70,36 @@ async fn uzfs_test() {
     let file_name = "fileA";
     let reserved = vec![1; 128];
 
-    let dsname = "uzfs-test/ds";
+    let poolname = "testzp";
+    let fsid = 1;
     uzfs_env_init().await;
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
 
     {
-        Dataset::init(
-            dsname,
-            uzfs_test_env.get_dev_path(),
-            DatasetType::Meta,
-            4096,
-            false,
-        )
-        .await
-        .unwrap()
-        .close()
-        .await
-        .unwrap();
-
-        for _ in 0..10 {
-            Dataset::init(
-                dsname,
-                uzfs_test_env.get_dev_path(),
-                DatasetType::Meta,
-                4096,
-                false,
-            )
-            .await
-            .unwrap()
-            .close()
+        let mut zpool = ZpoolOpenOptions::new(ZpoolType::Meta)
+            .create(true)
+            .open::<DatasetWrapper>(poolname, &[uzfs_test_env.get_dev_path()])
             .await
             .unwrap();
+        zpool.get_or_open_filesystem(fsid, true).await.unwrap();
+        zpool.close().await;
+        for _ in 0..10 {
+            ZpoolOpenOptions::new(ZpoolType::Meta)
+                .create(true)
+                .open::<DatasetWrapper>(poolname, &[uzfs_test_env.get_dev_path()])
+                .await
+                .unwrap()
+                .close()
+                .await;
         }
 
-        let ds = Dataset::init(
-            dsname,
-            uzfs_test_env.get_dev_path(),
-            DatasetType::Meta,
-            0,
-            false,
-        )
-        .await
-        .unwrap();
+        let mut zpool = ZpoolOpenOptions::new(ZpoolType::Meta)
+            .create(true)
+            .open::<DatasetWrapper>(poolname, &[uzfs_test_env.get_dev_path()])
+            .await
+            .unwrap();
+
+        let ds = zpool.get_or_open_filesystem(fsid, false).await.unwrap();
 
         let mut sb_hdl = ds.get_superblock_inode_handle().await.unwrap();
         let last_txg = ds.get_last_synced_txg();
@@ -239,19 +250,18 @@ async fn uzfs_test() {
             .unwrap());
         ds.delete_object(&mut obj_hdl).await.unwrap();
         ds.release_inode_handle(&mut obj_hdl).await;
-        ds.close().await.unwrap();
+        drop(ds);
+        zpool.close().await;
     }
 
     {
-        let ds = Dataset::init(
-            dsname,
-            uzfs_test_env.get_dev_path(),
-            DatasetType::Meta,
-            4096,
-            false,
-        )
-        .await
-        .unwrap();
+        let mut zpool = ZpoolOpenOptions::new(ZpoolType::Meta)
+            .create(true)
+            .open::<DatasetWrapper>(poolname, &[uzfs_test_env.get_dev_path()])
+            .await
+            .unwrap();
+
+        let ds = zpool.get_or_open_filesystem(fsid, false).await.unwrap();
 
         assert!(ds.get_last_synced_txg() >= txg);
         assert_eq!(ds.list_object().await.unwrap(), num + 3);
@@ -320,19 +330,18 @@ async fn uzfs_test() {
         ds.release_inode_handle(&mut dir_hdl).await;
 
         assert_eq!(ds.list_object().await.unwrap(), num);
-        ds.close().await.unwrap();
+        drop(ds);
+        zpool.close().await;
     }
 
     {
-        let ds = Dataset::init(
-            dsname,
-            uzfs_test_env.get_dev_path(),
-            DatasetType::Meta,
-            4096,
-            false,
-        )
-        .await
-        .unwrap();
+        let mut zpool = ZpoolOpenOptions::new(ZpoolType::Meta)
+            .create(true)
+            .open::<DatasetWrapper>(poolname, &[uzfs_test_env.get_dev_path()])
+            .await
+            .unwrap();
+
+        let ds = zpool.get_or_open_filesystem(fsid, false).await.unwrap();
 
         let mut ino_hdl = ds.create_inode(InodeType::FILE).await.unwrap();
         let keys = ds.list_kvattrs(&ino_hdl).await.unwrap();
@@ -372,7 +381,8 @@ async fn uzfs_test() {
             .await
             .unwrap();
         ds.release_inode_handle(&mut ino_hdl).await;
-        ds.close().await.unwrap();
+        drop(ds);
+        zpool.close().await;
     }
     uzfs_env_fini().await;
 }
@@ -380,20 +390,19 @@ async fn uzfs_test() {
 #[tokio::test(flavor = "multi_thread")]
 async fn uzfs_claim_test() {
     let ino;
-    let dsname = "uzfs_claim_test/ds";
+    let fsid = 0;
+    let poolname = "uzfs_claim_test";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
     uzfs_env_init().await;
 
     {
-        let ds = Dataset::init(
-            dsname,
-            uzfs_test_env.get_dev_path(),
-            DatasetType::Meta,
-            4096,
-            false,
-        )
-        .await
-        .unwrap();
+        let mut zpool = ZpoolOpenOptions::new(ZpoolType::Meta)
+            .create(true)
+            .open::<DatasetWrapper>(poolname, &[uzfs_test_env.get_dev_path()])
+            .await
+            .unwrap();
+
+        let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
 
         let mut claim_ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
         let (claim_ino, gen) = (claim_ino_hdl.ino, claim_ino_hdl.gen);
@@ -422,37 +431,35 @@ async fn uzfs_claim_test() {
         ds.release_inode_handle(&mut claim_ino_hdl).await;
         let mut claim_ino_hdl = ds.get_inode_handle(claim_ino, 123456, false).await.unwrap();
         ds.release_inode_handle(&mut claim_ino_hdl).await;
-        ds.close().await.unwrap();
+        drop(ds);
+        zpool.close().await;
     }
 
     {
-        let ds = Dataset::init(
-            dsname,
-            uzfs_test_env.get_dev_path(),
-            DatasetType::Meta,
-            4096,
-            false,
-        )
-        .await
-        .unwrap();
+        let mut zpool = ZpoolOpenOptions::new(ZpoolType::Meta)
+            .create(true)
+            .open::<DatasetWrapper>(poolname, &[uzfs_test_env.get_dev_path()])
+            .await
+            .unwrap();
+
+        let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
         let mut ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
         ino = ino_hdl.ino;
         ds.release_inode_handle(&mut ino_hdl).await;
 
         ds.wait_synced().await;
-        ds.close().await.unwrap();
+        drop(ds);
+        zpool.close().await;
     }
 
     {
-        let ds = Dataset::init(
-            dsname,
-            uzfs_test_env.get_dev_path(),
-            DatasetType::Meta,
-            4096,
-            false,
-        )
-        .await
-        .unwrap();
+        let mut zpool = ZpoolOpenOptions::new(ZpoolType::Meta)
+            .create(true)
+            .open::<DatasetWrapper>(poolname, &[uzfs_test_env.get_dev_path()])
+            .await
+            .unwrap();
+
+        let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
 
         // test claim when inode exists
         ds.claim_inode(ino, 0, InodeType::DIR).await.unwrap();
@@ -465,7 +472,8 @@ async fn uzfs_claim_test() {
 
         // test claim when inode doesn't exist
         ds.claim_inode(ino, 0, InodeType::DIR).await.unwrap();
-        ds.close().await.unwrap();
+        drop(ds);
+        zpool.close().await;
     }
 
     uzfs_env_fini().await;
@@ -473,21 +481,17 @@ async fn uzfs_claim_test() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn uzfs_zap_iterator_test() {
-    let dsname = "uzfs_zap_iterator_test/ds";
+    let fsid = 0;
+    let poolname = "uzfs_zap_iterator_test";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
     uzfs_env_init().await;
-
-    let ds = Arc::new(
-        Dataset::init(
-            dsname,
-            uzfs_test_env.get_dev_path(),
-            DatasetType::Meta,
-            4096,
-            false,
-        )
+    let mut zpool = ZpoolOpenOptions::new(ZpoolType::Meta)
+        .create(true)
+        .open::<DatasetWrapper>(poolname, &[uzfs_test_env.get_dev_path()])
         .await
-        .unwrap(),
-    );
+        .unwrap();
+
+    let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
 
     let (zap_obj, _) = ds.zap_create().await.unwrap();
     let num_adders = 10;
@@ -526,30 +530,29 @@ async fn uzfs_zap_iterator_test() {
     }
 
     remover_handle.await.unwrap();
-    ds.close().await.unwrap();
+    drop(ds);
+    zpool.close().await;
     uzfs_env_fini().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn uzfs_expand_test() {
-    let dsname = "uzfs_expand_test/ds";
-    let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+    let fsid = 0;
+    let poolname = "uzfs_expand_test";
+    let init_dev_size = 64 << 20;
+    let uzfs_test_env = UzfsTestEnv::new(init_dev_size);
     uzfs_env_init().await;
 
-    let ds = Arc::new(
-        Dataset::init(
-            dsname,
-            uzfs_test_env.get_dev_path(),
-            DatasetType::Data,
-            4096,
-            false,
-        )
+    let zpool = ZpoolOpenOptions::new(ZpoolType::Meta)
+        .create(true)
+        .open::<DatasetWrapper>(poolname, &[uzfs_test_env.get_dev_path()])
         .await
-        .unwrap(),
-    );
+        .unwrap();
 
-    let io_workers = 10;
-    let size = 20 << 20;
+    let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
+
+    let io_workers = 20;
+    let size = 30 << 20;
     let block_size = 1 << 18;
     let mut workers = Vec::new();
     for _ in 0..io_workers {
@@ -573,47 +576,69 @@ async fn uzfs_expand_test() {
         }));
     }
 
-    let ds_expander = ds.clone();
     let expander = tokio::task::spawn(async move {
-        let mut cur_size = 100 << 20;
-        let target_size = 400 << 20;
-        let incr_size = 20 << 20;
-        while cur_size < target_size {
+        let mut cur_size = init_dev_size;
+        let max_dev_factor = 2;
+        let total_factor = 16;
+        let target_size = init_dev_size * max_dev_factor;
+        let mut envs = vec![uzfs_test_env];
+        while envs.len() < (total_factor / max_dev_factor) as usize || cur_size < target_size {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            cur_size += incr_size;
-            uzfs_test_env.set_dev_size(cur_size);
-            ds_expander.expand().await.unwrap();
+            if cur_size < target_size {
+                cur_size += init_dev_size;
+                envs.last().unwrap().set_dev_size(cur_size);
+                zpool
+                    .expand_dev(envs.last().unwrap().get_dev_path())
+                    .await
+                    .unwrap();
+            } else {
+                envs.push(UzfsTestEnv::new(init_dev_size));
+                cur_size = init_dev_size;
+                zpool
+                    .add_dev(envs.last().unwrap().get_dev_path())
+                    .await
+                    .unwrap();
+            }
         }
-        uzfs_test_env
+
+        (zpool, envs)
     });
 
-    let _ = expander.await.unwrap();
+    let (mut zpool, mut envs) = expander.await.unwrap();
 
     for worker in workers {
         worker.await.unwrap();
     }
 
-    ds.close().await.unwrap();
+    drop(ds);
+    zpool.close().await;
+    envs.push(UzfsTestEnv::new(init_dev_size));
+    envs.push(UzfsTestEnv::new(init_dev_size));
+    let dev_paths: Vec<_> = envs.iter().map(|dev| dev.get_dev_path()).collect();
+    ZpoolOpenOptions::new(ZpoolType::Meta)
+        .create(true)
+        .open::<DatasetWrapper>(poolname, &dev_paths)
+        .await
+        .unwrap()
+        .close()
+        .await;
     uzfs_env_fini().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn uzfs_rangelock_test() {
-    let dsname = "uzfs_rangelock_test/ds";
+    let fsid = 0;
+    let poolname = "uzfs_rangelock_test";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
     uzfs_env_init().await;
 
-    let ds = Arc::new(
-        Dataset::init(
-            dsname,
-            uzfs_test_env.get_dev_path(),
-            DatasetType::Data,
-            4096,
-            false,
-        )
+    let mut zpool = ZpoolOpenOptions::new(ZpoolType::Meta)
+        .create(true)
+        .open::<DatasetWrapper>(poolname, &[uzfs_test_env.get_dev_path()])
         .await
-        .unwrap(),
-    );
+        .unwrap();
+
+    let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
 
     let (objs, gen) = ds.create_objects(1).await.unwrap();
     let obj = objs[0];
@@ -685,12 +710,11 @@ async fn uzfs_rangelock_test() {
 
                 // add edges to dependency_graph
                 for (idx, version) in data_u16.iter().enumerate() {
-                    let version = *version;
-                    if version == 0 {
+                    if *version == 0 {
                         continue;
                     }
 
-                    let node = version_node_map.get(&version).unwrap().0;
+                    let node = version_node_map.get(version).unwrap().0;
                     for (other_node, off) in version_node_map.values() {
                         if *other_node == node {
                             continue;
@@ -713,27 +737,25 @@ async fn uzfs_rangelock_test() {
         handle.await.unwrap();
     }
 
-    ds.close().await.unwrap();
+    drop(ds);
+    zpool.close().await;
     uzfs_env_fini().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn uzfs_attr_test() {
-    let dsname = "uzfs_attr_test/ds";
-    let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+    let fsid = 0;
+    let poolname = "uzfs_attr_test";
+    let uzfs_test_env = UzfsTestEnv::new(1024 * 1024 * 1024);
     uzfs_env_init().await;
 
-    let ds = Arc::new(
-        Dataset::init(
-            dsname,
-            uzfs_test_env.get_dev_path(),
-            DatasetType::Meta,
-            4096,
-            false,
-        )
+    let mut zpool = ZpoolOpenOptions::new(ZpoolType::Meta)
+        .create(true)
+        .open::<DatasetWrapper>(poolname, &[uzfs_test_env.get_dev_path()])
         .await
-        .unwrap(),
-    );
+        .unwrap();
+
+    let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
 
     let mut ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
     let value = vec![1; 512];
@@ -769,8 +791,8 @@ async fn uzfs_attr_test() {
     .unwrap();
     ds.release_inode_handle(&mut ino_hdl).await;
 
-    let ntests = 16;
-    let nloops = 50;
+    let ntests = 128;
+    let nloops = 20;
     let max_key_size = 256;
     let max_value_size = 1024;
     let mut handles = Vec::new();
@@ -871,14 +893,19 @@ async fn uzfs_attr_test() {
         handle.await.unwrap();
     }
 
-    ds.close().await.unwrap();
+    drop(ds);
+    zpool.close().await;
     uzfs_env_fini().await;
 }
 
-async fn test_reduce_max(dsname: &str, dev_path: &str) {
-    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 4096, false)
+async fn test_reduce_max(fsid: u32, poolname: &str, dev_path: &str) {
+    let mut zpool = ZpoolOpenOptions::new(ZpoolType::Data)
+        .create(true)
+        .max_blksize(4096)
+        .open::<DatasetWrapper>(poolname, &[dev_path])
         .await
         .unwrap();
+    let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
     let (objs, gen) = ds.create_objects(4).await.unwrap();
 
     let mut hdl0 = ds.get_inode_handle(objs[0], gen, true).await.unwrap();
@@ -920,11 +947,16 @@ async fn test_reduce_max(dsname: &str, dev_path: &str) {
     ds.release_inode_handle(&mut hdl1).await;
     ds.release_inode_handle(&mut hdl2).await;
     ds.release_inode_handle(&mut hdl3).await;
-    ds.close().await.unwrap();
+    drop(ds);
+    zpool.close().await;
 
-    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 1024, false)
+    let mut zpool = ZpoolOpenOptions::new(ZpoolType::Data)
+        .create(true)
+        .max_blksize(1024)
+        .open::<DatasetWrapper>(poolname, &[dev_path])
         .await
         .unwrap();
+    let ds = zpool.get_or_open_filesystem(fsid, false).await.unwrap();
     let mut hdl0 = ds.get_inode_handle(objs[0], gen, true).await.unwrap();
     let mut hdl1 = ds.get_inode_handle(objs[1], gen, true).await.unwrap();
     let mut hdl2 = ds.get_inode_handle(objs[2], gen, true).await.unwrap();
@@ -949,13 +981,18 @@ async fn test_reduce_max(dsname: &str, dev_path: &str) {
     ds.release_inode_handle(&mut hdl1).await;
     ds.release_inode_handle(&mut hdl2).await;
     ds.release_inode_handle(&mut hdl3).await;
-    ds.close().await.unwrap();
+    drop(ds);
+    zpool.close().await;
 }
 
-async fn test_increase_max(dsname: &str, dev_path: &str) {
-    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 1024, false)
+async fn test_increase_max(fsid: u32, poolname: &str, dev_path: &str) {
+    let mut zpool = ZpoolOpenOptions::new(ZpoolType::Data)
+        .create(true)
+        .max_blksize(1024)
+        .open::<DatasetWrapper>(poolname, &[dev_path])
         .await
         .unwrap();
+    let ds = zpool.get_or_open_filesystem(fsid, false).await.unwrap();
     let (objs, gen) = ds.create_objects(3).await.unwrap();
 
     let mut hdl0 = ds.get_inode_handle(objs[0], gen, true).await.unwrap();
@@ -982,11 +1019,16 @@ async fn test_increase_max(dsname: &str, dev_path: &str) {
     ds.release_inode_handle(&mut hdl0).await;
     ds.release_inode_handle(&mut hdl1).await;
     ds.release_inode_handle(&mut hdl2).await;
-    ds.close().await.unwrap();
+    drop(ds);
+    zpool.close().await;
 
-    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 4096, false)
+    let mut zpool = ZpoolOpenOptions::new(ZpoolType::Data)
+        .create(true)
+        .max_blksize(4096)
+        .open::<DatasetWrapper>(poolname, &[dev_path])
         .await
         .unwrap();
+    let ds = zpool.get_or_open_filesystem(fsid, false).await.unwrap();
     let mut hdl0 = ds.get_inode_handle(objs[0], gen, true).await.unwrap();
     let mut hdl1 = ds.get_inode_handle(objs[1], gen, true).await.unwrap();
     let mut hdl2 = ds.get_inode_handle(objs[2], gen, true).await.unwrap();
@@ -1005,16 +1047,17 @@ async fn test_increase_max(dsname: &str, dev_path: &str) {
     ds.release_inode_handle(&mut hdl0).await;
     ds.release_inode_handle(&mut hdl1).await;
     ds.release_inode_handle(&mut hdl2).await;
-    ds.close().await.unwrap();
+    drop(ds);
+    zpool.close().await;
 }
 
 #[tokio::test]
 async fn uzfs_block_test() {
-    let dsname = "uzfs_block_test/ds";
+    let poolname = "uzfs_block_test";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
     uzfs_env_init().await;
-    test_reduce_max(dsname, uzfs_test_env.get_dev_path()).await;
-    test_increase_max(dsname, uzfs_test_env.get_dev_path()).await;
+    test_reduce_max(0, poolname, uzfs_test_env.get_dev_path()).await;
+    test_increase_max(0, poolname, uzfs_test_env.get_dev_path()).await;
     uzfs_env_fini().await;
 }
 
@@ -1067,7 +1110,7 @@ fn uzfs_sync_test() {
                     .build()
                     .unwrap();
                 let obj = rt.block_on(async move {
-                    let dsname = "uzfs_sync_test/ds";
+                    let poolname = "uzfs_sync_test";
                     if obj == 0 {
                         let mut options = std::fs::OpenOptions::new();
                         options
@@ -1079,11 +1122,13 @@ fn uzfs_sync_test() {
                             .unwrap();
                     }
                     uzfs_env_init().await;
-                    let ds = Arc::new(
-                        Dataset::init(dsname, dev_path, DatasetType::Data, 262144, false)
-                            .await
-                            .unwrap(),
-                    );
+                    let zpool = ZpoolOpenOptions::new(ZpoolType::Data)
+                        .create(true)
+                        .open::<DatasetWrapper>(poolname, &[dev_path])
+                        .await
+                        .unwrap();
+
+                    let ds = zpool.get_or_open_filesystem(0, true).await.unwrap();
 
                     if obj == 0 {
                         obj = ds.create_objects(1).await.unwrap().0[0];
@@ -1174,23 +1219,20 @@ fn uzfs_sync_test() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn uzfs_write_read_test() {
-    let dsname = "uzfs_write_read_test/ds";
+    let fsid = 0;
+    let poolname = "uzfs_write_read_test";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
     uzfs_env_init().await;
 
-    let concurrency = 64;
-    let ds = Arc::new(
-        Dataset::init(
-            dsname,
-            uzfs_test_env.get_dev_path(),
-            DatasetType::Data,
-            65536,
-            false,
-        )
+    let mut zpool = ZpoolOpenOptions::new(ZpoolType::Data)
+        .create(true)
+        .open::<DatasetWrapper>(poolname, &[uzfs_test_env.get_dev_path()])
         .await
-        .unwrap(),
-    );
+        .unwrap();
 
+    let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
+
+    let concurrency = 64;
     for _ in 0..10 {
         let mut handles = Vec::with_capacity(concurrency);
         let obj = ds.create_objects(1).await.unwrap().0[0];
@@ -1221,28 +1263,26 @@ async fn uzfs_write_read_test() {
         ds.release_inode_handle(&mut obj_hdl).await;
     }
 
-    ds.close().await.unwrap();
+    drop(ds);
+    zpool.close().await;
     uzfs_env_fini().await;
 }
 
 #[tokio::test]
 async fn uzfs_truncate_test() {
-    let dsname = "uzfs-truncate-test-pool/ds";
+    let fsid = 0;
+    let poolname = "uzfs-truncate-test-pool";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
     uzfs_env_init().await;
 
     let blksize = 65536;
-    let ds = Arc::new(
-        Dataset::init(
-            dsname,
-            uzfs_test_env.get_dev_path(),
-            DatasetType::Data,
-            blksize,
-            false,
-        )
+    let mut zpool = ZpoolOpenOptions::new(ZpoolType::Data)
+        .create(true)
+        .open::<DatasetWrapper>(poolname, &[uzfs_test_env.get_dev_path()])
         .await
-        .unwrap(),
-    );
+        .unwrap();
+
+    let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
 
     let iters = 10000;
     let (objs, gen) = ds.create_objects(iters).await.unwrap();
@@ -1315,25 +1355,25 @@ async fn uzfs_truncate_test() {
         handle.await.unwrap();
     }
 
-    ds.close().await.unwrap();
+    drop(ds);
+    zpool.close().await;
     uzfs_env_fini().await;
 }
 
 #[tokio::test]
 async fn next_block_test() {
-    let dsname = "next_block_test/ds";
+    let fsid = 0;
+    let poolname = "next_block_test";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
     uzfs_env_init().await;
 
-    let ds = Dataset::init(
-        dsname,
-        uzfs_test_env.get_dev_path(),
-        DatasetType::Data,
-        0,
-        false,
-    )
-    .await
-    .unwrap();
+    let mut zpool = ZpoolOpenOptions::new(ZpoolType::Data)
+        .create(true)
+        .open::<DatasetWrapper>(poolname, &[uzfs_test_env.get_dev_path()])
+        .await
+        .unwrap();
+
+    let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
 
     let obj = ds.create_objects(1).await.unwrap().0[0];
     let mut ino_hdl = ds.get_inode_handle(obj, u64::MAX, true).await.unwrap();
@@ -1358,7 +1398,8 @@ async fn next_block_test() {
     assert_eq!(size, 65536);
 
     ds.release_inode_handle(&mut ino_hdl).await;
-    ds.close().await.unwrap();
+    drop(ds);
+    zpool.close().await;
     uzfs_env_fini().await;
 }
 
@@ -1366,18 +1407,17 @@ const PREFIX: &str = "qwertyuiopasdfghjkl-";
 
 #[tokio::test]
 async fn dentry_test() {
-    let dsname = "dentry_test/ds";
+    let fsid = 0;
+    let poolname = "dentry_test";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
     uzfs_env_init().await;
-    let ds = Dataset::init(
-        dsname,
-        uzfs_test_env.get_dev_path(),
-        DatasetType::Meta,
-        0,
-        false,
-    )
-    .await
-    .unwrap();
+    let mut zpool = ZpoolOpenOptions::new(ZpoolType::Meta)
+        .create(true)
+        .open::<DatasetWrapper>(poolname, &[uzfs_test_env.get_dev_path()])
+        .await
+        .unwrap();
+
+    let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
 
     fn verify_dentries(dentries: Vec<UzfsDentry>) {
         for dentry in &dentries {
@@ -1423,26 +1463,75 @@ async fn dentry_test() {
         ds.release_inode_handle(&mut ino_hdl).await;
     }
 
-    ds.close().await.unwrap();
+    drop(ds);
+    zpool.close().await;
+    uzfs_env_fini().await;
+}
+
+#[tokio::test]
+async fn multi_dataset_test() {
+    let poolname = "multi_dataset_test";
+    let uzfs_test_env = UzfsTestEnv::new(1024 * 1024 * 1024);
+    uzfs_env_init().await;
+    let fsid0 = 0;
+    let mut zpool = ZpoolOpenOptions::new(ZpoolType::Meta)
+        .create(true)
+        .open::<DatasetWrapper>(poolname, &[uzfs_test_env.get_dev_path()])
+        .await
+        .unwrap();
+
+    let ds0 = zpool.get_or_open_filesystem(fsid0, true).await.unwrap();
+
+    let fsid1 = 1;
+    let ds1 = zpool.get_or_open_filesystem(fsid1, true).await.unwrap();
+    println!("space: {:?}", ds0.space().await);
+    let mut ino_hdl = ds1.create_inode(InodeType::DATAOBJ).await.unwrap();
+    let data = vec![1; 256 << 10];
+    ds1.write_object(&ino_hdl, 0, false, vec![&data])
+        .await
+        .unwrap();
+    ds1.wait_synced().await;
+    ds1.release_inode_handle(&mut ino_hdl).await;
+    println!("space: {:?}", ds0.space().await);
+    drop(ds1);
+    zpool.destroy_filesystem(fsid1).await.unwrap();
+    println!("space: {:?}", ds0.space().await);
+
+    drop(ds0);
+    for fsid in 2..100 {
+        zpool.get_or_open_filesystem(fsid, true).await.unwrap();
+    }
+
+    zpool.close().await;
+    let mut zpool = ZpoolOpenOptions::new(ZpoolType::Meta)
+        .create(true)
+        .open::<DatasetWrapper>(poolname, &[uzfs_test_env.get_dev_path()])
+        .await
+        .unwrap();
+
+    for fsid in 0..100 {
+        if fsid == 1 {
+            continue;
+        }
+        zpool.get_or_open_filesystem(fsid, false).await.unwrap();
+    }
+
+    zpool.close().await;
     uzfs_env_fini().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn read_zero_copy_test() {
-    let dsname = "read_zero_copy_test/ds";
+    let poolname = "read_zero_copy_test";
     let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
     uzfs_env_init().await;
-    let ds = Arc::new(
-        Dataset::init(
-            dsname,
-            uzfs_test_env.get_dev_path(),
-            DatasetType::Data,
-            0,
-            false,
-        )
+    let fsid = 0;
+    let mut zpool = ZpoolOpenOptions::new(ZpoolType::Meta)
+        .create(true)
+        .open::<DatasetWrapper>(poolname, &[uzfs_test_env.get_dev_path()])
         .await
-        .unwrap(),
-    );
+        .unwrap();
+    let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
 
     for _ in 0..128 {
         let nobjs = 128;
@@ -1480,6 +1569,7 @@ async fn read_zero_copy_test() {
         }
     }
 
-    ds.close().await.unwrap();
+    drop(ds);
+    zpool.close().await;
     uzfs_env_fini().await;
 }

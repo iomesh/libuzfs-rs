@@ -1,8 +1,6 @@
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::io;
-use std::io::Error;
-use std::io::ErrorKind;
 use std::mem;
 use std::os::raw::{c_char, c_void};
 use std::ptr::null_mut;
@@ -18,15 +16,13 @@ use tokio::sync::Mutex;
 use crate::bindings::async_sys::*;
 use crate::bindings::sys::*;
 use crate::context::coroutine::CoroutineFuture;
-use crate::metrics::{RequestMethod, UzfsMetrics};
+use crate::metrics::*;
 use crate::time::init_timer;
 
 pub const DEFAULT_CACHE_FILE: &str = "/tmp/zpool.cache";
 
 static UZFS_INIT_REF: OnceCell<Mutex<u32>> = OnceCell::new();
 pub const MAX_RESERVED_SIZE: usize = 192;
-const UZFS_DNODESIZE_META: u32 = 1024;
-const UZFS_DNODESIZE_DATA: u32 = 512;
 
 /// Configure uzfs parameters.
 ///
@@ -60,7 +56,7 @@ pub async fn uzfs_debug_main() {
         .map(|arg| CString::new(arg).unwrap().into_raw())
         .collect();
 
-    let mut coroutine_arg = LibuzfsDebugArgs {
+    let mut coroutine_arg = DebugArgs {
         argc: args.len() as i32,
         argv: args.as_mut_ptr(),
     };
@@ -232,12 +228,12 @@ impl Drop for ReadBufWrapper {
     }
 }
 
-struct ReadBufReleaser {
+pub(super) struct ReadBufReleaser {
     sender: std::sync::RwLock<Option<UnboundedSender<ReadBuf>>>,
 }
 
 impl ReadBufReleaser {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let (sender, mut receiver) = unbounded_channel::<ReadBuf>();
         tokio::spawn(async move {
             loop {
@@ -271,141 +267,16 @@ impl ReadBufReleaser {
 }
 
 pub struct Dataset {
-    dhp: *mut libuzfs_dataset_handle_t,
-    zhp: *mut libuzfs_zpool_handle_t,
-    poolname: CString,
-    metrics: Box<UzfsMetrics>,
-    buf_releaser: ReadBufReleaser,
-}
-
-// metrics
-impl Dataset {
-    pub fn metrics(&self) -> &UzfsMetrics {
-        &self.metrics
-    }
+    pub(super) dhp: *mut libuzfs_dataset_handle_t,
+    pub metrics: RequestMetrics,
+    pub(super) buf_releaser: ReadBufReleaser,
 }
 
 // control functions
 impl Dataset {
-    fn dsname_to_poolname(dsname: &str) -> Result<String> {
-        // the correct format of dsname is <poolname>/<dsname>, e.g testzp/ds
-        let parts: Vec<_> = dsname.split('/').collect();
-        if parts.len() != 2 {
-            Err(Error::from(ErrorKind::InvalidInput))
-        } else {
-            Ok(parts[0].to_owned())
-        }
-    }
-
-    pub async fn init(
-        dsname: &str,
-        dev_path: &str,
-        dstype: DatasetType,
-        max_blksize: u32,
-        already_formatted: bool,
-    ) -> Result<Self> {
-        assert!(max_blksize == 0 || (max_blksize & (max_blksize - 1)) == 0);
-
-        let poolname = Self::dsname_to_poolname(dsname)?;
-        let metrics = UzfsMetrics::new_boxed();
-
-        let poolname = poolname.into_cstr();
-        let dev_path_c = dev_path.into_cstr();
-        let dsname = dsname.into_cstr();
-
-        let (dnodesize, enable_autotrim) = match dstype {
-            DatasetType::Data => (UZFS_DNODESIZE_DATA, true),
-            DatasetType::Meta => (UZFS_DNODESIZE_META, false),
-        };
-
-        let mut arg = LibuzfsDatasetInitArg {
-            dsname: dsname.as_ref().as_ptr(),
-            dev_path: dev_path_c.as_ref().as_ptr(),
-            pool_name: poolname.as_ptr() as *const c_char,
-            dnodesize,
-            max_blksize,
-            already_formatted,
-            metrics: metrics.as_ref() as *const _ as *const _,
-            enable_autotrim,
-
-            ret: 0,
-            dhp: std::ptr::null_mut(),
-            zhp: std::ptr::null_mut(),
-        };
-
-        let arg_usize = &mut arg as *mut LibuzfsDatasetInitArg as usize;
-
-        CoroutineFuture::new(libuzfs_dataset_init_c, arg_usize).await;
-
-        if arg.ret != 0 {
-            Err(io::Error::from_raw_os_error(arg.ret))
-        } else if arg.dhp.is_null() || arg.zhp.is_null() {
-            Err(io::Error::from(io::ErrorKind::InvalidInput))
-        } else {
-            Ok(Self {
-                dhp: arg.dhp,
-                zhp: arg.zhp,
-                poolname,
-                metrics,
-                buf_releaser: ReadBufReleaser::new(),
-            })
-        }
-    }
-
-    pub async fn expand(&self) -> Result<()> {
-        let mut arg = LibuzfsDatasetExpandArg {
-            dhp: self.dhp,
-            ret: 0,
-        };
-
-        let arg_usize = &mut arg as *mut LibuzfsDatasetExpandArg as usize;
-
-        CoroutineFuture::new(libuzfs_dataset_expand_c, arg_usize).await;
-
-        if arg.ret == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::from_raw_os_error(arg.ret))
-        }
-    }
-
-    pub async fn start_manual_trim(&self) -> Result<()> {
-        let mut arg = LibuzfsDatasetTrimArgs {
-            dhp: self.dhp,
-            err: 0,
-        };
-
-        let arg_usize = &mut arg as *mut _ as usize;
-        CoroutineFuture::new(libuzfs_dataset_start_manual_trim_c, arg_usize).await;
-
-        if arg.err == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::from_raw_os_error(arg.err))
-        }
-    }
-
-    pub async fn close(&self) -> Result<()> {
+    pub async fn close(&mut self) {
         self.buf_releaser.exit();
-
-        let mut arg = LibuzfsDatasetFiniArg {
-            dhp: self.dhp,
-            zhp: self.zhp,
-            poolname: self.poolname.as_ptr(),
-            err: 0,
-        };
-
-        let arg_usize = &mut arg as *mut LibuzfsDatasetFiniArg as usize;
-
-        CoroutineFuture::new(libuzfs_dataset_fini_c, arg_usize)
-            .record_pending_time()
-            .await;
-
-        if arg.err != 0 {
-            Err(io::Error::from_raw_os_error(arg.err))
-        } else {
-            Ok(())
-        }
+        CoroutineFuture::new(libuzfs_dataset_close_c, self.dhp as usize).await;
     }
 
     pub fn get_last_synced_txg(&self) -> u64 {
@@ -434,7 +305,7 @@ impl Dataset {
         gen: u64,
         is_data_inode: bool,
     ) -> Result<InodeHandle> {
-        let mut arg = LibuzfsInodeHandleGetArgs {
+        let mut arg = InodeHandleGetArgs {
             dhp: self.dhp,
             ino,
             gen,
@@ -477,7 +348,7 @@ impl Dataset {
     }
 
     pub async fn zap_list(&self, zap_obj: u64, limit: usize) -> Result<Vec<(String, Vec<u8>)>> {
-        let mut arg = LibuzfsZapListArg {
+        let mut arg = ZapListArg {
             dhp: self.dhp,
             obj: zap_obj,
             limit,
@@ -486,7 +357,7 @@ impl Dataset {
             list: Vec::new(),
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsZapListArg as usize;
+        let arg_usize = &mut arg as *mut ZapListArg as usize;
 
         CoroutineFuture::new(libuzfs_zap_list_c, arg_usize).await;
 
@@ -499,7 +370,7 @@ impl Dataset {
 
     pub async fn zap_add<P: CStrArgument>(&self, obj: u64, name: P, value: &[u8]) -> Result<u64> {
         let cname = name.into_cstr();
-        let mut arg = LibuzfsZapUpdateArg {
+        let mut arg = ZapUpdateArg {
             dhp: self.dhp,
             obj,
             key: cname.as_ref().as_ptr(),
@@ -510,7 +381,7 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsZapUpdateArg as usize;
+        let arg_usize = &mut arg as *mut ZapUpdateArg as usize;
 
         CoroutineFuture::new(libuzfs_zap_update_c, arg_usize).await;
 
@@ -530,7 +401,7 @@ impl Dataset {
         value: &[u8],
     ) -> Result<u64> {
         let cname = name.into_cstr();
-        let mut arg = LibuzfsZapUpdateArg {
+        let mut arg = ZapUpdateArg {
             dhp: self.dhp,
             obj,
             key: cname.as_ref().as_ptr(),
@@ -541,7 +412,7 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsZapUpdateArg as usize;
+        let arg_usize = &mut arg as *mut ZapUpdateArg as usize;
 
         CoroutineFuture::new(libuzfs_zap_update_c, arg_usize).await;
 
@@ -554,7 +425,7 @@ impl Dataset {
 
     pub async fn zap_remove<P: CStrArgument>(&self, obj: u64, name: P) -> Result<u64> {
         let cname = name.into_cstr();
-        let mut arg = LibuzfsZapRemoveArg {
+        let mut arg = ZapRemoveArg {
             dhp: self.dhp,
             key: cname.as_ref().as_ptr(),
             obj,
@@ -562,7 +433,7 @@ impl Dataset {
             txg: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsZapRemoveArg as usize;
+        let arg_usize = &mut arg as *mut ZapRemoveArg as usize;
 
         CoroutineFuture::new(libuzfs_zap_remove_c, arg_usize).await;
 
@@ -578,7 +449,7 @@ impl Dataset {
 impl Dataset {
     pub async fn create_objects(&self, num_objs: usize) -> Result<(Vec<u64>, u64)> {
         let _guard = self.metrics.record(RequestMethod::CreateObjects, num_objs);
-        let mut arg = LibuzfsCreateObjectsArg {
+        let mut arg = CreateObjectsArg {
             dhp: self.dhp,
             num_objs,
             err: 0,
@@ -586,7 +457,7 @@ impl Dataset {
             gen: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsCreateObjectsArg as usize;
+        let arg_usize = &mut arg as *mut CreateObjectsArg as usize;
 
         CoroutineFuture::new(libuzfs_objects_create_c, arg_usize).await;
 
@@ -600,12 +471,12 @@ impl Dataset {
     // delete_object won't wait until synced, wait_log_commit is needed if you want wait sync
     pub async fn delete_object(&self, ino_hdl: &mut InodeHandle) -> Result<()> {
         let _guard = self.metrics.record(RequestMethod::DeleteObject, 0);
-        let mut arg = LibuzfsDeleteObjectArg {
+        let mut arg = DeleteObjectArg {
             ihp: ino_hdl.ihp,
             err: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsDeleteObjectArg as usize;
+        let arg_usize = &mut arg as *mut DeleteObjectArg as usize;
 
         CoroutineFuture::new(libuzfs_delete_object_c, arg_usize).await;
 
@@ -623,20 +494,20 @@ impl Dataset {
     }
 
     pub async fn submit_log(&self, ino: u64) {
-        let mut arg = LibuzfsLogSubmitArg { dhp: self.dhp, ino };
+        let mut arg = LogSubmitArg { dhp: self.dhp, ino };
         let arg_usize = &mut arg as *mut _ as usize;
         CoroutineFuture::new(libuzfs_log_submit_c, arg_usize).await;
     }
 
     pub async fn get_object_attr(&self, ino_hdl: &InodeHandle) -> Result<uzfs_object_attr_t> {
         let _guard = self.metrics.record(RequestMethod::GetObjectAttr, 0);
-        let mut arg = LibuzfsGetObjectAttrArg {
+        let mut arg = GetObjectAttrArg {
             ihp: ino_hdl.ihp,
             attr: uzfs_object_attr_t::default(),
             err: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsGetObjectAttrArg as usize;
+        let arg_usize = &mut arg as *mut GetObjectAttrArg as usize;
 
         CoroutineFuture::new(libuzfs_get_object_attr_c, arg_usize).await;
 
@@ -648,12 +519,12 @@ impl Dataset {
     }
 
     pub async fn list_object(&self) -> Result<u64> {
-        let mut arg = LibuzfsListObjectArg {
+        let mut arg = ListObjectArg {
             dhp: self.dhp,
             num_objs: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsListObjectArg as usize;
+        let arg_usize = &mut arg as *mut ListObjectArg as usize;
 
         CoroutineFuture::new(libuzfs_list_object_c, arg_usize).await;
 
@@ -661,14 +532,14 @@ impl Dataset {
     }
 
     pub async fn stat_object(&self, obj: u64) -> Result<dmu_object_info_t> {
-        let mut arg = LibuzfsStatObjectArg {
+        let mut arg = StatObjectArg {
             dhp: self.dhp,
             obj,
             doi: dmu_object_info_t::default(),
             err: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsStatObjectArg as usize;
+        let arg_usize = &mut arg as *mut StatObjectArg as usize;
 
         CoroutineFuture::new(libuzfs_stat_object_c, arg_usize).await;
 
@@ -688,7 +559,7 @@ impl Dataset {
         let _guard = self
             .metrics
             .record(RequestMethod::ReadObject, size as usize);
-        let mut arg = LibuzfsReadObjectArg {
+        let mut arg = ReadObjectArg {
             ihp: ino_hdl.ihp,
             offset,
             size,
@@ -696,7 +567,7 @@ impl Dataset {
             data: Vec::<u8>::with_capacity(size as usize),
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsReadObjectArg as usize;
+        let arg_usize = &mut arg as *mut ReadObjectArg as usize;
 
         CoroutineFuture::new(libuzfs_read_object_c, arg_usize).await;
 
@@ -789,7 +660,7 @@ impl Dataset {
                 iov_len: v.len(),
             })
             .collect();
-        let mut arg = LibuzfsWriteObjectArg {
+        let mut arg = WriteObjectArg {
             ihp: ino_hdl.ihp,
             offset,
             iovs,
@@ -797,7 +668,7 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsWriteObjectArg as usize;
+        let arg_usize = &mut arg as *mut WriteObjectArg as usize;
 
         CoroutineFuture::new(libuzfs_write_object_c, arg_usize).await;
 
@@ -820,14 +691,14 @@ impl Dataset {
         offset: u64,
         size: u64,
     ) -> Result<()> {
-        let mut arg = LibuzfsTruncateObjectArg {
+        let mut arg = TruncateObjectArg {
             ihp: ino_hdl.ihp,
             offset,
             size,
             err: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsTruncateObjectArg as usize;
+        let arg_usize = &mut arg as *mut TruncateObjectArg as usize;
 
         CoroutineFuture::new(libuzfs_truncate_object_c, arg_usize).await;
 
@@ -839,7 +710,7 @@ impl Dataset {
     }
 
     pub async fn space(&self) -> (u64, u64, u64, u64) {
-        let mut arg = LibuzfsDatasetSpaceArg {
+        let mut arg = DatasetSpaceArg {
             dhp: self.dhp,
             refd_bytes: 0,
             avail_bytes: 0,
@@ -847,7 +718,7 @@ impl Dataset {
             avail_objs: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsDatasetSpaceArg as usize;
+        let arg_usize = &mut arg as *mut DatasetSpaceArg as usize;
 
         CoroutineFuture::new(libuzfs_dataset_space_c, arg_usize).await;
 
@@ -865,13 +736,13 @@ impl Dataset {
         offset: u64,
         size: u64,
     ) -> Result<bool> {
-        let mut arg = LibuzfsFindHoleArg {
+        let mut arg = FindHoleArg {
             ihp: ino_hdl.ihp,
             off: offset,
             err: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsFindHoleArg as usize;
+        let arg_usize = &mut arg as *mut FindHoleArg as usize;
 
         CoroutineFuture::new(libuzfs_object_next_hole_c, arg_usize).await;
 
@@ -886,7 +757,7 @@ impl Dataset {
         ino_hdl: &InodeHandle,
         offset: u64,
     ) -> Result<Option<(u64, u64)>> {
-        let mut arg = LibuzfsNextBlockArg {
+        let mut arg = NextBlockArg {
             ihp: ino_hdl.ihp,
             off: offset,
 
@@ -928,14 +799,14 @@ impl Dataset {
         tv_sec: i64,
         tv_nsec: i64,
     ) -> Result<()> {
-        let mut arg = LibuzfsObjectSetMtimeArg {
+        let mut arg = ObjectSetMtimeArg {
             ihp: ino_hdl.ihp,
             tv_sec,
             tv_nsec,
             err: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsObjectSetMtimeArg as usize;
+        let arg_usize = &mut arg as *mut ObjectSetMtimeArg as usize;
         CoroutineFuture::new(libuzfs_object_set_mtime, arg_usize).await;
 
         if arg.err == 0 {
@@ -959,7 +830,7 @@ impl Dataset {
     // will be blocked within the lifetime of this lock guard
     pub async fn create_inode(&self, inode_type: InodeType) -> Result<InodeHandle> {
         let _guard = self.metrics.record(RequestMethod::CreateInode, 0);
-        let mut arg = LibuzfsCreateInode {
+        let mut arg = CreateInode {
             dhp: self.dhp,
             inode_type: inode_type as u32,
 
@@ -969,7 +840,7 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsCreateInode as usize;
+        let arg_usize = &mut arg as *mut CreateInode as usize;
 
         CoroutineFuture::new(libuzfs_create_inode_c, arg_usize).await;
 
@@ -985,7 +856,7 @@ impl Dataset {
     }
 
     pub async fn claim_inode(&self, ino: u64, gen: u64, inode_type: InodeType) -> Result<()> {
-        let mut arg = LibuzfsClaimInodeArg {
+        let mut arg = ClaimInodeArg {
             dhp: self.dhp,
             inode_type: inode_type as u32,
             ino,
@@ -993,7 +864,7 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsClaimInodeArg as usize;
+        let arg_usize = &mut arg as *mut ClaimInodeArg as usize;
 
         CoroutineFuture::new(libuzfs_claim_inode_c, arg_usize).await;
 
@@ -1010,14 +881,14 @@ impl Dataset {
         inode_type: InodeType,
     ) -> Result<u64> {
         let _guard = self.metrics.record(RequestMethod::DeleteInode, 0);
-        let mut arg = LibuzfsDeleteInode {
+        let mut arg = DeleteInode {
             ihp: ino_hdl.ihp,
             inode_type: inode_type as u32,
             err: 0,
             txg: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsDeleteInode as usize;
+        let arg_usize = &mut arg as *mut DeleteInode as usize;
 
         CoroutineFuture::new(libuzfs_delete_inode_c, arg_usize).await;
 
@@ -1033,7 +904,7 @@ impl Dataset {
         let mut attr = InodeAttr::default();
         attr.reserved.reserve(MAX_RESERVED_SIZE);
 
-        let mut arg = LibuzfsGetAttrArg {
+        let mut arg = GetAttrArg {
             ihp: ino_hdl.ihp,
             reserved: attr.reserved.as_mut_ptr() as *mut libc::c_char,
             size: 0,
@@ -1041,7 +912,7 @@ impl Dataset {
             err: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsGetAttrArg as usize;
+        let arg_usize = &mut arg as *mut GetAttrArg as usize;
 
         CoroutineFuture::new(libuzfs_inode_getattr_c, arg_usize).await;
 
@@ -1058,7 +929,7 @@ impl Dataset {
     pub async fn set_attr(&self, ino_hdl: &mut InodeHandle, reserved: &[u8]) -> Result<u64> {
         let _guard = self.metrics.record(RequestMethod::SetAttr, 0);
         assert!(reserved.len() <= MAX_RESERVED_SIZE);
-        let mut arg = LibuzfsSetAttrArg {
+        let mut arg = SetAttrArg {
             ihp: ino_hdl.ihp,
             reserved: reserved.as_ptr() as *const libc::c_char,
             size: reserved.len() as u32,
@@ -1066,7 +937,7 @@ impl Dataset {
             txg: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsSetAttrArg as usize;
+        let arg_usize = &mut arg as *mut SetAttrArg as usize;
 
         CoroutineFuture::new(libuzfs_set_attr_c, arg_usize).await;
 
@@ -1084,14 +955,14 @@ impl Dataset {
     ) -> Result<Vec<u8>> {
         let _guard = self.metrics.record(RequestMethod::GetKvattr, 0);
         let cname = name.into_cstr();
-        let mut arg = LibuzfsGetKvattrArg {
+        let mut arg = GetKvattrArg {
             ihp: ino_hdl.ihp,
             name: cname.as_ref().as_ptr(),
             data: Vec::new(),
             err: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsGetKvattrArg as usize;
+        let arg_usize = &mut arg as *mut GetKvattrArg as usize;
 
         CoroutineFuture::new(libuzfs_inode_get_kvattr_c, arg_usize).await;
 
@@ -1111,7 +982,7 @@ impl Dataset {
     ) -> Result<u64> {
         let _guard = self.metrics.record(RequestMethod::SetKvattr, 0);
         let cname = name.into_cstr();
-        let mut arg = LibuzfsSetKvAttrArg {
+        let mut arg = SetKvAttrArg {
             ihp: ino_hdl.ihp,
             name: cname.as_ref().as_ptr(),
             option,
@@ -1121,7 +992,7 @@ impl Dataset {
             txg: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsSetKvAttrArg as usize;
+        let arg_usize = &mut arg as *mut SetKvAttrArg as usize;
 
         CoroutineFuture::new(libuzfs_set_kvattr_c, arg_usize).await;
 
@@ -1138,14 +1009,14 @@ impl Dataset {
         name: P,
     ) -> Result<u64> {
         let cname = name.into_cstr();
-        let mut arg = LibuzfsRemoveKvattrArg {
+        let mut arg = RemoveKvattrArg {
             ihp: ino_hdl.ihp,
             name: cname.as_ref().as_ptr(),
             err: 0,
             txg: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsRemoveKvattrArg as usize;
+        let arg_usize = &mut arg as *mut RemoveKvattrArg as usize;
 
         CoroutineFuture::new(libuzfs_remove_kvattr_c, arg_usize).await;
 
@@ -1157,13 +1028,13 @@ impl Dataset {
     }
 
     pub async fn list_kvattrs(&self, ino_hdl: &InodeHandle) -> Result<Vec<String>> {
-        let mut arg = LibuzfsListKvAttrsArg {
+        let mut arg = ListKvAttrsArg {
             ihp: ino_hdl.ihp,
             err: 0,
             names: Vec::new(),
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsListKvAttrsArg as usize;
+        let arg_usize = &mut arg as *mut ListKvAttrsArg as usize;
 
         CoroutineFuture::new(libuzfs_list_kvattrs_c, arg_usize).await;
 
@@ -1182,7 +1053,7 @@ impl Dataset {
     ) -> Result<u64> {
         let _guard = self.metrics.record(RequestMethod::CreateDentry, 0);
         let cname = name.into_cstr();
-        let mut arg = LibuzfsCreateDentryArg {
+        let mut arg = CreateDentryArg {
             dihp: ino_hdl.ihp,
             name: cname.as_ref().as_ptr(),
             ino: value,
@@ -1190,7 +1061,7 @@ impl Dataset {
             txg: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsCreateDentryArg as usize;
+        let arg_usize = &mut arg as *mut CreateDentryArg as usize;
 
         CoroutineFuture::new(libuzfs_create_dentry_c, arg_usize).await;
 
@@ -1208,14 +1079,14 @@ impl Dataset {
     ) -> Result<u64> {
         let _guard = self.metrics.record(RequestMethod::DeleteDentry, 0);
         let cname = name.into_cstr();
-        let mut arg = LibuzfsDeleteDentryArg {
+        let mut arg = DeleteDentryArg {
             dihp: ino_hdl.ihp,
             name: cname.as_ref().as_ptr(),
             err: 0,
             txg: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsDeleteDentryArg as usize;
+        let arg_usize = &mut arg as *mut DeleteDentryArg as usize;
 
         CoroutineFuture::new(libuzfs_delete_entry_c, arg_usize).await;
 
@@ -1233,14 +1104,14 @@ impl Dataset {
     ) -> Result<u64> {
         let _guard = self.metrics.record(RequestMethod::LookupDentry, 0);
         let cname = name.into_cstr();
-        let mut arg = LibuzfsLookupDentryArg {
+        let mut arg = LookupDentryArg {
             dihp: ino_hdl.ihp,
             name: cname.as_ref().as_ptr(),
             ino: 0,
             err: 0,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsLookupDentryArg as usize;
+        let arg_usize = &mut arg as *mut LookupDentryArg as usize;
 
         CoroutineFuture::new(libuzfs_lookup_dentry_c, arg_usize).await;
 
@@ -1258,7 +1129,7 @@ impl Dataset {
         size: u32,
     ) -> Result<(Vec<UzfsDentry>, bool)> {
         let _guard = self.metrics.record(RequestMethod::IterateDentry, 0);
-        let mut arg = LibuzfsIterateDentryArg {
+        let mut arg = IterateDentryArg {
             dihp: ino_hdl.ihp,
             whence,
             size,
@@ -1267,7 +1138,7 @@ impl Dataset {
             done: false,
         };
 
-        let arg_usize = &mut arg as *mut LibuzfsIterateDentryArg as usize;
+        let arg_usize = &mut arg as *mut IterateDentryArg as usize;
 
         CoroutineFuture::new(libuzfs_iterate_dentry_c, arg_usize).await;
 

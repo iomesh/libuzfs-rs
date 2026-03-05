@@ -1,7 +1,9 @@
 mod dataset;
 pub use dataset::*;
+mod zpool;
+pub use zpool::*;
 pub(crate) mod bindings;
-pub(crate) mod context;
+pub mod context;
 pub(crate) mod io;
 pub mod metrics;
 pub(crate) mod sync;
