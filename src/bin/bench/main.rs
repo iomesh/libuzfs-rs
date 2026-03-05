@@ -69,7 +69,7 @@ async fn bench(
 struct DatasetWrapper(Dataset);
 
 impl FileSystem for DatasetWrapper {
-    async fn init(ds: Dataset, _fsid: u32, _poolname: &str) -> Result<Self> {
+    async fn init(ds: Dataset, _fsid: u32, _snapid: Option<u32>, _poolname: &str) -> Result<Self> {
         Ok(Self(ds))
     }
 
@@ -102,8 +102,7 @@ async fn main() {
         .await
         .unwrap();
 
-    zp.create_filesystem(0).await.unwrap();
-    let ds = zp.get_or_open_filesystem(0).await.unwrap();
+    let ds = zp.get_or_open_filesystem(0, true).await.unwrap();
 
     let objs = ds.create_objects(concurrency).await.unwrap().0;
 

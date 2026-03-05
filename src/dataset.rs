@@ -1,25 +1,17 @@
-use std::array;
 use std::ffi::CStr;
 use std::ffi::CString;
-use std::future::Future;
 use std::io;
-use std::io::Error;
 use std::mem;
-use std::mem::take;
 use std::os::raw::{c_char, c_void};
 use std::ptr::null_mut;
 use std::ptr::slice_from_raw_parts;
-use std::sync::Arc;
-use std::time::Duration;
 
-use chrono::Local;
 use cstr_argument::CStrArgument;
-use dashmap::DashMap;
 use io::Result;
 use once_cell::sync::OnceCell;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
 use crate::bindings::async_sys::*;
 use crate::bindings::sys::*;
@@ -236,12 +228,12 @@ impl Drop for ReadBufWrapper {
     }
 }
 
-struct ReadBufReleaser {
+pub(super) struct ReadBufReleaser {
     sender: std::sync::RwLock<Option<UnboundedSender<ReadBuf>>>,
 }
 
 impl ReadBufReleaser {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let (sender, mut receiver) = unbounded_channel::<ReadBuf>();
         tokio::spawn(async move {
             loop {
@@ -274,298 +266,10 @@ impl ReadBufReleaser {
     }
 }
 
-pub enum ZpoolType {
-    Meta,
-    Data,
-}
-
-pub struct ZpoolOpenOptions {
-    create: bool,
-    autotrim: bool,
-    max_blksize: u32,
-    dnodesize: u32,
-}
-
-impl ZpoolOpenOptions {
-    pub fn new(zp_type: ZpoolType) -> Self {
-        let (autotrim, dnodesize, max_blksize) = match zp_type {
-            ZpoolType::Data => (true, 512, 64 << 10),
-            ZpoolType::Meta => (false, 1024, 0),
-        };
-
-        Self {
-            create: false,
-            autotrim,
-            max_blksize,
-            dnodesize,
-        }
-    }
-
-    pub fn max_blksize(mut self, max_blksize: u32) -> Self {
-        self.max_blksize = max_blksize;
-        self
-    }
-
-    pub fn create(mut self, create: bool) -> Self {
-        self.create = create;
-        self
-    }
-
-    pub async fn open<FS: FileSystem>(
-        self,
-        poolname: &str,
-        dev_paths: &[&str],
-    ) -> Result<Zpool<FS>> {
-        Zpool::open(
-            poolname,
-            dev_paths,
-            self.create,
-            self.autotrim,
-            self.dnodesize,
-            self.max_blksize,
-        )
-        .await
-    }
-}
-
-pub trait FileSystem: Send + Sync + 'static + Sized {
-    fn init(ds: Dataset, fsid: u32, pool_name: &str) -> impl Future<Output = Result<Self>> + Send;
-    fn close(&mut self) -> impl Future<Output = Result<()>> + Send;
-}
-
-const LOCK_SHARDS: usize = 97;
-
-pub struct Zpool<FS> {
-    zhp: *mut libuzfs_zpool_handle_t,
-    pub metrics: Box<ZpoolMetrics>,
-
-    locks: [Mutex<()>; LOCK_SHARDS],
-    filesystems: DashMap<u32, Arc<FS>>,
-
-    dnodesize: u32,
-    max_blksize: u32,
-
-    dev_lock: RwLock<()>,
-
-    poolname: String,
-}
-
-unsafe impl<FS> Send for Zpool<FS> {}
-unsafe impl<FS> Sync for Zpool<FS> {}
-
-impl<FS: FileSystem> Zpool<FS> {
-    async fn open(
-        poolname: &str,
-        dev_paths: &[&str],
-        create: bool,
-        enable_autotrim: bool,
-        dnodesize: u32,
-        max_blksize: u32,
-    ) -> Result<Self> {
-        let poolname_cstr = poolname.into_cstr();
-        let metrics = ZpoolMetrics::new_boxed();
-        let dev_paths_cstr: Vec<_> = dev_paths
-            .iter()
-            .map(|dev_path| dev_path.into_cstr())
-            .collect();
-        let mut args = ZpoolOpenArg {
-            pool_name: poolname_cstr.as_ptr(),
-            dev_paths: dev_paths_cstr
-                .iter()
-                .map(|dev_path| dev_path.as_ptr())
-                .collect(),
-            metrics: metrics.as_ref() as *const _ as *const _,
-            create,
-            enable_autotrim,
-            res: 0,
-            zhp: null_mut(),
-        };
-
-        let args_usize = &mut args as *mut _ as usize;
-        CoroutineFuture::new(libuzfs_zpool_open_c, args_usize).await;
-
-        if args.zhp.is_null() {
-            assert_ne!(args.res, 0);
-            Err(Error::from_raw_os_error(args.res))
-        } else {
-            Ok(Self {
-                zhp: args.zhp,
-                metrics,
-                locks: array::from_fn(|_| Mutex::new(())),
-                filesystems: DashMap::new(),
-                dnodesize,
-                max_blksize,
-                dev_lock: RwLock::new(()),
-                poolname: poolname.to_owned(),
-            })
-        }
-    }
-
-    pub async fn start_manual_trim(&self) -> Result<()> {
-        let _guard = self.dev_lock.read().await;
-        let mut args = ManualTrimArg {
-            zhp: self.zhp,
-            res: 0,
-        };
-        let arg_usize = &mut args as *mut _ as usize;
-        CoroutineFuture::new(libuzfs_start_manual_trim_c, arg_usize).await;
-
-        if args.res != 0 {
-            Err(Error::from_raw_os_error(args.res))
-        } else {
-            Ok(())
-        }
-    }
-
-    pub async fn close(&mut self) {
-        for (fsid, mut fs) in take(&mut self.filesystems) {
-            self.close_filesystem(&mut fs, fsid, "zpool closing").await;
-        }
-
-        CoroutineFuture::new(libuzfs_zpool_close_c, self.zhp as usize)
-            .record_pending_time()
-            .await;
-    }
-
-    pub async fn expand_dev(&self, dev_path: &str) -> Result<()> {
-        let _guard = self.dev_lock.read().await;
-        let dev_path_cstr = dev_path.into_cstr();
-
-        let mut args = ZpoolExpandArg {
-            zhp: self.zhp,
-            dev_path: dev_path_cstr.as_ptr(),
-            res: 0,
-        };
-
-        let arg_usize = &mut args as *mut _ as usize;
-
-        CoroutineFuture::new(libuzfs_zpool_expand_c, arg_usize).await;
-        if args.res != 0 {
-            Err(Error::from_raw_os_error(args.res))
-        } else {
-            Ok(())
-        }
-    }
-
-    pub async fn add_dev(&self, dev_path: &str) -> Result<()> {
-        let _guard = self.dev_lock.write().await;
-        let dev_path_cstr = dev_path.into_cstr();
-
-        let mut args = ZpoolAddDevArg {
-            zhp: self.zhp,
-            dev_path: dev_path_cstr.as_ptr(),
-            res: 0,
-        };
-
-        let arg_usize = &mut args as *mut _ as usize;
-
-        CoroutineFuture::new(libuzfs_zpool_add_dev_c, arg_usize).await;
-        if args.res != 0 {
-            Err(Error::from_raw_os_error(args.res))
-        } else {
-            Ok(())
-        }
-    }
-
-    async fn open_dataset(&self, fsid: u32, create: bool) -> Result<Dataset> {
-        let dsname = fsid.to_string().into_cstr();
-        let mut args = DatasetOpenArgs {
-            zhp: self.zhp,
-            dsname: dsname.as_ptr(),
-            dnode_size: self.dnodesize,
-            max_blksize: self.max_blksize,
-            create,
-
-            res: 0,
-            dhp: null_mut(),
-        };
-
-        let arg_usize = &mut args as *mut _ as usize;
-        CoroutineFuture::new(libuzfs_dataset_open_c, arg_usize).await;
-
-        if args.res == 0 {
-            Ok(Dataset {
-                dhp: args.dhp,
-                metrics: RequestMetrics::new(),
-                buf_releaser: ReadBufReleaser::new(),
-            })
-        } else {
-            Err(Error::from_raw_os_error(args.res))
-        }
-    }
-
-    pub async fn create_filesystem(&self, fsid: u32) -> Result<()> {
-        let _guard = self.locks[fsid as usize % LOCK_SHARDS].lock().await;
-        if self.filesystems.contains_key(&fsid) {
-            return Ok(());
-        }
-
-        let ds = self.open_dataset(fsid, true).await?;
-        let filesystem = FS::init(ds, fsid, &self.poolname).await?;
-
-        self.filesystems.insert(fsid, Arc::new(filesystem));
-        Ok(())
-    }
-
-    pub async fn get_or_open_filesystem(&self, fsid: u32) -> Result<Arc<FS>> {
-        if let Some(fs) = self.filesystems.get(&fsid).map(|v| v.clone()) {
-            return Ok(fs);
-        }
-
-        let _guard = self.locks[fsid as usize % LOCK_SHARDS].lock().await;
-        if let Some(fs) = self.filesystems.get(&fsid).map(|v| v.clone()) {
-            return Ok(fs);
-        }
-
-        let ds = self.open_dataset(fsid, false).await?;
-        let fs = Arc::new(FS::init(ds, fsid, &self.poolname).await?);
-
-        self.filesystems.insert(fsid, fs.clone());
-        Ok(fs)
-    }
-
-    async fn close_filesystem(&self, filesystem: &mut Arc<FS>, fsid: u32, debug_str: &str) {
-        loop {
-            if let Some(fs) = Arc::get_mut(filesystem) {
-                fs.close().await.unwrap();
-                break;
-            }
-            println!(
-                "[{}] {debug_str}. filesystem {fsid} in ZPool {} still has {} inflight io, wait..",
-                Local::now(),
-                self.poolname,
-                Arc::strong_count(filesystem)
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    }
-
-    pub async fn destroy_filesystem(&self, fsid: u32) {
-        let Some((fsid, mut filesystem)) = self.filesystems.remove(&fsid) else {
-            return;
-        };
-
-        self.close_filesystem(&mut filesystem, fsid, "destroy")
-            .await;
-
-        let dsname = fsid.to_string().into_cstr();
-        let mut args = DatasetDestroyArgs {
-            zhp: self.zhp,
-            dsname: dsname.as_ptr(),
-
-            err: 0,
-        };
-
-        let args_usize = &mut args as *mut _ as usize;
-        CoroutineFuture::new(libuzfs_dataset_destroy_c, args_usize).await;
-        assert_eq!(args.err, 0);
-    }
-}
-
 pub struct Dataset {
-    dhp: *mut libuzfs_dataset_handle_t,
+    pub(super) dhp: *mut libuzfs_dataset_handle_t,
     pub metrics: RequestMetrics,
-    buf_releaser: ReadBufReleaser,
+    pub(super) buf_releaser: ReadBufReleaser,
 }
 
 // control functions

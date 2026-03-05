@@ -1070,3 +1070,163 @@ pub unsafe extern "C" fn libuzfs_show_stats_c(arg: *mut c_void) {
 pub unsafe extern "C" fn libuzfs_wakeup_arc_evictor_c(_arg: *mut c_void) {
     libuzfs_wakeup_arc_evictor();
 }
+
+// Snapshot operations
+#[repr(C)]
+pub struct SnapshotCreateArg {
+    pub zhp: *mut libuzfs_zpool_handle_t,
+    pub dsname: *const c_char,
+    pub snapname: *const c_char,
+    pub err: i32,
+}
+
+unsafe impl Send for SnapshotCreateArg {}
+unsafe impl Sync for SnapshotCreateArg {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_snapshot_create_c(arg: *mut c_void) {
+    let arg = &mut *(arg as *mut SnapshotCreateArg);
+    arg.err = libuzfs_snapshot_create(arg.zhp, arg.dsname, arg.snapname);
+}
+
+#[repr(C)]
+pub struct SnapshotDestroyArg {
+    pub zhp: *mut libuzfs_zpool_handle_t,
+    pub dsname: *const c_char,
+    pub snapname: *const c_char,
+    pub err: i32,
+}
+
+unsafe impl Send for SnapshotDestroyArg {}
+unsafe impl Sync for SnapshotDestroyArg {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_snapshot_destroy_c(arg: *mut c_void) {
+    let arg = &mut *(arg as *mut SnapshotDestroyArg);
+    arg.err = libuzfs_snapshot_destroy(arg.zhp, arg.dsname, arg.snapname);
+}
+
+#[repr(C)]
+pub struct SnapshotRollbackArg {
+    pub zhp: *mut libuzfs_zpool_handle_t,
+    pub dsname: *const c_char,
+    pub snapname: *const c_char,
+    pub err: i32,
+}
+
+unsafe impl Send for SnapshotRollbackArg {}
+unsafe impl Sync for SnapshotRollbackArg {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_snapshot_rollback_c(arg: *mut c_void) {
+    let arg = &mut *(arg as *mut SnapshotRollbackArg);
+    arg.err = libuzfs_snapshot_rollback(arg.zhp, arg.dsname, arg.snapname);
+}
+
+#[repr(C)]
+pub struct SnapshotCloneArg {
+    pub zhp: *mut libuzfs_zpool_handle_t,
+    pub dsname: *const c_char,
+    pub snapname: *const c_char,
+    pub clone: *const c_char,
+    pub err: i32,
+}
+
+unsafe impl Send for SnapshotCloneArg {}
+unsafe impl Sync for SnapshotCloneArg {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_snapshot_clone_c(arg: *mut c_void) {
+    let arg = &mut *(arg as *mut SnapshotCloneArg);
+    arg.err = libuzfs_snapshot_clone(arg.zhp, arg.dsname, arg.snapname, arg.clone);
+}
+
+#[repr(C)]
+pub struct SnapshotListArg {
+    pub zhp: *mut libuzfs_zpool_handle_t,
+    pub dsname: *const c_char,
+    pub snapnames: Vec<String>,
+    pub err: i32,
+}
+
+unsafe impl Send for SnapshotListArg {}
+unsafe impl Sync for SnapshotListArg {}
+
+unsafe extern "C" fn snap_emit(arg: *mut c_void, snap_name: *const c_char) {
+    let arg = &mut *(arg as *mut SnapshotListArg);
+    arg.snapnames
+        .push(CStr::from_ptr(snap_name).to_str().unwrap().to_owned());
+}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_snapshot_list_c(arg_ptr: *mut c_void) {
+    let arg = &mut *(arg_ptr as *mut SnapshotListArg);
+    arg.err = libuzfs_snapshot_list(arg.zhp, arg.dsname, Some(snap_emit), arg_ptr);
+}
+
+#[repr(C)]
+pub struct SendSnapshotArg {
+    pub zhp: *mut libuzfs_zpool_handle_t,
+    pub dsname: *const c_char,
+    pub to_snap: *const c_char,
+    pub from_snap: *const c_char,
+    pub sendargs: libuzfs_send_args_t,
+    pub err: i32,
+}
+
+unsafe impl Send for SendSnapshotArg {}
+unsafe impl Sync for SendSnapshotArg {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_send_snapshot_c(arg: *mut c_void) {
+    let arg = &mut *(arg as *mut SendSnapshotArg);
+    arg.err = libuzfs_send_snapshot(
+        arg.zhp,
+        arg.dsname,
+        arg.to_snap,
+        arg.from_snap,
+        &arg.sendargs as _,
+    );
+}
+
+#[repr(C)]
+pub struct ReceiveSnapshotArg {
+    pub zhp: *mut libuzfs_zpool_handle_t,
+    pub dsname: *const c_char,
+    pub to_snap: *const c_char,
+    pub callback: libuzfs_receive_read_func_t,
+    pub callback_arg: *mut c_void,
+    pub err: i32,
+}
+
+unsafe impl Send for ReceiveSnapshotArg {}
+unsafe impl Sync for ReceiveSnapshotArg {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_receive_snapshot_c(arg: *mut c_void) {
+    let arg = &mut *(arg as *mut ReceiveSnapshotArg);
+    arg.err = libuzfs_receive_snapshot(
+        arg.zhp,
+        arg.dsname,
+        arg.to_snap,
+        arg.callback,
+        arg.callback_arg,
+    );
+}
+
+#[repr(C)]
+pub struct GetReceiveResumeInfoArg {
+    pub zhp: *mut libuzfs_zpool_handle_t,
+    pub dsname: *const c_char,
+    pub info: *mut libuzfs_receive_resume_info_t,
+    pub err: i32,
+}
+
+unsafe impl Send for GetReceiveResumeInfoArg {}
+unsafe impl Sync for GetReceiveResumeInfoArg {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_get_receive_resume_info_c(arg: *mut c_void) {
+    let arg = &mut *(arg as *mut GetReceiveResumeInfoArg);
+    arg.err = libuzfs_get_receive_resume_info(arg.zhp, arg.dsname, arg.info);
+}

@@ -1,4 +1,5 @@
 mod dataset_tests;
+mod snapshot_tests;
 mod sync_tests;
 mod timer_tests;
 

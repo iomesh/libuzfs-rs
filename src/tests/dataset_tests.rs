@@ -34,7 +34,7 @@ use tokio::task::JoinHandle;
 struct DatasetWrapper(Dataset);
 
 impl FileSystem for DatasetWrapper {
-    async fn init(ds: Dataset, _fsid: u32, _poolname: &str) -> Result<Self> {
+    async fn init(ds: Dataset, _fsid: u32, _snapid: Option<u32>, _poolname: &str) -> Result<Self> {
         Ok(Self(ds))
     }
 
@@ -81,8 +81,7 @@ async fn uzfs_test() {
             .open::<DatasetWrapper>(poolname, &[uzfs_test_env.get_dev_path()])
             .await
             .unwrap();
-
-        zpool.create_filesystem(fsid).await.unwrap();
+        zpool.get_or_open_filesystem(fsid, true).await.unwrap();
         zpool.close().await;
         for _ in 0..10 {
             ZpoolOpenOptions::new(ZpoolType::Meta)
@@ -100,7 +99,7 @@ async fn uzfs_test() {
             .await
             .unwrap();
 
-        let ds = zpool.get_or_open_filesystem(fsid).await.unwrap();
+        let ds = zpool.get_or_open_filesystem(fsid, false).await.unwrap();
 
         let mut sb_hdl = ds.get_superblock_inode_handle().await.unwrap();
         let last_txg = ds.get_last_synced_txg();
@@ -262,7 +261,7 @@ async fn uzfs_test() {
             .await
             .unwrap();
 
-        let ds = zpool.get_or_open_filesystem(fsid).await.unwrap();
+        let ds = zpool.get_or_open_filesystem(fsid, false).await.unwrap();
 
         assert!(ds.get_last_synced_txg() >= txg);
         assert_eq!(ds.list_object().await.unwrap(), num + 3);
@@ -342,7 +341,7 @@ async fn uzfs_test() {
             .await
             .unwrap();
 
-        let ds = zpool.get_or_open_filesystem(fsid).await.unwrap();
+        let ds = zpool.get_or_open_filesystem(fsid, false).await.unwrap();
 
         let mut ino_hdl = ds.create_inode(InodeType::FILE).await.unwrap();
         let keys = ds.list_kvattrs(&ino_hdl).await.unwrap();
@@ -403,8 +402,7 @@ async fn uzfs_claim_test() {
             .await
             .unwrap();
 
-        zpool.create_filesystem(fsid).await.unwrap();
-        let ds = zpool.get_or_open_filesystem(fsid).await.unwrap();
+        let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
 
         let mut claim_ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
         let (claim_ino, gen) = (claim_ino_hdl.ino, claim_ino_hdl.gen);
@@ -444,7 +442,7 @@ async fn uzfs_claim_test() {
             .await
             .unwrap();
 
-        let ds = zpool.get_or_open_filesystem(fsid).await.unwrap();
+        let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
         let mut ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
         ino = ino_hdl.ino;
         ds.release_inode_handle(&mut ino_hdl).await;
@@ -461,7 +459,7 @@ async fn uzfs_claim_test() {
             .await
             .unwrap();
 
-        let ds = zpool.get_or_open_filesystem(fsid).await.unwrap();
+        let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
 
         // test claim when inode exists
         ds.claim_inode(ino, 0, InodeType::DIR).await.unwrap();
@@ -493,8 +491,7 @@ async fn uzfs_zap_iterator_test() {
         .await
         .unwrap();
 
-    zpool.create_filesystem(fsid).await.unwrap();
-    let ds = zpool.get_or_open_filesystem(fsid).await.unwrap();
+    let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
 
     let (zap_obj, _) = ds.zap_create().await.unwrap();
     let num_adders = 10;
@@ -552,8 +549,7 @@ async fn uzfs_expand_test() {
         .await
         .unwrap();
 
-    zpool.create_filesystem(fsid).await.unwrap();
-    let ds = zpool.get_or_open_filesystem(fsid).await.unwrap();
+    let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
 
     let io_workers = 20;
     let size = 30 << 20;
@@ -642,8 +638,7 @@ async fn uzfs_rangelock_test() {
         .await
         .unwrap();
 
-    zpool.create_filesystem(fsid).await.unwrap();
-    let ds = zpool.get_or_open_filesystem(fsid).await.unwrap();
+    let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
 
     let (objs, gen) = ds.create_objects(1).await.unwrap();
     let obj = objs[0];
@@ -760,8 +755,7 @@ async fn uzfs_attr_test() {
         .await
         .unwrap();
 
-    zpool.create_filesystem(fsid).await.unwrap();
-    let ds = zpool.get_or_open_filesystem(fsid).await.unwrap();
+    let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
 
     let mut ino_hdl = ds.create_inode(InodeType::DIR).await.unwrap();
     let value = vec![1; 512];
@@ -911,8 +905,7 @@ async fn test_reduce_max(fsid: u32, poolname: &str, dev_path: &str) {
         .open::<DatasetWrapper>(poolname, &[dev_path])
         .await
         .unwrap();
-    zpool.create_filesystem(fsid).await.unwrap();
-    let ds = zpool.get_or_open_filesystem(fsid).await.unwrap();
+    let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
     let (objs, gen) = ds.create_objects(4).await.unwrap();
 
     let mut hdl0 = ds.get_inode_handle(objs[0], gen, true).await.unwrap();
@@ -963,7 +956,7 @@ async fn test_reduce_max(fsid: u32, poolname: &str, dev_path: &str) {
         .open::<DatasetWrapper>(poolname, &[dev_path])
         .await
         .unwrap();
-    let ds = zpool.get_or_open_filesystem(fsid).await.unwrap();
+    let ds = zpool.get_or_open_filesystem(fsid, false).await.unwrap();
     let mut hdl0 = ds.get_inode_handle(objs[0], gen, true).await.unwrap();
     let mut hdl1 = ds.get_inode_handle(objs[1], gen, true).await.unwrap();
     let mut hdl2 = ds.get_inode_handle(objs[2], gen, true).await.unwrap();
@@ -999,7 +992,7 @@ async fn test_increase_max(fsid: u32, poolname: &str, dev_path: &str) {
         .open::<DatasetWrapper>(poolname, &[dev_path])
         .await
         .unwrap();
-    let ds = zpool.get_or_open_filesystem(fsid).await.unwrap();
+    let ds = zpool.get_or_open_filesystem(fsid, false).await.unwrap();
     let (objs, gen) = ds.create_objects(3).await.unwrap();
 
     let mut hdl0 = ds.get_inode_handle(objs[0], gen, true).await.unwrap();
@@ -1035,7 +1028,7 @@ async fn test_increase_max(fsid: u32, poolname: &str, dev_path: &str) {
         .open::<DatasetWrapper>(poolname, &[dev_path])
         .await
         .unwrap();
-    let ds = zpool.get_or_open_filesystem(fsid).await.unwrap();
+    let ds = zpool.get_or_open_filesystem(fsid, false).await.unwrap();
     let mut hdl0 = ds.get_inode_handle(objs[0], gen, true).await.unwrap();
     let mut hdl1 = ds.get_inode_handle(objs[1], gen, true).await.unwrap();
     let mut hdl2 = ds.get_inode_handle(objs[2], gen, true).await.unwrap();
@@ -1135,10 +1128,7 @@ fn uzfs_sync_test() {
                         .await
                         .unwrap();
 
-                    if let Err(err) = zpool.create_filesystem(0).await {
-                        assert_eq!(err.kind(), ErrorKind::AlreadyExists);
-                    }
-                    let ds = zpool.get_or_open_filesystem(0).await.unwrap();
+                    let ds = zpool.get_or_open_filesystem(0, true).await.unwrap();
 
                     if obj == 0 {
                         obj = ds.create_objects(1).await.unwrap().0[0];
@@ -1240,10 +1230,7 @@ async fn uzfs_write_read_test() {
         .await
         .unwrap();
 
-    if let Err(err) = zpool.create_filesystem(fsid).await {
-        assert_eq!(err.kind(), ErrorKind::AlreadyExists);
-    }
-    let ds = zpool.get_or_open_filesystem(fsid).await.unwrap();
+    let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
 
     let concurrency = 64;
     for _ in 0..10 {
@@ -1295,10 +1282,7 @@ async fn uzfs_truncate_test() {
         .await
         .unwrap();
 
-    if let Err(err) = zpool.create_filesystem(fsid).await {
-        assert_eq!(err.kind(), ErrorKind::AlreadyExists);
-    }
-    let ds = zpool.get_or_open_filesystem(fsid).await.unwrap();
+    let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
 
     let iters = 10000;
     let (objs, gen) = ds.create_objects(iters).await.unwrap();
@@ -1389,10 +1373,7 @@ async fn next_block_test() {
         .await
         .unwrap();
 
-    if let Err(err) = zpool.create_filesystem(fsid).await {
-        assert_eq!(err.kind(), ErrorKind::AlreadyExists);
-    }
-    let ds = zpool.get_or_open_filesystem(fsid).await.unwrap();
+    let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
 
     let obj = ds.create_objects(1).await.unwrap().0[0];
     let mut ino_hdl = ds.get_inode_handle(obj, u64::MAX, true).await.unwrap();
@@ -1436,10 +1417,7 @@ async fn dentry_test() {
         .await
         .unwrap();
 
-    if let Err(err) = zpool.create_filesystem(fsid).await {
-        assert_eq!(err.kind(), ErrorKind::AlreadyExists);
-    }
-    let ds = zpool.get_or_open_filesystem(fsid).await.unwrap();
+    let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
 
     fn verify_dentries(dentries: Vec<UzfsDentry>) {
         for dentry in &dentries {
@@ -1502,16 +1480,10 @@ async fn multi_dataset_test() {
         .await
         .unwrap();
 
-    if let Err(err) = zpool.create_filesystem(fsid0).await {
-        assert_eq!(err.kind(), ErrorKind::AlreadyExists);
-    }
-    let ds0 = zpool.get_or_open_filesystem(fsid0).await.unwrap();
+    let ds0 = zpool.get_or_open_filesystem(fsid0, true).await.unwrap();
 
     let fsid1 = 1;
-    if let Err(err) = zpool.create_filesystem(fsid1).await {
-        assert_eq!(err.kind(), ErrorKind::AlreadyExists);
-    }
-    let ds1 = zpool.get_or_open_filesystem(fsid1).await.unwrap();
+    let ds1 = zpool.get_or_open_filesystem(fsid1, true).await.unwrap();
     println!("space: {:?}", ds0.space().await);
     let mut ino_hdl = ds1.create_inode(InodeType::DATAOBJ).await.unwrap();
     let data = vec![1; 256 << 10];
@@ -1522,12 +1494,12 @@ async fn multi_dataset_test() {
     ds1.release_inode_handle(&mut ino_hdl).await;
     println!("space: {:?}", ds0.space().await);
     drop(ds1);
-    zpool.destroy_filesystem(fsid1).await;
+    zpool.destroy_filesystem(fsid1).await.unwrap();
     println!("space: {:?}", ds0.space().await);
 
     drop(ds0);
     for fsid in 2..100 {
-        zpool.create_filesystem(fsid).await.unwrap();
+        zpool.get_or_open_filesystem(fsid, true).await.unwrap();
     }
 
     zpool.close().await;
@@ -1541,7 +1513,7 @@ async fn multi_dataset_test() {
         if fsid == 1 {
             continue;
         }
-        zpool.get_or_open_filesystem(fsid).await.unwrap();
+        zpool.get_or_open_filesystem(fsid, false).await.unwrap();
     }
 
     zpool.close().await;
@@ -1559,10 +1531,7 @@ async fn read_zero_copy_test() {
         .open::<DatasetWrapper>(poolname, &[uzfs_test_env.get_dev_path()])
         .await
         .unwrap();
-    if let Err(err) = zpool.create_filesystem(fsid).await {
-        assert_eq!(err.kind(), ErrorKind::AlreadyExists);
-    }
-    let ds = zpool.get_or_open_filesystem(fsid).await.unwrap();
+    let ds = zpool.get_or_open_filesystem(fsid, true).await.unwrap();
 
     for _ in 0..128 {
         let nobjs = 128;
