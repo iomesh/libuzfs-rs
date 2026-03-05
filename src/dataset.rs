@@ -1127,6 +1127,7 @@ impl Dataset {
         ino_hdl: &InodeHandle,
         whence: u64,
         size: u32,
+        prefetch: Option<u64>,
     ) -> Result<(Vec<UzfsDentry>, bool)> {
         let _guard = self.metrics.record(RequestMethod::IterateDentry, 0);
         let mut arg = IterateDentryArg {
@@ -1136,6 +1137,7 @@ impl Dataset {
             err: 0,
             dentries: Vec::new(),
             done: false,
+            prefetch,
         };
 
         let arg_usize = &mut arg as *mut IterateDentryArg as usize;
