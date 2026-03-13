@@ -181,6 +181,7 @@ pub struct LibuzfsDatasetInitArg {
     pub already_formatted: bool,
     pub metrics: *const c_void,
     pub enable_autotrim: bool,
+    pub ha_disk: bool,
 
     pub ret: i32,
     pub dhp: *mut libuzfs_dataset_handle_t,
@@ -221,7 +222,12 @@ pub unsafe extern "C" fn libuzfs_dataset_init_c(arg: *mut c_void) {
         return;
     }
 
-    arg.zhp = libuzfs_zpool_open(arg.pool_name, &mut arg.ret, arg.enable_autotrim as u32);
+    arg.zhp = libuzfs_zpool_open(
+        arg.pool_name,
+        &mut arg.ret,
+        arg.enable_autotrim as u32,
+        arg.ha_disk as _,
+    );
     if !arg.zhp.is_null() {
         assert_eq!(arg.ret, 0);
         arg.dhp = libuzfs_dataset_open(
@@ -970,6 +976,8 @@ pub struct LibuzfsIterateDentryArg {
     pub dihp: *mut libuzfs_inode_handle_t,
     pub whence: u64,
     pub size: u32,
+    pub mask: u64,
+    pub prefetch: bool,
 
     pub err: i32,
     pub done: bool,
@@ -1012,7 +1020,14 @@ pub unsafe extern "C" fn libuzfs_iterate_dentry_c(arg: *mut c_void) {
 
     arg.dentries.reserve(DEFAULT_NDENTRIES);
 
-    arg.err = libuzfs_dentry_iterate(arg.dihp, arg.whence, arg_ptr, Some(dir_emit));
+    arg.err = libuzfs_dentry_iterate(
+        arg.dihp,
+        arg.whence,
+        arg_ptr,
+        Some(dir_emit),
+        arg.prefetch as _,
+        arg.mask,
+    );
 
     if arg.err == libc::ENOENT {
         arg.done = true;
