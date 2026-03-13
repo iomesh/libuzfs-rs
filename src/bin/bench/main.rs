@@ -68,7 +68,7 @@ async fn main() {
     let file_size = 1 << 30;
 
     let ds = Arc::new(
-        Dataset::init("testzp/ds", &dev_path, DatasetType::Data, 0, false)
+        Dataset::init("testzp/ds", &dev_path, DatasetType::Data, 0, false, false)
             .await
             .unwrap(),
     );

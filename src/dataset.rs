@@ -303,6 +303,7 @@ impl Dataset {
         dstype: DatasetType,
         max_blksize: u32,
         already_formatted: bool,
+        ha_disk: bool,
     ) -> Result<Self> {
         assert!(max_blksize == 0 || (max_blksize & (max_blksize - 1)) == 0);
 
@@ -327,6 +328,7 @@ impl Dataset {
             already_formatted,
             metrics: metrics.as_ref() as *const _ as *const _,
             enable_autotrim,
+            ha_disk,
 
             ret: 0,
             dhp: std::ptr::null_mut(),
@@ -1256,12 +1258,16 @@ impl Dataset {
         ino_hdl: &InodeHandle,
         whence: u64,
         size: u32,
+        mask: u64,
+        prefetch: bool,
     ) -> Result<(Vec<UzfsDentry>, bool)> {
         let _guard = self.metrics.record(RequestMethod::IterateDentry, 0);
         let mut arg = LibuzfsIterateDentryArg {
             dihp: ino_hdl.ihp,
             whence,
             size,
+            mask,
+            prefetch,
             err: 0,
             dentries: Vec::new(),
             done: false,

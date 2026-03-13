@@ -58,6 +58,7 @@ async fn uzfs_test() {
             DatasetType::Meta,
             4096,
             false,
+            false,
         )
         .await
         .unwrap()
@@ -72,6 +73,7 @@ async fn uzfs_test() {
                 DatasetType::Meta,
                 4096,
                 false,
+                false,
             )
             .await
             .unwrap()
@@ -85,6 +87,7 @@ async fn uzfs_test() {
             uzfs_test_env.get_dev_path(),
             DatasetType::Meta,
             0,
+            false,
             false,
         )
         .await
@@ -187,7 +190,10 @@ async fn uzfs_test() {
         ds.wait_synced().await;
         assert!(ds.get_last_synced_txg() >= txg);
 
-        let (dentries, done) = ds.iterate_dentry(&dir_hdl, 0, 4096).await.unwrap();
+        let (dentries, done) = ds
+            .iterate_dentry(&dir_hdl, 0, 4096, u64::MAX, false)
+            .await
+            .unwrap();
 
         // TODO(hping): verify dentry content
         assert_eq!(dentries.len(), 1);
@@ -249,6 +255,7 @@ async fn uzfs_test() {
             DatasetType::Meta,
             4096,
             false,
+            false,
         )
         .await
         .unwrap();
@@ -285,13 +292,19 @@ async fn uzfs_test() {
         let dentry_data_read = ds.lookup_dentry(&dir_hdl, file_name).await.unwrap();
         assert_eq!(file_ino, dentry_data_read);
 
-        let (detries, done) = ds.iterate_dentry(&dir_hdl, 0, 4096).await.unwrap();
+        let (detries, done) = ds
+            .iterate_dentry(&dir_hdl, 0, 4096, u64::MAX, false)
+            .await
+            .unwrap();
         assert_eq!(detries.len(), 1);
         assert!(done);
 
         _ = ds.delete_dentry(&mut dir_hdl, file_name).await.unwrap();
 
-        let (detries, done) = ds.iterate_dentry(&dir_hdl, 0, 4096).await.unwrap();
+        let (detries, done) = ds
+            .iterate_dentry(&dir_hdl, 0, 4096, u64::MAX, false)
+            .await
+            .unwrap();
         assert_eq!(detries.len(), 0);
         assert!(done);
 
@@ -329,6 +342,7 @@ async fn uzfs_test() {
             uzfs_test_env.get_dev_path(),
             DatasetType::Meta,
             4096,
+            false,
             false,
         )
         .await
@@ -391,6 +405,7 @@ async fn uzfs_claim_test() {
             DatasetType::Meta,
             4096,
             false,
+            false,
         )
         .await
         .unwrap();
@@ -432,6 +447,7 @@ async fn uzfs_claim_test() {
             DatasetType::Meta,
             4096,
             false,
+            false,
         )
         .await
         .unwrap();
@@ -449,6 +465,7 @@ async fn uzfs_claim_test() {
             uzfs_test_env.get_dev_path(),
             DatasetType::Meta,
             4096,
+            false,
             false,
         )
         .await
@@ -483,6 +500,7 @@ async fn uzfs_zap_iterator_test() {
             uzfs_test_env.get_dev_path(),
             DatasetType::Meta,
             4096,
+            false,
             false,
         )
         .await
@@ -542,6 +560,7 @@ async fn uzfs_expand_test() {
             uzfs_test_env.get_dev_path(),
             DatasetType::Data,
             4096,
+            false,
             false,
         )
         .await
@@ -609,6 +628,7 @@ async fn uzfs_rangelock_test() {
             uzfs_test_env.get_dev_path(),
             DatasetType::Data,
             4096,
+            false,
             false,
         )
         .await
@@ -729,6 +749,7 @@ async fn uzfs_attr_test() {
             uzfs_test_env.get_dev_path(),
             DatasetType::Meta,
             4096,
+            false,
             false,
         )
         .await
@@ -876,7 +897,7 @@ async fn uzfs_attr_test() {
 }
 
 async fn test_reduce_max(dsname: &str, dev_path: &str) {
-    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 4096, false)
+    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 4096, false, false)
         .await
         .unwrap();
     let (objs, gen) = ds.create_objects(4).await.unwrap();
@@ -922,7 +943,7 @@ async fn test_reduce_max(dsname: &str, dev_path: &str) {
     ds.release_inode_handle(&mut hdl3).await;
     ds.close().await.unwrap();
 
-    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 1024, false)
+    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 1024, false, false)
         .await
         .unwrap();
     let mut hdl0 = ds.get_inode_handle(objs[0], gen, true).await.unwrap();
@@ -953,7 +974,7 @@ async fn test_reduce_max(dsname: &str, dev_path: &str) {
 }
 
 async fn test_increase_max(dsname: &str, dev_path: &str) {
-    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 1024, false)
+    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 1024, false, false)
         .await
         .unwrap();
     let (objs, gen) = ds.create_objects(3).await.unwrap();
@@ -984,7 +1005,7 @@ async fn test_increase_max(dsname: &str, dev_path: &str) {
     ds.release_inode_handle(&mut hdl2).await;
     ds.close().await.unwrap();
 
-    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 4096, false)
+    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 4096, false, false)
         .await
         .unwrap();
     let mut hdl0 = ds.get_inode_handle(objs[0], gen, true).await.unwrap();
@@ -1080,7 +1101,7 @@ fn uzfs_sync_test() {
                     }
                     uzfs_env_init().await;
                     let ds = Arc::new(
-                        Dataset::init(dsname, dev_path, DatasetType::Data, 262144, false)
+                        Dataset::init(dsname, dev_path, DatasetType::Data, 262144, false, false)
                             .await
                             .unwrap(),
                     );
@@ -1186,6 +1207,7 @@ async fn uzfs_write_read_test() {
             DatasetType::Data,
             65536,
             false,
+            false,
         )
         .await
         .unwrap(),
@@ -1238,6 +1260,7 @@ async fn uzfs_truncate_test() {
             uzfs_test_env.get_dev_path(),
             DatasetType::Data,
             blksize,
+            false,
             false,
         )
         .await
@@ -1331,6 +1354,7 @@ async fn next_block_test() {
         DatasetType::Data,
         0,
         false,
+        false,
     )
     .await
     .unwrap();
@@ -1375,6 +1399,7 @@ async fn dentry_test() {
         DatasetType::Meta,
         0,
         false,
+        false,
     )
     .await
     .unwrap();
@@ -1402,7 +1427,10 @@ async fn dentry_test() {
                 .unwrap();
         }
 
-        let (dentries, done) = ds.iterate_dentry(&ino_hdl, 0, 1 << 20).await.unwrap();
+        let (dentries, done) = ds
+            .iterate_dentry(&ino_hdl, 0, 1 << 20, u64::MAX, false)
+            .await
+            .unwrap();
         assert!(done);
         assert_eq!(dentries.len(), ndentries as usize);
         verify_dentries(dentries);
@@ -1410,7 +1438,10 @@ async fn dentry_test() {
         let mut dentries = Vec::new();
         let mut whence = 0;
         loop {
-            let (dentries_part, done) = ds.iterate_dentry(&ino_hdl, whence, 1 << 9).await.unwrap();
+            let (dentries_part, done) = ds
+                .iterate_dentry(&ino_hdl, whence, 1 << 9, u64::MAX, false)
+                .await
+                .unwrap();
             dentries.extend(dentries_part);
             whence = dentries.last().unwrap().whence;
             if done {
@@ -1438,6 +1469,7 @@ async fn read_zero_copy_test() {
             uzfs_test_env.get_dev_path(),
             DatasetType::Data,
             0,
+            false,
             false,
         )
         .await
