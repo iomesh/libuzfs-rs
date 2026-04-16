@@ -1483,3 +1483,60 @@ async fn read_zero_copy_test() {
     ds.close().await.unwrap();
     uzfs_env_fini().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn inode_create_delete_test() {
+    let dsname = "inode_create_delete_test/ds";
+    let uzfs_test_env = UzfsTestEnv::new(1024 * 1024 * 1024);
+    uzfs_env_init().await;
+    for _ in 0..10 {
+        let ds = Arc::new(
+            Dataset::init(
+                dsname,
+                uzfs_test_env.get_dev_path(),
+                DatasetType::Meta,
+                0,
+                false,
+            )
+            .await
+            .unwrap(),
+        );
+
+        let mut sb_handle = ds.get_superblock_inode_handle().await.unwrap();
+        let sb_ino = sb_handle.ino;
+        println!("sb_ino: {}", sb_ino);
+        ds.release_inode_handle(&mut sb_handle).await;
+
+        ds.claim_inode(13, 2, InodeType::FILE).await.unwrap();
+
+        ds.claim_inode(213, 2, InodeType::FILE).await.unwrap();
+
+        ds.claim_inode(325, 2, InodeType::FILE).await.unwrap();
+
+        let tasks = (0..1000)
+            .map(|_| {
+                let ds = ds.clone();
+                tokio::spawn(async move {
+                    for _ in 0..100 {
+                        let itype = if rand::thread_rng().gen_bool(0.5) {
+                            InodeType::FILE
+                        } else {
+                            InodeType::DIR
+                        };
+
+                        let mut ino_hdl = ds.create_inode(itype).await.unwrap();
+                        assert!(ino_hdl.ino % 2 == 0, "ino: {}", ino_hdl.ino);
+                        ds.delete_inode(&mut ino_hdl, itype).await.unwrap();
+                        ds.release_inode_handle(&mut ino_hdl).await;
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        ds.close().await.unwrap();
+    }
+    uzfs_env_fini().await;
+}

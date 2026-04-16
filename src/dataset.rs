@@ -121,6 +121,7 @@ pub async fn uzfs_env_fini() {
     *guard -= 1;
 }
 
+#[derive(Clone, Copy)]
 pub enum InodeType {
     FILE = libuzfs_inode_type_t_INODE_FILE as isize,
     DIR = libuzfs_inode_type_t_INODE_DIR as isize,
