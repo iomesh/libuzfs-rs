@@ -2,7 +2,6 @@ name: CI
 
 on:
   pull_request:
-    branches: [ main ]
 
   push:
     branches: [ main ]
@@ -13,7 +12,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest]
-        rust: [nightly-2024-09-09]
+        rust: [nightly-2026-03-28]
 
     steps:
     - uses: hecrj/setup-rust-action@master
