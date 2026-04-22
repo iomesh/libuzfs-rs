@@ -467,6 +467,44 @@ async fn uzfs_claim_test() {
         ds.close().await.unwrap();
     }
 
+    {
+        let ds = Dataset::init(
+            dsname,
+            uzfs_test_env.get_dev_path(),
+            DatasetType::Meta,
+            4096,
+            false,
+        )
+        .await
+        .unwrap();
+
+        ds.claim_inode(12, 4, InodeType::DIR).await.unwrap();
+        // claim again should be ok
+        ds.claim_inode(12, 4, InodeType::DIR).await.unwrap();
+        // claim conflicted should be ok, but get inode handle should be err
+        ds.claim_inode(11, 3, InodeType::DIR).await.unwrap();
+        let err = ds.get_inode_handle(11, 3, false).await.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::NotFound);
+        ds.claim_inode(13, 3, InodeType::DIR).await.unwrap();
+        let err = ds.get_inode_handle(13, 3, false).await.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::NotFound);
+
+        // claim after deleting confilcted inode should be ok
+        let mut ino_hdl = ds.get_inode_handle(12, 4, false).await.unwrap();
+        ds.delete_inode(&mut ino_hdl, InodeType::DIR).await.unwrap();
+        ds.release_inode_handle(&mut ino_hdl).await;
+        ds.claim_inode(11, 3, InodeType::DIR).await.unwrap();
+        let mut ino_hdl = ds.get_inode_handle(11, 3, false).await.unwrap();
+        ds.delete_inode(&mut ino_hdl, InodeType::DIR).await.unwrap();
+        ds.release_inode_handle(&mut ino_hdl).await;
+        ds.claim_inode(13, 3, InodeType::DIR).await.unwrap();
+        let mut ino_hdl = ds.get_inode_handle(13, 3, false).await.unwrap();
+        ds.delete_inode(&mut ino_hdl, InodeType::DIR).await.unwrap();
+        ds.release_inode_handle(&mut ino_hdl).await;
+
+        ds.close().await.unwrap();
+    }
+
     uzfs_env_fini().await;
 }
 
