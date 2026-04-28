@@ -1,6 +1,8 @@
 use super::aio::*;
 use crate::context::coroutine::CoroutineFuture;
+use dashmap::DashMap;
 use libc::{c_char, c_int, c_void, timespec};
+use once_cell::sync::Lazy;
 use std::{
     io::{Error, ErrorKind},
     ptr::null_mut,
@@ -9,6 +11,7 @@ use std::{
         Arc, Condvar, Mutex,
     },
     thread::JoinHandle,
+    time::Instant,
 };
 use tokio::runtime::Handle;
 
@@ -41,6 +44,27 @@ unsafe fn io_destroy(io_ctx: aio_context_t) -> Result<(), Error> {
     }
 }
 
+pub(super) struct ZioRecord {
+    zio_submit: Instant,
+    aio_submit: Instant,
+}
+
+impl ZioRecord {
+    pub fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            zio_submit: now,
+            aio_submit: now,
+        }
+    }
+
+    pub fn record_aio_submit(&mut self) {
+        self.aio_submit = Instant::now();
+    }
+}
+
+pub(super) static ZIO_RECORDS: Lazy<DashMap<usize, ZioRecord>> = Lazy::new(DashMap::new);
+
 #[inline]
 unsafe fn io_submit(io_ctx: aio_context_t, iocbs: &[iocb]) -> Result<(), Error> {
     if iocbs.is_empty() {
@@ -50,12 +74,13 @@ unsafe fn io_submit(io_ctx: aio_context_t, iocbs: &[iocb]) -> Result<(), Error> 
     let iocb_ptrs: Vec<_> = iocbs.iter().map(|iocb| iocb as *const iocb).collect();
     let mut nsubmitted = 0;
     while nsubmitted < iocb_ptrs.len() {
+        let submit_count = ((iocb_ptrs.len() - nsubmitted) as u64).min(64);
         let ret = libc::syscall(
             libc::SYS_io_submit,
             io_ctx,
             // Logically, batch submissions should offer better performance here;
             // however, testing revealed that single submissions perform better.
-            1,
+            submit_count,
             iocb_ptrs.as_ptr().add(nsubmitted),
         );
         assert!(ret != 0);
@@ -168,6 +193,7 @@ impl TaskList {
 
     #[inline]
     unsafe fn pop_all(&self) -> Option<Vec<iocb>> {
+        let start = Instant::now();
         if self.sem.acquire_all().is_err() {
             return None;
         }
@@ -191,6 +217,11 @@ impl TaskList {
                 _ => unimplemented!(),
             };
 
+            ZIO_RECORDS
+                .get_mut(&(cur as usize))
+                .unwrap()
+                .record_aio_submit();
+
             res.push(iocb {
                 aio_data: cur as u64,
                 aio_key: 0,
@@ -207,6 +238,16 @@ impl TaskList {
             });
 
             cur = *(cur.byte_add(self.next_off) as *mut *mut c_void);
+        }
+
+        let duration = start.elapsed();
+
+        if duration.as_secs() >= 1 {
+            println!(
+                "pop_all duration: {:?}, pop_all size: {}",
+                duration,
+                res.len()
+            );
         }
 
         Some(res)
@@ -233,6 +274,17 @@ unsafe impl Sync for IoCompletions {}
 unsafe extern "C" fn process_completion(arg: *mut libc::c_void) {
     let completions = &*(arg as *const IoCompletions);
     for completion in &completions.completions {
+        let zio_record = ZIO_RECORDS.remove(&(completion.data as usize)).unwrap().1;
+        let zio_submit = zio_record.zio_submit;
+        let aio_submit = zio_record.aio_submit;
+        let queue_time = aio_submit.duration_since(zio_submit);
+        let io_time = Instant::now().duration_since(aio_submit);
+        if io_time.as_secs() >= 1 || queue_time.as_secs() >= 1 {
+            println!(
+                "ZIO queue time: {:?}, AIO queue time: {:?}",
+                queue_time, io_time
+            );
+        }
         (completions.io_done)(completion.data as *mut libc::c_void, completion.res);
     }
 }
@@ -251,7 +303,16 @@ const MAX_IDLE_MILLS: u64 = 10;
 impl AioContext {
     fn submit(task_list: Arc<TaskList>, io_ctx: aio_context_t) {
         while let Some(tasks) = unsafe { task_list.pop_all() } {
+            let before = Instant::now();
             unsafe { io_submit(io_ctx, &tasks).unwrap() };
+            let duration = before.elapsed();
+            if duration.as_secs() >= 1 {
+                println!(
+                    "submit duration: {:?}, submit size: {}",
+                    duration,
+                    tasks.len()
+                );
+            }
         }
     }
 
