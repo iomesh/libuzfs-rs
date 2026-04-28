@@ -1,4 +1,7 @@
-use crate::bindings::sys::{aio_done_func_t, init_io_args_func_t};
+use crate::{
+    bindings::sys::{aio_done_func_t, init_io_args_func_t},
+    io::async_io::{ZioRecord, ZIO_RECORDS},
+};
 
 use super::async_io::AioContext;
 
@@ -22,5 +25,6 @@ pub unsafe extern "C" fn unregister_fd(aio_hdl: *mut libc::c_void) {
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn submit_aio(aio_hdl: *const libc::c_void, arg: *mut libc::c_void) {
     let aio_hdl = &*(aio_hdl as *const AioContext);
+    ZIO_RECORDS.insert(arg as usize, ZioRecord::new());
     aio_hdl.task_list.push(arg);
 }
