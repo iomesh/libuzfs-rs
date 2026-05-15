@@ -1084,12 +1084,14 @@ impl Dataset {
         ino_hdl: &InodeHandle,
         whence: u64,
         size: u32,
+        obj_mask: u64,
     ) -> Result<(Vec<UzfsDentry>, bool)> {
         let _guard = self.metrics.record(RequestMethod::IterateDentry, 0);
         let mut arg = LibuzfsIterateDentryArg {
             dihp: ino_hdl.ihp,
             whence,
             size,
+            obj_mask,
             err: 0,
             dentries: Vec::new(),
             done: false,

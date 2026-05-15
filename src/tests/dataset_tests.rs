@@ -186,7 +186,7 @@ async fn uzfs_test() {
         ds.wait_synced().await;
         assert!(ds.get_last_synced_txg() >= txg);
 
-        let (dentries, done) = ds.iterate_dentry(&dir_hdl, 0, 4096).await.unwrap();
+        let (dentries, done) = ds.iterate_dentry(&dir_hdl, 0, 4096, 0).await.unwrap();
 
         // TODO(hping): verify dentry content
         assert_eq!(dentries.len(), 1);
@@ -284,13 +284,13 @@ async fn uzfs_test() {
         let dentry_data_read = ds.lookup_dentry(&dir_hdl, file_name).await.unwrap();
         assert_eq!(file_ino, dentry_data_read);
 
-        let (detries, done) = ds.iterate_dentry(&dir_hdl, 0, 4096).await.unwrap();
+        let (detries, done) = ds.iterate_dentry(&dir_hdl, 0, 4096, 0).await.unwrap();
         assert_eq!(detries.len(), 1);
         assert!(done);
 
         _ = ds.delete_dentry(&mut dir_hdl, file_name).await.unwrap();
 
-        let (detries, done) = ds.iterate_dentry(&dir_hdl, 0, 4096).await.unwrap();
+        let (detries, done) = ds.iterate_dentry(&dir_hdl, 0, 4096, 0).await.unwrap();
         assert_eq!(detries.len(), 0);
         assert!(done);
 
@@ -1440,7 +1440,7 @@ async fn dentry_test() {
                 .unwrap();
         }
 
-        let (dentries, done) = ds.iterate_dentry(&ino_hdl, 0, 1 << 20).await.unwrap();
+        let (dentries, done) = ds.iterate_dentry(&ino_hdl, 0, 1 << 20, 0).await.unwrap();
         assert!(done);
         assert_eq!(dentries.len(), ndentries as usize);
         verify_dentries(dentries);
@@ -1448,7 +1448,10 @@ async fn dentry_test() {
         let mut dentries = Vec::new();
         let mut whence = 0;
         loop {
-            let (dentries_part, done) = ds.iterate_dentry(&ino_hdl, whence, 1 << 9).await.unwrap();
+            let (dentries_part, done) = ds
+                .iterate_dentry(&ino_hdl, whence, 1 << 9, 0)
+                .await
+                .unwrap();
             dentries.extend(dentries_part);
             whence = dentries.last().unwrap().whence;
             if done {

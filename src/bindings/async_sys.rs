@@ -948,6 +948,7 @@ pub struct LibuzfsIterateDentryArg {
     pub dihp: *mut libuzfs_inode_handle_t,
     pub whence: u64,
     pub size: u32,
+    pub obj_mask: u64,
 
     pub err: i32,
     pub done: bool,
@@ -990,7 +991,7 @@ pub unsafe extern "C" fn libuzfs_iterate_dentry_c(arg: *mut c_void) {
 
     arg.dentries.reserve(DEFAULT_NDENTRIES);
 
-    arg.err = libuzfs_dentry_iterate(arg.dihp, arg.whence, arg_ptr, Some(dir_emit));
+    arg.err = libuzfs_dentry_iterate(arg.dihp, arg.whence, arg_ptr, Some(dir_emit), arg.obj_mask);
 
     if arg.err == libc::ENOENT {
         arg.done = true;
