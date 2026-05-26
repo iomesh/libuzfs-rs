@@ -1026,6 +1026,20 @@ pub unsafe extern "C" fn libuzfs_wait_synced_c(arg: *mut c_void) {
     libuzfs_wait_synced(dhp);
 }
 
+pub struct LibuzfsInodePrefetchArg {
+    pub dhp: *mut libuzfs_dataset_handle_t,
+    pub ino: u64,
+}
+
+unsafe impl Send for LibuzfsInodePrefetchArg {}
+unsafe impl Sync for LibuzfsInodePrefetchArg {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_inode_prefetch_c(arg: *mut c_void) {
+    let arg = &mut *(arg as *mut LibuzfsInodePrefetchArg);
+    libuzfs_inode_prefetch(arg.dhp, arg.ino);
+}
+
 pub struct LibuzfsObjectSetMtimeArg {
     pub ihp: *mut libuzfs_inode_handle_t,
     pub tv_sec: i64,
