@@ -29,6 +29,8 @@ pub enum RequestMethod {
     LookupDentry,
     IterateDentry,
     WaitSynced,
+    GetInodeHandle,
+    ReleaseInodeHandle,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]

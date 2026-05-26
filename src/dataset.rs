@@ -435,6 +435,7 @@ impl Dataset {
         gen: u64,
         is_data_inode: bool,
     ) -> Result<InodeHandle> {
+        let _guard = self.metrics.record(RequestMethod::GetInodeHandle, 0);
         let mut arg = LibuzfsInodeHandleGetArgs {
             dhp: self.dhp,
             ino,
@@ -459,6 +460,7 @@ impl Dataset {
 
     // Do not access inode_hanlde after this function returns
     pub async fn release_inode_handle(&self, ino_hdl: &mut InodeHandle) {
+        let _guard = self.metrics.record(RequestMethod::ReleaseInodeHandle, 0);
         CoroutineFuture::new(libuzfs_inode_handle_rele_c, ino_hdl.ihp as usize).await;
         ino_hdl.ihp = null_mut();
     }
@@ -1277,6 +1279,16 @@ impl Dataset {
         } else {
             Err(io::Error::from_raw_os_error(arg.err))
         }
+    }
+
+    pub async fn prefetch_inode(&self, ino: u64) {
+        let mut arg = LibuzfsInodePrefetchArg {
+            dhp: self.dhp,
+            ino,
+        };
+
+        let arg_usize = &mut arg as *mut LibuzfsInodePrefetchArg as usize;
+        CoroutineFuture::new(libuzfs_inode_prefetch_c, arg_usize).await;
     }
 }
 
