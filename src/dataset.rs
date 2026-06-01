@@ -46,7 +46,7 @@ pub async fn wakeup_arc_evictor() {
     CoroutineFuture::new(libuzfs_wakeup_arc_evictor_c, 0).await;
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct InodeAttr {
     pub gen: u64,
     pub blksize: u32,
@@ -480,6 +480,7 @@ impl Dataset {
     }
 
     pub async fn zap_list(&self, zap_obj: u64, limit: usize) -> Result<Vec<(String, Vec<u8>)>> {
+        let _guard = self.metrics.record(RequestMethod::ZapList, 0);
         let mut arg = LibuzfsZapListArg {
             dhp: self.dhp,
             obj: zap_obj,
@@ -501,6 +502,7 @@ impl Dataset {
     }
 
     pub async fn zap_add<P: CStrArgument>(&self, obj: u64, name: P, value: &[u8]) -> Result<u64> {
+        let _guard = self.metrics.record(RequestMethod::ZapAdd, value.len());
         let cname = name.into_cstr();
         let mut arg = LibuzfsZapUpdateArg {
             dhp: self.dhp,
@@ -532,6 +534,7 @@ impl Dataset {
         name: P,
         value: &[u8],
     ) -> Result<u64> {
+        let _guard = self.metrics.record(RequestMethod::ZapUpdate, value.len());
         let cname = name.into_cstr();
         let mut arg = LibuzfsZapUpdateArg {
             dhp: self.dhp,
@@ -556,6 +559,7 @@ impl Dataset {
     }
 
     pub async fn zap_remove<P: CStrArgument>(&self, obj: u64, name: P) -> Result<u64> {
+        let _guard = self.metrics.record(RequestMethod::ZapRemove, 0);
         let cname = name.into_cstr();
         let mut arg = LibuzfsZapRemoveArg {
             dhp: self.dhp,
@@ -571,6 +575,27 @@ impl Dataset {
 
         if arg.err == 0 {
             Ok(arg.txg)
+        } else {
+            Err(io::Error::from_raw_os_error(arg.err))
+        }
+    }
+
+    pub async fn zap_compact(&self, obj: u64, max_free: u32) -> Result<bool> {
+        let _guard = self.metrics.record(RequestMethod::ZapCompact, 0);
+        let mut arg = LibuzfsZapCompactArg {
+            dhp: self.dhp,
+            obj,
+            max_free,
+            err: 0,
+            done: false,
+        };
+
+        let arg_usize = &mut arg as *mut LibuzfsZapCompactArg as usize;
+
+        CoroutineFuture::new(libuzfs_zap_compact_c, arg_usize).await;
+
+        if arg.err == 0 {
+            Ok(arg.done)
         } else {
             Err(io::Error::from_raw_os_error(arg.err))
         }
@@ -1261,6 +1286,11 @@ impl Dataset {
         size: u32,
     ) -> Result<(Vec<UzfsDentry>, bool)> {
         let _guard = self.metrics.record(RequestMethod::IterateDentry, 0);
+
+        if whence == 0 {
+            while let Ok(false) = self.zap_compact(ino_hdl.ino, 64).await {}
+        }
+
         let mut arg = LibuzfsIterateDentryArg {
             dihp: ino_hdl.ihp,
             whence,
@@ -1282,10 +1312,7 @@ impl Dataset {
     }
 
     pub async fn prefetch_inode(&self, ino: u64) {
-        let mut arg = LibuzfsInodePrefetchArg {
-            dhp: self.dhp,
-            ino,
-        };
+        let mut arg = LibuzfsInodePrefetchArg { dhp: self.dhp, ino };
 
         let arg_usize = &mut arg as *mut LibuzfsInodePrefetchArg as usize;
         CoroutineFuture::new(libuzfs_inode_prefetch_c, arg_usize).await;

@@ -31,6 +31,11 @@ pub enum RequestMethod {
     WaitSynced,
     GetInodeHandle,
     ReleaseInodeHandle,
+    ZapAdd,
+    ZapUpdate,
+    ZapRemove,
+    ZapList,
+    ZapCompact,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]

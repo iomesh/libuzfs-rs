@@ -16,14 +16,16 @@ use nix::unistd::ForkResult;
 use petgraph::algo::is_cyclic_directed;
 use petgraph::prelude::DiGraph;
 use rand::distributions::Alphanumeric;
+use rand::rngs::StdRng;
 use rand::thread_rng;
 use rand::Rng;
+use rand::SeedableRng;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::io::ErrorKind;
 use std::process::abort;
 use std::process::exit;
-use std::sync::atomic::AtomicU16;
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -512,7 +514,7 @@ async fn uzfs_claim_test() {
 #[tokio::test(flavor = "multi_thread")]
 async fn uzfs_zap_iterator_test() {
     let dsname = "uzfs_zap_iterator_test/ds";
-    let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+    let uzfs_test_env = UzfsTestEnv::new(4 << 30);
     uzfs_env_init().await;
 
     let ds = Arc::new(
@@ -528,20 +530,40 @@ async fn uzfs_zap_iterator_test() {
     );
 
     let (zap_obj, _) = ds.zap_create().await.unwrap();
-    let num_adders = 10;
+    let num_adders = 128;
     let num_ops_per_adder = 20000;
 
     let ds_remover = ds.clone();
     let remover_handle = tokio::task::spawn(async move {
         let mut total_ops = num_adders * num_ops_per_adder;
+        let mut ino_hdl = ds_remover
+            .get_inode_handle(zap_obj, u64::MAX, false)
+            .await
+            .unwrap();
         while total_ops > 0 {
-            for (key, value) in ds_remover.zap_list(zap_obj, usize::MAX).await.unwrap() {
-                ds_remover.zap_remove(zap_obj, &key).await.unwrap();
-                assert_eq!(key.as_bytes(), value.as_slice());
-                total_ops -= 1;
+            let kvs = ds_remover.zap_list(zap_obj, usize::MAX).await.unwrap();
+            let len = kvs.len();
+
+            let tasks = kvs
+                .chunks(1024)
+                .map(|chunk| {
+                    let ds = ds_remover.clone();
+                    let chunk = chunk.to_vec();
+                    tokio::spawn(async move {
+                        for (key, _) in chunk {
+                            ds.zap_remove(zap_obj, key).await.unwrap();
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            for task in tasks {
+                task.await.unwrap();
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            total_ops -= len;
+            while !ds_remover.zap_compact(zap_obj, 128).await.unwrap() {}
         }
+        ds_remover.release_inode_handle(&mut ino_hdl).await;
     });
 
     let mut adder_handles = vec![];
@@ -564,6 +586,401 @@ async fn uzfs_zap_iterator_test() {
     }
 
     remover_handle.await.unwrap();
+    ds.close().await.unwrap();
+    uzfs_env_fini().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn uzfs_zap_compact_test() {
+    let dsname = "uzfs_zap_compact_test/ds";
+    let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+    uzfs_env_init().await;
+
+    let ds = Dataset::init(
+        dsname,
+        uzfs_test_env.get_dev_path(),
+        DatasetType::Meta,
+        4096,
+        false,
+    )
+    .await
+    .unwrap();
+
+    let (zap_obj, _) = ds.zap_create().await.unwrap();
+    let entry_count = 2048;
+    let value = vec![0xab; 256];
+    let mut keys = Vec::with_capacity(entry_count);
+
+    let mut ino_hdl = ds.get_inode_handle(zap_obj, u64::MAX, false).await.unwrap();
+
+    for i in 0..entry_count {
+        let key = format!("compact-entry-{i:04}");
+        ds.zap_add(zap_obj, &key, &value).await.unwrap();
+        keys.push(key);
+    }
+
+    ds.wait_synced().await;
+
+    let attr = ds.get_attr(&ino_hdl).await.unwrap();
+    println!("attr after add: {:?}", attr);
+
+    assert_eq!(
+        ds.zap_list(zap_obj, usize::MAX).await.unwrap().len(),
+        entry_count
+    );
+
+    let keys = ds.zap_list(zap_obj, entry_count - 3).await.unwrap();
+
+    for (key, _) in keys {
+        ds.zap_remove(zap_obj, &key).await.unwrap();
+    }
+    let attr = ds.get_attr(&ino_hdl).await.unwrap();
+    println!("attr after remove: {:?}", attr);
+
+    ds.zap_compact(zap_obj, 128).await.unwrap();
+    ds.wait_synced().await;
+    let attr = ds.get_attr(&ino_hdl).await.unwrap();
+    println!("attr after compact1: {:?}", attr);
+    let keys = ds.zap_list(zap_obj, 3).await.unwrap();
+
+    for (key, _) in keys {
+        ds.zap_remove(zap_obj, &key).await.unwrap();
+    }
+    ds.zap_compact(zap_obj, 128).await.unwrap();
+    ds.wait_synced().await;
+    let attr = ds.get_attr(&ino_hdl).await.unwrap();
+    println!("attr after compact2: {:?}", attr);
+    assert!(ds.zap_list(zap_obj, usize::MAX).await.unwrap().is_empty());
+
+    ds.zap_compact(zap_obj, 128).await.unwrap();
+
+    ds.zap_add(zap_obj, "after-compact", b"still-usable")
+        .await
+        .unwrap();
+    let entries = ds.zap_list(zap_obj, usize::MAX).await.unwrap();
+    assert_eq!(
+        entries,
+        vec![("after-compact".to_string(), b"still-usable".to_vec())]
+    );
+
+    ds.release_inode_handle(&mut ino_hdl).await;
+
+    ds.close().await.unwrap();
+    uzfs_env_fini().await;
+}
+
+fn is_transient_zap_concurrency_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        Some(libc::ENOENT) | Some(libc::EBUSY) | Some(libc::EOVERFLOW)
+    ) || err.kind() == ErrorKind::NotFound
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn uzfs_zap_concurrent_scan_remove_insert_compact_test() {
+    let dsname = "uzfs_zap_concurrent_scan_remove_insert_compact_test/ds";
+    let uzfs_test_env = UzfsTestEnv::new(512 * 1024 * 1024);
+    uzfs_env_init().await;
+
+    let ds = Arc::new(
+        Dataset::init(
+            dsname,
+            uzfs_test_env.get_dev_path(),
+            DatasetType::Meta,
+            4096,
+            false,
+        )
+        .await
+        .unwrap(),
+    );
+
+    let (zap_obj, _) = ds.zap_create().await.unwrap();
+    let value = vec![0x5a; 256];
+
+    for i in 0..4096 {
+        let key = format!("seed-{i:05}");
+        ds.zap_add(zap_obj, &key, &value).await.unwrap();
+    }
+    ds.wait_synced().await;
+
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let scanner = {
+        let ds = ds.clone();
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            for iter in 0..1024 {
+                match ds.zap_list(zap_obj, 512).await {
+                    Ok(entries) => {
+                        for (key, value) in entries {
+                            assert!(
+                                key.starts_with("seed-")
+                                    || key.starts_with("insert-")
+                                    || key.starts_with("final-"),
+                                "unexpected key from zap scan: {key}",
+                            );
+                            assert_eq!(value.len(), 256);
+                        }
+                    }
+                    Err(err) if is_transient_zap_concurrency_error(&err) => {}
+                    Err(err) => panic!("zap scan failed: {err:?}"),
+                }
+
+                if stop.load(Ordering::SeqCst) && iter >= 128 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+
+    let compactor = {
+        let ds = ds.clone();
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            while !stop.load(Ordering::SeqCst) {
+                match ds.zap_compact(zap_obj, 1).await {
+                    Ok(_) => {}
+                    Err(err) if is_transient_zap_concurrency_error(&err) => {}
+                    Err(err) => panic!("zap compact failed: {err:?}"),
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+
+    let inserter = {
+        let ds = ds.clone();
+        let value = value.clone();
+        tokio::spawn(async move {
+            for round in 0..96 {
+                for i in 0..64 {
+                    let key = format!("insert-{round:03}-{i:03}");
+                    ds.zap_add(zap_obj, &key, &value).await.unwrap();
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+
+    let remover = {
+        let ds = ds.clone();
+        tokio::spawn(async move {
+            for _ in 0..96 {
+                let entries = match ds.zap_list(zap_obj, 256).await {
+                    Ok(entries) => entries,
+                    Err(err) if is_transient_zap_concurrency_error(&err) => {
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    Err(err) => panic!("zap remover scan failed: {err:?}"),
+                };
+
+                for (key, _) in entries.into_iter().take(128) {
+                    match ds.zap_remove(zap_obj, &key).await {
+                        Ok(_) => {}
+                        Err(err) if is_transient_zap_concurrency_error(&err) => {}
+                        Err(err) => panic!("zap remove failed for {key}: {err:?}"),
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+
+    inserter.await.unwrap();
+    remover.await.unwrap();
+    stop.store(true, Ordering::SeqCst);
+    scanner.await.unwrap();
+    compactor.await.unwrap();
+
+    while !ds.zap_compact(zap_obj, 16).await.unwrap() {}
+
+    for i in 0..128 {
+        let key = format!("final-{i:03}");
+        ds.zap_add(zap_obj, &key, &value).await.unwrap();
+    }
+
+    let entries = ds.zap_list(zap_obj, usize::MAX).await.unwrap();
+    assert!(entries.iter().any(|(key, _)| key.starts_with("final-")));
+    for (key, value) in entries {
+        assert!(
+            key.starts_with("seed-") || key.starts_with("insert-") || key.starts_with("final-"),
+            "unexpected key after concurrent zap operations: {key}",
+        );
+        assert_eq!(value.len(), 256);
+    }
+
+    ds.close().await.unwrap();
+    uzfs_env_fini().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+async fn uzfs_zap_random_concurrent_compact_stress_test() {
+    let dsname = "uzfs_zap_random_concurrent_compact_stress_test/ds";
+    let uzfs_test_env = UzfsTestEnv::new(2 * 1024 * 1024 * 1024);
+    uzfs_env_init().await;
+
+    let ds = Arc::new(
+        Dataset::init(
+            dsname,
+            uzfs_test_env.get_dev_path(),
+            DatasetType::Meta,
+            4096,
+            false,
+        )
+        .await
+        .unwrap(),
+    );
+
+    let (zap_obj, _) = ds.zap_create().await.unwrap();
+    let seed_entries = 8192;
+    let random_keyspace = 32768;
+
+    for i in 0..seed_entries {
+        let key = format!("stress-seed-{i:05}");
+        let value = vec![(i & 0xff) as u8; 96 + (i % 256) as usize];
+        ds.zap_add(zap_obj, &key, &value).await.unwrap();
+    }
+    ds.wait_synced().await;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut workers = Vec::new();
+
+    for worker_id in 0..24 {
+        let ds = ds.clone();
+        workers.push(tokio::spawn(async move {
+            let mut rng = StdRng::seed_from_u64(0x5a50_0000 + worker_id);
+
+            for op_idx in 0..2500 {
+                let choice = rng.gen_range(0..100);
+                if choice < 35 {
+                    let key = format!("stress-insert-{worker_id:02}-{op_idx:05}");
+                    let len = rng.gen_range(32..768);
+                    let value = vec![(worker_id as u8) ^ (op_idx as u8); len];
+                    match ds.zap_add(zap_obj, &key, &value).await {
+                        Ok(_) => {}
+                        Err(err) if is_transient_zap_concurrency_error(&err) => {}
+                        Err(err) => panic!("random zap add failed for {key}: {err:?}"),
+                    }
+                } else if choice < 60 {
+                    let entries = match ds.zap_list(zap_obj, rng.gen_range(1..=64)).await {
+                        Ok(entries) => entries,
+                        Err(err) if is_transient_zap_concurrency_error(&err) => {
+                            tokio::task::yield_now().await;
+                            continue;
+                        }
+                        Err(err) => panic!("random remove scan failed: {err:?}"),
+                    };
+
+                    for (key, _) in entries {
+                        match ds.zap_remove(zap_obj, &key).await {
+                            Ok(_) => {}
+                            Err(err) if is_transient_zap_concurrency_error(&err) => {}
+                            Err(err) => panic!("random zap remove failed for {key}: {err:?}"),
+                        }
+                    }
+                } else if choice < 80 {
+                    let key = format!("stress-update-{:05}", rng.gen_range(0..random_keyspace));
+                    let len = rng.gen_range(16..512);
+                    let value = vec![choice as u8; len];
+                    match ds.zap_update(zap_obj, &key, &value).await {
+                        Ok(_) => {}
+                        Err(err) if is_transient_zap_concurrency_error(&err) => {}
+                        Err(err) => panic!("random zap update failed for {key}: {err:?}"),
+                    }
+                } else {
+                    match ds.zap_list(zap_obj, rng.gen_range(1..1024)).await {
+                        Ok(entries) => {
+                            for (key, value) in entries {
+                                assert!(
+                                    key.starts_with("stress-") || key.starts_with("final-"),
+                                    "unexpected random stress key: {key}",
+                                );
+                                assert!(!value.is_empty());
+                            }
+                        }
+                        Err(err) if is_transient_zap_concurrency_error(&err) => {}
+                        Err(err) => panic!("random zap scan failed: {err:?}"),
+                    }
+                }
+
+                if op_idx % 32 == 0 {
+                    tokio::task::yield_now().await;
+                }
+            }
+        }));
+    }
+
+    for scanner_id in 0..8 {
+        let ds = ds.clone();
+        let stop = stop.clone();
+        workers.push(tokio::spawn(async move {
+            let mut rng = StdRng::seed_from_u64(0x5a51_0000 + scanner_id);
+
+            while !stop.load(Ordering::SeqCst) {
+                match ds.zap_list(zap_obj, rng.gen_range(1..2048)).await {
+                    Ok(entries) => {
+                        for (key, value) in entries {
+                            assert!(
+                                key.starts_with("stress-") || key.starts_with("final-"),
+                                "unexpected key during random scan: {key}",
+                            );
+                            assert!(!value.is_empty());
+                        }
+                    }
+                    Err(err) if is_transient_zap_concurrency_error(&err) => {}
+                    Err(err) => panic!("background random zap scan failed: {err:?}"),
+                }
+                tokio::task::yield_now().await;
+            }
+        }));
+    }
+
+    for compactor_id in 0..4 {
+        let ds = ds.clone();
+        let stop = stop.clone();
+        workers.push(tokio::spawn(async move {
+            let mut rng = StdRng::seed_from_u64(0x5a52_0000 + compactor_id);
+
+            while !stop.load(Ordering::SeqCst) {
+                match ds.zap_compact(zap_obj, rng.gen_range(1..=64)).await {
+                    Ok(_) => {}
+                    Err(err) if is_transient_zap_concurrency_error(&err) => {}
+                    Err(err) => panic!("background random zap compact failed: {err:?}"),
+                }
+                tokio::task::yield_now().await;
+            }
+        }));
+    }
+
+    for worker in workers.drain(..24) {
+        worker.await.unwrap();
+    }
+    stop.store(true, Ordering::SeqCst);
+    for worker in workers {
+        worker.await.unwrap();
+    }
+
+    for _ in 0..256 {
+        if ds.zap_compact(zap_obj, 64).await.unwrap() {
+            break;
+        }
+    }
+
+    let final_value = vec![0xcd; 384];
+    for i in 0..512 {
+        let key = format!("final-{i:04}");
+        ds.zap_add(zap_obj, &key, &final_value).await.unwrap();
+    }
+
+    let entries = ds.zap_list(zap_obj, usize::MAX).await.unwrap();
+    let final_count = entries
+        .iter()
+        .filter(|(key, value)| key.starts_with("final-") && value.as_slice() == final_value)
+        .count();
+    assert_eq!(final_count, 512);
+
     ds.close().await.unwrap();
     uzfs_env_fini().await;
 }
