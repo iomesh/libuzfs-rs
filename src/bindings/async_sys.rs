@@ -438,6 +438,26 @@ pub unsafe extern "C" fn libuzfs_zap_remove_c(arg: *mut c_void) {
     arg.err = libuzfs_zap_remove(arg.dhp, arg.obj, arg.key, &mut arg.txg);
 }
 
+pub struct LibuzfsZapCompactArg {
+    pub dhp: *mut libuzfs_dataset_handle_t,
+    pub obj: u64,
+    pub max_free: u32,
+
+    pub err: i32,
+    pub done: bool,
+}
+
+unsafe impl Send for LibuzfsZapCompactArg {}
+unsafe impl Sync for LibuzfsZapCompactArg {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn libuzfs_zap_compact_c(arg: *mut c_void) {
+    let arg = &mut *(arg as *mut LibuzfsZapCompactArg);
+    let mut done: boolean_t = 0;
+    arg.err = libuzfs_zap_compact(arg.dhp, arg.obj, arg.max_free, &mut done);
+    arg.done = done != 0;
+}
+
 pub struct LibuzfsCreateObjectsArg {
     pub dhp: *mut libuzfs_dataset_handle_t,
     pub num_objs: usize,
