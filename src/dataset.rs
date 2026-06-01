@@ -46,7 +46,7 @@ pub async fn wakeup_arc_evictor() {
     CoroutineFuture::new(libuzfs_wakeup_arc_evictor_c, 0).await;
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct InodeAttr {
     pub gen: u64,
     pub blksize: u32,
@@ -571,6 +571,26 @@ impl Dataset {
 
         if arg.err == 0 {
             Ok(arg.txg)
+        } else {
+            Err(io::Error::from_raw_os_error(arg.err))
+        }
+    }
+
+    pub async fn zap_compact(&self, obj: u64, max_free: u32) -> Result<bool> {
+        let mut arg = LibuzfsZapCompactArg {
+            dhp: self.dhp,
+            obj,
+            max_free,
+            err: 0,
+            done: false,
+        };
+
+        let arg_usize = &mut arg as *mut LibuzfsZapCompactArg as usize;
+
+        CoroutineFuture::new(libuzfs_zap_compact_c, arg_usize).await;
+
+        if arg.err == 0 {
+            Ok(arg.done)
         } else {
             Err(io::Error::from_raw_os_error(arg.err))
         }
@@ -1282,10 +1302,7 @@ impl Dataset {
     }
 
     pub async fn prefetch_inode(&self, ino: u64) {
-        let mut arg = LibuzfsInodePrefetchArg {
-            dhp: self.dhp,
-            ino,
-        };
+        let mut arg = LibuzfsInodePrefetchArg { dhp: self.dhp, ino };
 
         let arg_usize = &mut arg as *mut LibuzfsInodePrefetchArg as usize;
         CoroutineFuture::new(libuzfs_inode_prefetch_c, arg_usize).await;

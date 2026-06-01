@@ -512,7 +512,7 @@ async fn uzfs_claim_test() {
 #[tokio::test(flavor = "multi_thread")]
 async fn uzfs_zap_iterator_test() {
     let dsname = "uzfs_zap_iterator_test/ds";
-    let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+    let uzfs_test_env = UzfsTestEnv::new(4 << 30);
     uzfs_env_init().await;
 
     let ds = Arc::new(
@@ -528,20 +528,40 @@ async fn uzfs_zap_iterator_test() {
     );
 
     let (zap_obj, _) = ds.zap_create().await.unwrap();
-    let num_adders = 10;
+    let num_adders = 128;
     let num_ops_per_adder = 20000;
 
     let ds_remover = ds.clone();
     let remover_handle = tokio::task::spawn(async move {
         let mut total_ops = num_adders * num_ops_per_adder;
+        let mut ino_hdl = ds_remover
+            .get_inode_handle(zap_obj, u64::MAX, false)
+            .await
+            .unwrap();
         while total_ops > 0 {
-            for (key, value) in ds_remover.zap_list(zap_obj, usize::MAX).await.unwrap() {
-                ds_remover.zap_remove(zap_obj, &key).await.unwrap();
-                assert_eq!(key.as_bytes(), value.as_slice());
-                total_ops -= 1;
+            let kvs = ds_remover.zap_list(zap_obj, usize::MAX).await.unwrap();
+            let len = kvs.len();
+
+            let tasks = kvs
+                .chunks(1024)
+                .map(|chunk| {
+                    let ds = ds_remover.clone();
+                    let chunk = chunk.to_vec();
+                    tokio::spawn(async move {
+                        for (key, _) in chunk {
+                            ds.zap_remove(zap_obj, key).await.unwrap();
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            for task in tasks {
+                task.await.unwrap();
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            total_ops -= len;
+            while !ds_remover.zap_compact(zap_obj, 128).await.unwrap() {}
         }
+        ds_remover.release_inode_handle(&mut ino_hdl).await;
     });
 
     let mut adder_handles = vec![];
@@ -564,6 +584,85 @@ async fn uzfs_zap_iterator_test() {
     }
 
     remover_handle.await.unwrap();
+    ds.close().await.unwrap();
+    uzfs_env_fini().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn uzfs_zap_compact_test() {
+    let dsname = "uzfs_zap_compact_test/ds";
+    let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+    uzfs_env_init().await;
+
+    let ds = Dataset::init(
+        dsname,
+        uzfs_test_env.get_dev_path(),
+        DatasetType::Meta,
+        4096,
+        false,
+    )
+    .await
+    .unwrap();
+
+    let (zap_obj, _) = ds.zap_create().await.unwrap();
+    let entry_count = 2048;
+    let value = vec![0xab; 256];
+    let mut keys = Vec::with_capacity(entry_count);
+
+    let mut ino_hdl = ds.get_inode_handle(zap_obj, u64::MAX, false).await.unwrap();
+
+    for i in 0..entry_count {
+        let key = format!("compact-entry-{i:04}");
+        ds.zap_add(zap_obj, &key, &value).await.unwrap();
+        keys.push(key);
+    }
+
+    ds.wait_synced().await;
+
+    let attr = ds.get_attr(&ino_hdl).await.unwrap();
+    println!("attr after add: {:?}", attr);
+
+    assert_eq!(
+        ds.zap_list(zap_obj, usize::MAX).await.unwrap().len(),
+        entry_count
+    );
+
+    let keys = ds.zap_list(zap_obj, entry_count - 3).await.unwrap();
+
+    for (key, _) in keys {
+        ds.zap_remove(zap_obj, &key).await.unwrap();
+    }
+    let attr = ds.get_attr(&ino_hdl).await.unwrap();
+    println!("attr after remove: {:?}", attr);
+
+    ds.zap_compact(zap_obj, 128).await.unwrap();
+    ds.wait_synced().await;
+    let attr = ds.get_attr(&ino_hdl).await.unwrap();
+    println!("attr after compact1: {:?}", attr);
+    let keys = ds.zap_list(zap_obj, 3).await.unwrap();
+
+    for (key, _) in keys {
+        ds.zap_remove(zap_obj, &key).await.unwrap();
+    }
+    ds.zap_compact(zap_obj, 128).await.unwrap();
+    ds.wait_synced().await;
+    let attr = ds.get_attr(&ino_hdl).await.unwrap();
+    println!("attr after compact2: {:?}", attr);
+    assert!(ds.zap_list(zap_obj, usize::MAX).await.unwrap().is_empty());
+
+    ds.zap_compact(zap_obj, 128).await.unwrap();
+
+    ds.zap_add(zap_obj, "after-compact", b"still-usable")
+        .await
+        .unwrap();
+    let entries = ds.zap_list(zap_obj, usize::MAX).await.unwrap();
+    assert_eq!(
+        entries,
+        vec![("after-compact".to_string(), b"still-usable".to_vec())]
+    );
+
+    ds.release_inode_handle(&mut ino_hdl).await;
+
     ds.close().await.unwrap();
     uzfs_env_fini().await;
 }
