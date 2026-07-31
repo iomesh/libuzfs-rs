@@ -6,3 +6,6 @@ pub(super) mod aio;
 
 pub(super) mod async_io;
 pub(crate) mod async_io_c;
+pub(crate) mod multihost;
+
+pub(super) mod scsi;
