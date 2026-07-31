@@ -13,6 +13,7 @@ use nix::sys::wait::waitpid;
 use nix::sys::wait::WaitStatus;
 use nix::unistd::fork;
 use nix::unistd::ForkResult;
+use nix::unistd::Pid;
 use petgraph::algo::is_cyclic_directed;
 use petgraph::prelude::DiGraph;
 use rand::distributions::Alphanumeric;
@@ -29,6 +30,7 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
+use tokio::time::sleep;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn uzfs_test() {
@@ -60,6 +62,7 @@ async fn uzfs_test() {
             DatasetType::Meta,
             4096,
             false,
+            None,
         )
         .await
         .unwrap()
@@ -74,6 +77,7 @@ async fn uzfs_test() {
                 DatasetType::Meta,
                 4096,
                 false,
+                None,
             )
             .await
             .unwrap()
@@ -88,6 +92,7 @@ async fn uzfs_test() {
             DatasetType::Meta,
             0,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -251,6 +256,7 @@ async fn uzfs_test() {
             DatasetType::Meta,
             4096,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -332,6 +338,7 @@ async fn uzfs_test() {
             DatasetType::Meta,
             4096,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -393,6 +400,7 @@ async fn uzfs_claim_test() {
             DatasetType::Meta,
             4096,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -434,6 +442,7 @@ async fn uzfs_claim_test() {
             DatasetType::Meta,
             4096,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -452,6 +461,7 @@ async fn uzfs_claim_test() {
             DatasetType::Meta,
             4096,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -477,6 +487,7 @@ async fn uzfs_claim_test() {
             DatasetType::Meta,
             4096,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -579,6 +590,7 @@ async fn uzfs_zap_iterator_test() {
             DatasetType::Meta,
             4096,
             false,
+            None,
         )
         .await
         .unwrap(),
@@ -657,6 +669,7 @@ async fn uzfs_zap_compact_test() {
         DatasetType::Meta,
         4096,
         false,
+        None,
     )
     .await
     .unwrap();
@@ -744,6 +757,7 @@ async fn uzfs_zap_concurrent_scan_remove_insert_compact_test() {
             DatasetType::Meta,
             4096,
             false,
+            None,
         )
         .await
         .unwrap(),
@@ -883,6 +897,7 @@ async fn uzfs_zap_random_concurrent_compact_stress_test() {
             DatasetType::Meta,
             4096,
             false,
+            None,
         )
         .await
         .unwrap(),
@@ -1053,6 +1068,7 @@ async fn uzfs_expand_test() {
             DatasetType::Data,
             4096,
             false,
+            None,
         )
         .await
         .unwrap(),
@@ -1120,6 +1136,7 @@ async fn uzfs_rangelock_test() {
             DatasetType::Data,
             4096,
             false,
+            None,
         )
         .await
         .unwrap(),
@@ -1240,6 +1257,7 @@ async fn uzfs_attr_test() {
             DatasetType::Meta,
             4096,
             false,
+            None,
         )
         .await
         .unwrap(),
@@ -1386,7 +1404,7 @@ async fn uzfs_attr_test() {
 }
 
 async fn test_reduce_max(dsname: &str, dev_path: &str) {
-    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 4096, false)
+    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 4096, false, None)
         .await
         .unwrap();
     let (objs, gen) = ds.create_objects(4).await.unwrap();
@@ -1432,7 +1450,7 @@ async fn test_reduce_max(dsname: &str, dev_path: &str) {
     ds.release_inode_handle(&mut hdl3).await;
     ds.close().await.unwrap();
 
-    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 1024, false)
+    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 1024, false, None)
         .await
         .unwrap();
     let mut hdl0 = ds.get_inode_handle(objs[0], gen, true).await.unwrap();
@@ -1463,7 +1481,7 @@ async fn test_reduce_max(dsname: &str, dev_path: &str) {
 }
 
 async fn test_increase_max(dsname: &str, dev_path: &str) {
-    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 1024, false)
+    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 1024, false, None)
         .await
         .unwrap();
     let (objs, gen) = ds.create_objects(3).await.unwrap();
@@ -1494,7 +1512,7 @@ async fn test_increase_max(dsname: &str, dev_path: &str) {
     ds.release_inode_handle(&mut hdl2).await;
     ds.close().await.unwrap();
 
-    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 4096, false)
+    let ds = Dataset::init(dsname, dev_path, DatasetType::Data, 4096, false, None)
         .await
         .unwrap();
     let mut hdl0 = ds.get_inode_handle(objs[0], gen, true).await.unwrap();
@@ -1590,7 +1608,7 @@ fn uzfs_sync_test() {
                     }
                     uzfs_env_init().await;
                     let ds = Arc::new(
-                        Dataset::init(dsname, dev_path, DatasetType::Data, 262144, false)
+                        Dataset::init(dsname, dev_path, DatasetType::Data, 262144, false, None)
                             .await
                             .unwrap(),
                     );
@@ -1696,6 +1714,7 @@ async fn uzfs_write_read_test() {
             DatasetType::Data,
             65536,
             false,
+            None,
         )
         .await
         .unwrap(),
@@ -1749,6 +1768,7 @@ async fn uzfs_truncate_test() {
             DatasetType::Data,
             blksize,
             false,
+            None,
         )
         .await
         .unwrap(),
@@ -1841,6 +1861,7 @@ async fn next_block_test() {
         DatasetType::Data,
         0,
         false,
+        None,
     )
     .await
     .unwrap();
@@ -1885,6 +1906,7 @@ async fn dentry_test() {
         DatasetType::Meta,
         0,
         false,
+        None,
     )
     .await
     .unwrap();
@@ -1949,6 +1971,7 @@ async fn read_zero_copy_test() {
             DatasetType::Data,
             0,
             false,
+            None,
         )
         .await
         .unwrap(),
@@ -2007,6 +2030,7 @@ async fn inode_create_delete_test() {
                 DatasetType::Meta,
                 0,
                 false,
+                None,
             )
             .await
             .unwrap(),
@@ -2049,4 +2073,68 @@ async fn inode_create_delete_test() {
         ds.close().await.unwrap();
     }
     uzfs_env_fini().await;
+}
+
+async fn random_init_close_test(dev_path: &str, dsname: &str, hostid: u64) {
+    uzfs_env_init().await;
+    for _ in 0..10 {
+        let secs = thread_rng().gen_range(0..10);
+        if secs > 0 {
+            sleep(Duration::from_secs(secs)).await;
+        }
+
+        let res = Dataset::init(
+            dsname,
+            dev_path,
+            DatasetType::Meta,
+            0,
+            false,
+            Some(hostid.to_string()),
+        )
+        .await;
+
+        match res {
+            Ok(ds) => {
+                sleep(Duration::from_secs(5)).await;
+                ds.wait_synced().await;
+                sleep(Duration::from_secs(5)).await;
+                ds.close().await.unwrap();
+            }
+            Err(e) if e.raw_os_error() == Some(libc::EREMOTEIO) => {
+                println!("error: {e:?}");
+            }
+            Err(e) => panic!("unexpected init error: {e:?}"),
+        }
+    }
+    uzfs_env_fini().await;
+}
+
+fn fork_and_test(dev_path: &str, dsname: &str, hostid: u64) -> Pid {
+    match unsafe { fork().unwrap() } {
+        ForkResult::Parent { child } => child,
+        ForkResult::Child => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(random_init_close_test(dev_path, dsname, hostid));
+            exit(0);
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn uzfs_multihost_test() {
+    let dsname = "multihost_test/ds";
+    let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+
+    let children = (1..=10)
+        .map(|i| fork_and_test(uzfs_test_env.get_dev_path(), dsname, i))
+        .collect::<Vec<_>>();
+
+    for child in children {
+        let res = waitpid(child, None).unwrap();
+        assert!(matches!(res, WaitStatus::Exited(_, 0)), "res: {:?}", res);
+    }
 }
