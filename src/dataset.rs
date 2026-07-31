@@ -18,6 +18,7 @@ use tokio::sync::Mutex;
 use crate::bindings::async_sys::*;
 use crate::bindings::sys::*;
 use crate::context::coroutine::CoroutineFuture;
+use crate::io::multihost::MultiHostProtector;
 use crate::metrics::{RequestMethod, UzfsMetrics};
 use crate::time::init_timer;
 
@@ -277,6 +278,7 @@ pub struct Dataset {
     poolname: CString,
     metrics: Box<UzfsMetrics>,
     buf_releaser: ReadBufReleaser,
+    protector: Option<MultiHostProtector>,
 }
 
 // metrics
@@ -304,6 +306,7 @@ impl Dataset {
         dstype: DatasetType,
         max_blksize: u32,
         already_formatted: bool,
+        hostid: Option<String>,
     ) -> Result<Self> {
         assert!(max_blksize == 0 || (max_blksize & (max_blksize - 1)) == 0);
 
@@ -336,19 +339,30 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsDatasetInitArg as usize;
 
+        let protector = if let Some(hostid) = hostid {
+            Some(MultiHostProtector::new(hostid, dev_path).await?)
+        } else {
+            None
+        };
+
         CoroutineFuture::new(libuzfs_dataset_init_c, arg_usize).await;
 
         if arg.ret != 0 {
+            if let Some(protector) = &protector {
+                protector.exit().await;
+            }
+
             Err(io::Error::from_raw_os_error(arg.ret))
-        } else if arg.dhp.is_null() || arg.zhp.is_null() {
-            Err(io::Error::from(io::ErrorKind::InvalidInput))
         } else {
+            assert!(!arg.dhp.is_null() && !arg.zhp.is_null());
+
             Ok(Self {
                 dhp: arg.dhp,
                 zhp: arg.zhp,
                 poolname,
                 metrics,
                 buf_releaser: ReadBufReleaser::new(),
+                protector,
             })
         }
     }
@@ -405,6 +419,9 @@ impl Dataset {
         if arg.err != 0 {
             Err(io::Error::from_raw_os_error(arg.err))
         } else {
+            if let Some(protector) = &self.protector {
+                protector.exit().await;
+            }
             Ok(())
         }
     }

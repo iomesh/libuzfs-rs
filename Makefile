@@ -23,6 +23,8 @@ test:
 	  cargo test --target ${ARCH}-unknown-linux-gnu --workspace  -- --nocapture
 	ENABLE_ASAN=yes RUSTFLAGS="-Zsanitizer=address -C force-frame-pointers=yes" ASAN_OPTIONS=detect_leaks=0 \
 	  cargo test --target ${ARCH}-unknown-linux-gnu uzfs_sync_test -- --ignored --nocapture
+	ENABLE_ASAN=yes RUSTFLAGS="-Zsanitizer=address -C force-frame-pointers=yes" ASAN_OPTIONS=detect_leaks=0 \
+	  cargo test --target ${ARCH}-unknown-linux-gnu uzfs_multihost_test -- --ignored --nocapture
 
 clean: clean_libuzfs_src
 	cargo clean

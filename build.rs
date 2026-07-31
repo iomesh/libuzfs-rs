@@ -2,7 +2,8 @@ use std::{env, fs, process::Command};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=src/wrapper.h");
+    println!("cargo:rerun-if-changed=src/bindings/wrapper.h");
+    println!("cargo:rerun-if-changed=src/io/wrapper.h");
     println!("cargo:rerun-if-changed=zfs");
 
     let root = fs::canonicalize(".").unwrap();
