@@ -512,6 +512,61 @@ async fn uzfs_claim_test() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn meta_dnode_empty_leaf_reclaimed_test() {
+    const CLAIMED_INO: u64 = 320;
+    const CLAIMED_GEN: u64 = 7;
+
+    let dsname = "meta_dnode_empty_leaf_reclaimed_test/ds";
+    let uzfs_test_env = UzfsTestEnv::new(100 * 1024 * 1024);
+    uzfs_env_init().await;
+
+    let ds = Dataset::init(
+        dsname,
+        uzfs_test_env.get_dev_path(),
+        DatasetType::Meta,
+        0,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+
+    ds.wait_synced().await;
+    let initial_refd_bytes = ds.space().await.0;
+
+    // Object 320 starts a meta-dnode L0 block beyond the initial objects.
+    ds.claim_inode(CLAIMED_INO, CLAIMED_GEN, InodeType::FILE)
+        .await
+        .unwrap();
+    let mut claimed = ds
+        .get_inode_handle(CLAIMED_INO, CLAIMED_GEN, false)
+        .await
+        .unwrap();
+    ds.wait_synced().await;
+
+    let allocated_refd_bytes = ds.space().await.0;
+    assert!(
+        allocated_refd_bytes > initial_refd_bytes,
+        "claiming a dnode in a new L0 block must increase referenced space"
+    );
+
+    ds.delete_inode(&mut claimed, InodeType::FILE)
+        .await
+        .unwrap();
+    ds.release_inode_handle(&mut claimed).await;
+    ds.wait_synced().await;
+
+    assert_eq!(
+        ds.space().await.0,
+        initial_refd_bytes,
+        "an all-zero meta-dnode L0 block must be compressed to a hole"
+    );
+
+    ds.close().await.unwrap();
+    uzfs_env_fini().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn uzfs_zap_iterator_test() {
     let dsname = "uzfs_zap_iterator_test/ds";
     let uzfs_test_env = UzfsTestEnv::new(4 << 30);
