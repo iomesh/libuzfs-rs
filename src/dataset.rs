@@ -211,19 +211,31 @@ unsafe impl Sync for ReadBuf {}
 pub struct ReadBufWrapper {
     data: ReadBuf,
     sender: UnboundedSender<ReadBuf>,
+    slices: Vec<&'static [u8]>,
 }
 
 impl ReadBufWrapper {
-    #[inline]
-    pub fn as_slices(&self) -> Vec<&[u8]> {
-        let len = self.data.0.num_bufs as usize;
+    fn new(data: ReadBuf, sender: UnboundedSender<ReadBuf>) -> Self {
+        let len = data.0.num_bufs as usize;
         let mut slices = Vec::with_capacity(len);
-        unsafe { libuzfs_read_buf_to_slices(&self.data.0, slices.as_mut_ptr()) };
+        unsafe { libuzfs_read_buf_to_slices(&data.0, slices.as_mut_ptr()) };
         unsafe { slices.set_len(len) };
-        slices
+
+        let slices = slices
             .into_iter()
             .map(|slice| unsafe { &*slice_from_raw_parts(slice.buf as *const u8, slice.len) })
-            .collect()
+            .collect();
+
+        Self {
+            data,
+            sender,
+            slices,
+        }
+    }
+
+    #[inline]
+    pub fn as_slices<'a>(&'a self) -> &'a [&'a [u8]] {
+        &self.slices
     }
 }
 
@@ -260,10 +272,7 @@ impl ReadBufReleaser {
     }
 
     fn wrap_read_buf(&self, data: libuzfs_read_buf_t) -> ReadBufWrapper {
-        ReadBufWrapper {
-            data: ReadBuf(data),
-            sender: self.sender.read().unwrap().clone().unwrap(),
-        }
+        ReadBufWrapper::new(ReadBuf(data), self.sender.read().unwrap().clone().unwrap())
     }
 
     fn exit(&self) {
