@@ -12,7 +12,7 @@ pkg-config = "0.3.30"
 cc = "1.0.98"
 
 [dependencies]
-tokio = { version = "1.38.1", features = ["macros", "rt-multi-thread", "signal", "time", "net", "sync", "io-util"] }
+tokio = { version = "1.38.1", features = ["macros", "rt-multi-thread", "signal", "time", "fs", "net", "sync", "io-util"] }
 futures = "0.3.28"
 dashmap = "5.4.0"
 once_cell = "1.13.1"
@@ -25,6 +25,8 @@ strum_macros = "0.26.4"
 crossbeam-utils = "0.8.20"
 timerfd = "1.6.0"
 pin-project = "1.0.12"
+crc32fast = "1.5.0"
+tokio-util = "0.7.13"
 
 [dev-dependencies]
 tokio-test = "0.4.2"

@@ -59,7 +59,14 @@ pub struct Dataset {
     metrics: Box<UzfsMetrics>,
 }
 
-pub async fn init(dsname: &str, dev_path: &str, max_blksize: u32) -> Result<Self> {}
+pub async fn init(
+    dsname: &str,
+    dev_path: &str,
+    dstype: DatasetType,
+    max_blksize: u32,
+    already_formatted: bool,
+    hostid: Option<String>,
+) -> Result<Self> {}
 pub async fn close(&self) -> Result<()> {}
 ```
 
@@ -110,7 +117,7 @@ use uzfs::*;
 async fn main() {
     uzfs_env_init().await;
     let dev_path = std::env::args().nth(1).unwrap();
-    let ds = Dataset::init("testzp/ds", &dev_path, DatasetType::Data, 0, false)
+    let ds = Dataset::init("testzp/ds", &dev_path, DatasetType::Data, 0, false, None)
         .await
         .unwrap();
 
@@ -132,4 +139,3 @@ async fn main() {
     uzfs_env_fini().await;
 }
 ```
-
