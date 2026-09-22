@@ -214,7 +214,7 @@ impl TestFileDevice {
         let mut current = [0_u8; RECORD_SIZE];
         self.read_exact_at(&mut current, RECORD_OFFSET)?;
         if current != transfer.slice_from(0, RECORD_SIZE) {
-            return Err(Error::from_raw_os_error(libc::EREMOTEIO));
+            return Err(Error::other("caw failed"));
         }
         self.write_all_at(transfer.slice_from(RECORD_SIZE, RECORD_SIZE), RECORD_OFFSET)
     }
@@ -306,7 +306,9 @@ impl Checker {
             let current_transfer = file.read_block().await?;
             let current_record = Record::decode(current_transfer.slice_from(0, RECORD_SIZE))?;
             if current_record != record {
-                return Err(Error::from_raw_os_error(libc::EREMOTEIO));
+                return Err(Error::other(format!(
+                    "record compare failed, expect: {record:?}, actual: {current_record:?}"
+                )));
             }
 
             transfer = current_transfer;
@@ -388,7 +390,7 @@ impl Writer {
                         std::process::abort();
                     }
                     Ok(Err(err)) => {
-                        if err.raw_os_error().unwrap() != libc::EREMOTEIO {
+                        if err.kind() != ErrorKind::Other {
                             self.next_id -= 1;
                         }
                         eprintln!("failed to update record for host {}: {err}", self.hostid);

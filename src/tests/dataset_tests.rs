@@ -2100,7 +2100,7 @@ async fn random_init_close_test(dev_path: &str, dsname: &str, hostid: u64) {
                 sleep(Duration::from_secs(5)).await;
                 ds.close().await.unwrap();
             }
-            Err(e) if e.raw_os_error() == Some(libc::EREMOTEIO) => {
+            Err(e) if e.kind() == ErrorKind::Other => {
                 println!("error: {e:?}");
             }
             Err(e) => panic!("unexpected init error: {e:?}"),
