@@ -20,23 +20,31 @@ const SG_IO: libc::c_ulong = 0x2285;
 const SG_DXFER_TO_DEV: libc::c_int = -2;
 const SG_DXFER_FROM_DEV: libc::c_int = -3;
 const SG_INFO_OK_MASK: u32 = 0x1;
-const SCSI_READ_16: u8 = 0x88;
+const SCSI_READ_10: u8 = 0x28;
+const SCSI_WRITE_10: u8 = 0x2a;
+const SCSI_INQUIRY: u8 = 0x12;
 const SCSI_COMPARE_AND_WRITE_16: u8 = 0x89;
+const SCSI_VPD_BLOCK_LIMITS: u8 = 0xb0;
 const SCSI_STATUS_CHECK_CONDITION: u8 = 0x02;
 const SCSI_SENSE_MISCOMPARE: u8 = 0x0e;
 
 pub(super) struct AlignedScsiBuffer {
     size: usize,
     ptr: *mut u8,
+    orig_ptr: *mut u8,
+    layout: Layout,
 }
 
 impl AlignedScsiBuffer {
     pub(super) fn new(size: usize) -> Self {
         let layout = Layout::from_size_align(size, MAX_BLOCK_SIZE).unwrap();
+        let ptr = unsafe { alloc_zeroed(layout) };
 
         Self {
             size,
-            ptr: unsafe { alloc_zeroed(layout) },
+            ptr,
+            orig_ptr: ptr,
+            layout,
         }
     }
 
@@ -52,6 +60,12 @@ impl AlignedScsiBuffer {
         unsafe { std::slice::from_raw_parts(self.ptr.add(offset), len) }
     }
 
+    fn cut_off(&mut self, offset: usize) {
+        debug_assert!(self.size >= offset);
+        self.ptr = unsafe { self.ptr.byte_add(offset) };
+        self.size -= offset;
+    }
+
     fn ptr_mut(&mut self) -> *mut u8 {
         self.ptr
     }
@@ -62,14 +76,14 @@ unsafe impl Sync for AlignedScsiBuffer {}
 
 impl Drop for AlignedScsiBuffer {
     fn drop(&mut self) {
-        let layout = Layout::from_size_align(self.size, MAX_BLOCK_SIZE).unwrap();
-        unsafe { dealloc(self.ptr, layout) };
+        unsafe { dealloc(self.orig_ptr, self.layout) };
     }
 }
 
 pub(super) struct ScsiDevFile {
     file: Arc<File>,
     pub(super) logical_block_size: usize,
+    compare_and_write_supported: bool,
 }
 
 impl ScsiDevFile {
@@ -103,15 +117,49 @@ impl ScsiDevFile {
             ));
         }
 
+        let fd = file.as_raw_fd();
+        let compare_and_write_supported = Self::query_max_compare_and_write_length(fd, dev_path)?;
+
         Ok(Some(Self {
             file: Arc::new(file),
             logical_block_size,
+            compare_and_write_supported,
         }))
+    }
+
+    fn query_max_compare_and_write_length(fd: RawFd, file_path: &str) -> Result<bool> {
+        let mut cdb = [0_u8; 16];
+        cdb[0] = SCSI_INQUIRY;
+        cdb[1] = 0x01; // EVPD
+        cdb[2] = SCSI_VPD_BLOCK_LIMITS;
+        cdb[4] = 64; // enough for the block limits header and CAW field
+
+        let data = AlignedScsiBuffer::new(64);
+        let data = Self::execute_scsi_command(fd, cdb, 6, SG_DXFER_FROM_DEV, data, 64)?;
+
+        let response = data.slice_from(0, 6);
+        if response[1] != SCSI_VPD_BLOCK_LIMITS {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "SCSI device returned an unexpected VPD page",
+            ));
+        }
+
+        let max_compare_and_write_length = response[5];
+        println!(
+            "SCSI device {file_path}: VPD page {:#04x}, maximum compare and write length: {} blocks, CAW supported: {}",
+            SCSI_VPD_BLOCK_LIMITS,
+            max_compare_and_write_length,
+            max_compare_and_write_length != 0,
+        );
+
+        Ok(max_compare_and_write_length != 0)
     }
 
     fn execute_scsi_command(
         fd: RawFd,
         mut cdb: [u8; 16],
+        cmd_len: u8,
         direction: libc::c_int,
         mut data: AlignedScsiBuffer,
         dxfer_len: u32,
@@ -120,7 +168,7 @@ impl ScsiDevFile {
         let mut header: sg_io_hdr = unsafe { std::mem::zeroed() };
         header.interface_id = i32::from(b'S');
         header.dxfer_direction = direction;
-        header.cmd_len = cdb.len() as u8;
+        header.cmd_len = cmd_len;
         header.mx_sb_len = sense.len() as u8;
         header.dxfer_len = dxfer_len;
         header.dxferp = data.ptr_mut().cast();
@@ -182,14 +230,20 @@ impl ScsiDevFile {
         let mut cdb = [0_u8; 16];
         cdb[0] = command;
         // cdb[1] flags
-        cdb[2..10].copy_from_slice(&lba.to_be_bytes());
-        cdb[10..14].copy_from_slice(&1_u32.to_be_bytes());
-        // cdb[14] group number, usually 0
-        // cdb[15] control, usually 0
+        let cmd_len = if command == SCSI_READ_10 || command == SCSI_WRITE_10 {
+            let lba = lba as u32;
+            cdb[2..6].copy_from_slice(&lba.to_be_bytes());
+            cdb[7..9].copy_from_slice(&1_u16.to_be_bytes());
+            10
+        } else {
+            cdb[2..10].copy_from_slice(&lba.to_be_bytes());
+            cdb[10..14].copy_from_slice(&1_u32.to_be_bytes());
+            16
+        };
 
         let file = self.file.clone();
         tokio::task::spawn_blocking(move || {
-            Self::execute_scsi_command(file.as_raw_fd(), cdb, direction, data, dxfer_len)
+            Self::execute_scsi_command(file.as_raw_fd(), cdb, cmd_len, direction, data, dxfer_len)
         })
         .await
         .unwrap()
@@ -200,7 +254,7 @@ impl ScsiDevFile {
         let data = AlignedScsiBuffer::new(self.logical_block_size * 2);
 
         self.execute_scsi_command_async(
-            SCSI_READ_16,
+            SCSI_READ_10,
             SG_DXFER_FROM_DEV,
             data,
             self.logical_block_size as u32,
@@ -210,15 +264,34 @@ impl ScsiDevFile {
 
     pub(super) async fn sg_compare_and_write_block(
         &self,
-        transfer: AlignedScsiBuffer,
+        mut transfer: AlignedScsiBuffer,
     ) -> Result<()> {
-        self.execute_scsi_command_async(
-            SCSI_COMPARE_AND_WRITE_16,
-            SG_DXFER_TO_DEV,
-            transfer,
-            self.logical_block_size as u32 * 2,
-        )
-        .await?;
+        if self.compare_and_write_supported {
+            self.execute_scsi_command_async(
+                SCSI_COMPARE_AND_WRITE_16,
+                SG_DXFER_TO_DEV,
+                transfer,
+                self.logical_block_size as u32 * 2,
+            )
+            .await?;
+        } else {
+            let old = self.sg_read_block().await?;
+            if old.slice_from(0, self.logical_block_size)
+                != transfer.slice_from(0, self.logical_block_size)
+            {
+                return Err(Error::from_raw_os_error(libc::EREMOTEIO));
+            }
+
+            transfer.cut_off(self.logical_block_size);
+
+            self.execute_scsi_command_async(
+                SCSI_WRITE_10,
+                SG_DXFER_TO_DEV,
+                transfer,
+                self.logical_block_size as u32,
+            )
+            .await?;
+        }
 
         Ok(())
     }
