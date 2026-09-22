@@ -194,28 +194,36 @@ impl ScsiDevFile {
             0x72 | 0x73 => (sense[1] & 0x0f, sense[2], sense[3]),
             _ => (0, 0, 0),
         };
+
+        let sense_len = usize::from(header.sb_len_wr).min(sense.len());
+        let basic_msg = format!(
+            "status={}, host_status={}, driver_status={}, \
+		 sense_key={:#x}, asc={:#04x}, ascq={:#04x}, sense={:02x?}, \
+		 cdb={:02x?}, dxfer_len={}, resid={}, info={:#x}, flags={:#x}, duration_ms={}",
+            header.status,
+            header.host_status,
+            header.driver_status,
+            sense_key,
+            asc,
+            ascq,
+            &sense[..sense_len],
+            cdb,
+            header.dxfer_len,
+            header.resid,
+            header.info,
+            header.flags,
+            header.duration,
+        );
+
         if header.status == SCSI_STATUS_CHECK_CONDITION && sense_key == SCSI_SENSE_MISCOMPARE {
-            Err(Error::from_raw_os_error(libc::EREMOTEIO))
-        } else {
-            let sense_len = usize::from(header.sb_len_wr).min(sense.len());
             Err(Error::other(format!(
-                "SCSI command failed: status={}, host_status={}, driver_status={}, \
-             sense_key={:#x}, asc={:#04x}, ascq={:#04x}, sense={:02x?}, \
-             cdb={:02x?}, dxfer_len={}, resid={}, info={:#x}, flags={:#x}, duration_ms={}",
-                header.status,
-                header.host_status,
-                header.driver_status,
-                sense_key,
-                asc,
-                ascq,
-                &sense[..sense_len],
-                cdb,
-                header.dxfer_len,
-                header.resid,
-                header.info,
-                header.flags,
-                header.duration,
+                "SCSI COMPARE_AND_SWAP failed: {basic_msg}"
             )))
+        } else {
+            Err(Error::new(
+                ErrorKind::ResourceBusy,
+                format!("SCSI command failed: {basic_msg}"),
+            ))
         }
     }
 
@@ -276,10 +284,14 @@ impl ScsiDevFile {
             .await?;
         } else {
             let old = self.sg_read_block().await?;
-            if old.slice_from(0, self.logical_block_size)
-                != transfer.slice_from(0, self.logical_block_size)
             {
-                return Err(Error::from_raw_os_error(libc::EREMOTEIO));
+                let actual = old.slice_from(0, self.logical_block_size);
+                let expected = transfer.slice_from(0, self.logical_block_size);
+                if actual != expected {
+                    return Err(Error::other(format!(
+                        "expect: {expected:?}, actual: {actual:?}"
+                    )));
+                }
             }
 
             transfer.cut_off(self.logical_block_size);
