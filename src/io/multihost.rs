@@ -1,7 +1,7 @@
 use std::{
     io::{Error, ErrorKind, Result},
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(test)]
@@ -31,8 +31,6 @@ const MULTIHOST_VERSION: u64 = 1;
 const MULTIHOST_MAGIC: &[u8; 8] = b"MULTHST\0";
 
 const UPDATE_INTERVAL: Duration = Duration::from_secs(1);
-const IMPORT_DELAY: Duration = Duration::from_secs(8);
-const FAILED_DELAY: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Record {
@@ -266,13 +264,28 @@ impl MultihostDevice {
     }
 }
 
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64
+}
+
 struct Checker {
     hostid: String,
     file: Option<MultihostDevice>,
+    path: String,
+    import_delay: Duration,
+    fail_delay: Duration,
 }
 
 impl Checker {
-    async fn new(hostid: String, path: &str) -> Result<Self> {
+    async fn new(
+        hostid: String,
+        path: &str,
+        import_delay: Duration,
+        fail_delay: Duration,
+    ) -> Result<Self> {
         if hostid.len() > MAX_HOSTID_LEN {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
@@ -282,7 +295,13 @@ impl Checker {
 
         let file = MultihostDevice::new(path).await?;
 
-        Ok(Self { hostid, file })
+        Ok(Self {
+            hostid,
+            file,
+            path: path.to_string(),
+            import_delay,
+            fail_delay,
+        })
     }
 
     async fn check(mut self) -> Result<Option<Writer>> {
@@ -291,35 +310,39 @@ impl Checker {
         };
 
         let mut transfer = file.read_block().await?;
-        let mut record = Record::decode(transfer.slice_from(0, RECORD_SIZE))?;
+        let record = Record::decode(transfer.slice_from(0, RECORD_SIZE))?;
 
-        let before = Instant::now();
-        while before.elapsed() < IMPORT_DELAY {
-            match &record {
-                Some(record) if record.hostid != self.hostid && record.active => {}
-                _ => break,
+        if let Some(mut record) = record {
+            let last_update_elapsed = Duration::from_nanos(now().saturating_sub(record.timestamp));
+            let import_wait = self.import_delay.saturating_sub(last_update_elapsed);
+
+            let before = Instant::now();
+            while before.elapsed() < import_wait {
+                if !record.active || record.hostid == self.hostid {
+                    break;
+                }
+
+                println!("current record: {:?}, waiting, path: {}", record, self.path);
+
+                sleep(UPDATE_INTERVAL).await;
+                let current_transfer = file.read_block().await?;
+                // its safe to unwrap here because record will not be changed from Some to None
+                let current_record =
+                    Record::decode(current_transfer.slice_from(0, RECORD_SIZE))?.unwrap();
+                if current_record != record {
+                    return Err(Error::other(format!(
+                        "record compare failed, expect: {record:?}, actual: {current_record:?}"
+                    )));
+                }
+
+                transfer = current_transfer;
+                record = current_record;
             }
-
-            println!("current record: {:?}, waiting", record);
-
-            sleep(UPDATE_INTERVAL).await;
-            let current_transfer = file.read_block().await?;
-            let current_record = Record::decode(current_transfer.slice_from(0, RECORD_SIZE))?;
-            if current_record != record {
-                return Err(Error::other(format!(
-                    "record compare failed, expect: {record:?}, actual: {current_record:?}"
-                )));
-            }
-
-            transfer = current_transfer;
-            record = current_record;
         }
-
-        let last_ts = record.map(|r| r.timestamp).unwrap_or(0);
 
         let record = Record {
             hostid: self.hostid.clone(),
-            timestamp: last_ts + 1,
+            timestamp: now(),
             active: true,
         };
         let logical_block_size = file.logical_block_size();
@@ -330,7 +353,9 @@ impl Checker {
         Ok(Some(Writer {
             hostid: self.hostid,
             file,
-            next_id: last_ts + 2,
+            path: self.path.clone(),
+            last_record: record,
+            fail_delay: self.fail_delay,
         }))
     }
 }
@@ -338,29 +363,45 @@ impl Checker {
 struct Writer {
     hostid: String,
     file: MultihostDevice,
-    next_id: u64,
+    path: String,
+    last_record: Record,
+    fail_delay: Duration,
 }
 
 impl Writer {
     async fn write_record(&mut self, active: bool) -> Result<()> {
         let lbs = self.file.logical_block_size();
         let mut buffer = AlignedScsiBuffer::new(lbs * 2);
-        let record = Record {
-            hostid: self.hostid.clone(),
-            timestamp: self.next_id - 1,
-            active: true,
-        };
-        record.encode_to(buffer.slice_mut_from(0, lbs));
+        self.last_record.encode_to(buffer.slice_mut_from(0, lbs));
 
         let record = Record {
             hostid: self.hostid.clone(),
-            timestamp: self.next_id,
+            timestamp: now(),
             active,
         };
-        self.next_id += 1;
         record.encode_to(buffer.slice_mut_from(lbs, lbs));
 
-        self.file.compare_and_write_block(buffer).await
+        let res = self.file.compare_and_write_block(buffer).await;
+        match res {
+            Err(err) => {
+                if err.kind() == ErrorKind::Other {
+                    let buffer = self.file.read_block().await?;
+                    let actual_record = Record::decode(buffer.slice_from(0, RECORD_SIZE))?.unwrap();
+
+                    if actual_record.hostid != self.hostid {
+                        eprintln!("hostid not match! actual record: {actual_record:?}, hostid: {}, path: {}", self.hostid, self.path);
+                        std::process::abort();
+                    }
+
+                    self.last_record = actual_record;
+                }
+                Err(err)
+            }
+            Ok(()) => {
+                self.last_record = record;
+                Ok(())
+            }
+        }
     }
 
     async fn update_record(mut self, token: CancellationToken, notify: Arc<Notify>) {
@@ -368,10 +409,10 @@ impl Writer {
         let fut = async {
             loop {
                 let now = Instant::now();
-                let Some(remained) = FAILED_DELAY.checked_sub(now - last_success) else {
+                let Some(remained) = self.fail_delay.checked_sub(now - last_success) else {
                     eprintln!(
-                        "failed to update record for host {} after {:?}",
-                        self.hostid, FAILED_DELAY
+                        "failed to update record for host {} after {:?}, path: {}",
+                        self.hostid, self.fail_delay, self.path
                     );
                     std::process::abort();
                 };
@@ -384,16 +425,16 @@ impl Writer {
                     }
                     Err(_) => {
                         eprintln!(
-                            "failed to update record for host {} after {:?}",
-                            self.hostid, FAILED_DELAY
+                            "failed to update record for host {} after {:?}, path: {}",
+                            self.hostid, self.fail_delay, self.path
                         );
                         std::process::abort();
                     }
                     Ok(Err(err)) => {
-                        if err.kind() != ErrorKind::Other {
-                            self.next_id -= 1;
-                        }
-                        eprintln!("failed to update record for host {}: {err}", self.hostid);
+                        eprintln!(
+                            "failed to update record for host {}: {err}, path: {}",
+                            self.hostid, self.path
+                        );
                     }
                 }
             }
@@ -411,8 +452,13 @@ pub(crate) struct MultiHostProtector {
 }
 
 impl MultiHostProtector {
-    pub(crate) async fn new(hostid: String, path: &str) -> Result<Self> {
-        let checker = Checker::new(hostid, path).await?;
+    pub(crate) async fn new(
+        hostid: String,
+        path: &str,
+        import_delay: Duration,
+        fail_delay: Duration,
+    ) -> Result<Self> {
+        let checker = Checker::new(hostid, path, import_delay, fail_delay).await?;
         let token = CancellationToken::new();
         let Some(writer) = checker.check().await? else {
             return Ok(Self {

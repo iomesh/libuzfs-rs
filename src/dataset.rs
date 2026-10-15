@@ -7,6 +7,7 @@ use std::mem;
 use std::os::raw::{c_char, c_void};
 use std::ptr::null_mut;
 use std::ptr::slice_from_raw_parts;
+use std::time::Duration;
 
 use cstr_argument::CStrArgument;
 use io::Result;
@@ -288,6 +289,13 @@ impl Dataset {
     }
 }
 
+// fail_interval >= import_delay > 1s
+pub struct MultihostConfig {
+    pub fail_delay: Duration,
+    pub import_delay: Duration,
+    pub hostid: String,
+}
+
 // control functions
 impl Dataset {
     fn dsname_to_poolname(dsname: &str) -> Result<String> {
@@ -306,7 +314,7 @@ impl Dataset {
         dstype: DatasetType,
         max_blksize: u32,
         already_formatted: bool,
-        hostid: Option<String>,
+        hostid: Option<MultihostConfig>,
     ) -> Result<Self> {
         assert!(max_blksize == 0 || (max_blksize & (max_blksize - 1)) == 0);
 
@@ -339,8 +347,16 @@ impl Dataset {
 
         let arg_usize = &mut arg as *mut LibuzfsDatasetInitArg as usize;
 
-        let protector = if let Some(hostid) = hostid {
-            Some(MultiHostProtector::new(hostid, dev_path).await?)
+        let protector = if let Some(config) = hostid {
+            Some(
+                MultiHostProtector::new(
+                    config.hostid,
+                    dev_path,
+                    config.import_delay,
+                    config.fail_delay,
+                )
+                .await?,
+            )
         } else {
             None
         };
