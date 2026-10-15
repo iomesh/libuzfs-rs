@@ -6,6 +6,7 @@ use crate::Dataset;
 use crate::DatasetType;
 use crate::InodeType;
 use crate::KvSetOption;
+use crate::MultihostConfig;
 use crate::UzfsDentry;
 use crate::MAX_RESERVED_SIZE;
 use dashmap::DashMap;
@@ -2089,7 +2090,11 @@ async fn random_init_close_test(dev_path: &str, dsname: &str, hostid: u64) {
             DatasetType::Meta,
             0,
             false,
-            Some(hostid.to_string()),
+            Some(MultihostConfig {
+                hostid: hostid.to_string(),
+                import_delay: Duration::from_secs(21),
+                fail_delay: Duration::from_secs(12),
+            }),
         )
         .await;
 
