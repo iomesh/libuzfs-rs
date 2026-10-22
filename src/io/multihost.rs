@@ -276,7 +276,7 @@ struct Checker {
     file: Option<MultihostDevice>,
     path: String,
     import_delay: Duration,
-    fail_delay: Duration,
+    fail_delay: Box<dyn Fn() -> Duration + Send + Sync>,
 }
 
 impl Checker {
@@ -284,7 +284,7 @@ impl Checker {
         hostid: String,
         path: &str,
         import_delay: Duration,
-        fail_delay: Duration,
+        fail_delay: Box<dyn Fn() -> Duration + Send + Sync>,
     ) -> Result<Self> {
         if hostid.len() > MAX_HOSTID_LEN {
             return Err(Error::new(
@@ -365,7 +365,7 @@ struct Writer {
     file: MultihostDevice,
     path: String,
     last_record: Record,
-    fail_delay: Duration,
+    fail_delay: Box<dyn Fn() -> Duration + Send + Sync>,
 }
 
 impl Writer {
@@ -409,10 +409,11 @@ impl Writer {
         let fut = async {
             loop {
                 let now = Instant::now();
-                let Some(remained) = self.fail_delay.checked_sub(now - last_success) else {
+                let fail_delay = (self.fail_delay)();
+                let Some(remained) = fail_delay.checked_sub(now - last_success) else {
                     eprintln!(
                         "failed to update record for host {} after {:?}, path: {}",
-                        self.hostid, self.fail_delay, self.path
+                        self.hostid, fail_delay, self.path
                     );
                     std::process::abort();
                 };
@@ -426,7 +427,7 @@ impl Writer {
                     Err(_) => {
                         eprintln!(
                             "failed to update record for host {} after {:?}, path: {}",
-                            self.hostid, self.fail_delay, self.path
+                            self.hostid, fail_delay, self.path
                         );
                         std::process::abort();
                     }
@@ -456,7 +457,7 @@ impl MultiHostProtector {
         hostid: String,
         path: &str,
         import_delay: Duration,
-        fail_delay: Duration,
+        fail_delay: Box<dyn Fn() -> Duration + Send + Sync>,
     ) -> Result<Self> {
         let checker = Checker::new(hostid, path, import_delay, fail_delay).await?;
         let token = CancellationToken::new();

@@ -2093,7 +2093,7 @@ async fn random_init_close_test(dev_path: &str, dsname: &str, hostid: u64) {
             Some(MultihostConfig {
                 hostid: hostid.to_string(),
                 import_delay: Duration::from_secs(21),
-                fail_delay: Duration::from_secs(12),
+                fail_delay: Box::new(|| Duration::from_secs(12)),
             }),
         )
         .await;

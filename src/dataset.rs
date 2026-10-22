@@ -291,7 +291,7 @@ impl Dataset {
 
 // fail_interval >= import_delay > 1s
 pub struct MultihostConfig {
-    pub fail_delay: Duration,
+    pub fail_delay: Box<dyn Fn() -> Duration + Send + Sync>,
     pub import_delay: Duration,
     pub hostid: String,
 }
