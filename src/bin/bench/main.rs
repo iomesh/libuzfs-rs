@@ -16,7 +16,7 @@ async fn worker(obj: u64, ds: Arc<Dataset>, blksize: u64, file_size: u64, sync: 
             match op {
                 BenchOp::Write => {
                     let data = vec![1; blksize as usize];
-                    ds.write_object(&ino_hdl, offset, sync, vec![&data])
+                    ds.write_object(&ino_hdl, offset, sync, vec![&data], false)
                         .await
                         .unwrap();
                 }

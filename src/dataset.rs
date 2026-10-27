@@ -838,6 +838,7 @@ impl Dataset {
         offset: u64,
         sync: bool,
         data: Vec<&[u8]>,
+        preserve_mtime: bool,
     ) -> Result<()> {
         let request_size = data.iter().map(|v| v.len()).sum();
         let _guard = self
@@ -856,6 +857,7 @@ impl Dataset {
             iovs,
             sync,
             err: 0,
+            preserve_mtime,
         };
 
         let arg_usize = &mut arg as *mut LibuzfsWriteObjectArg as usize;
@@ -880,12 +882,14 @@ impl Dataset {
         ino_hdl: &mut InodeHandle,
         offset: u64,
         size: u64,
+        preserve_mtime: bool,
     ) -> Result<()> {
         let mut arg = LibuzfsTruncateObjectArg {
             ihp: ino_hdl.ihp,
             offset,
             size,
             err: 0,
+            preserve_mtime,
         };
 
         let arg_usize = &mut arg as *mut LibuzfsTruncateObjectArg as usize;

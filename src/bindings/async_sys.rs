@@ -624,6 +624,7 @@ pub struct LibuzfsWriteObjectArg {
     pub offset: u64,
     pub iovs: Vec<iovec>,
     pub sync: bool,
+    pub preserve_mtime: bool,
 
     pub err: i32,
 }
@@ -640,7 +641,8 @@ pub unsafe extern "C" fn libuzfs_write_object_c(arg: *mut c_void) {
         arg.offset,
         arg.iovs.as_mut_ptr(),
         arg.iovs.len() as i32,
-        arg.sync as u32,
+        arg.sync as boolean_t,
+        arg.preserve_mtime as _,
     );
 }
 
@@ -653,6 +655,7 @@ pub struct LibuzfsTruncateObjectArg {
     pub ihp: *mut libuzfs_inode_handle_t,
     pub offset: u64,
     pub size: u64,
+    pub preserve_mtime: bool,
 
     pub err: i32,
 }
@@ -663,7 +666,7 @@ unsafe impl Sync for LibuzfsTruncateObjectArg {}
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn libuzfs_truncate_object_c(arg: *mut c_void) {
     let arg = &mut *(arg as *mut LibuzfsTruncateObjectArg);
-    arg.err = libuzfs_object_truncate(arg.ihp, arg.offset, arg.size);
+    arg.err = libuzfs_object_truncate(arg.ihp, arg.offset, arg.size, arg.preserve_mtime as _);
 }
 
 pub struct LibuzfsDatasetSpaceArg {
