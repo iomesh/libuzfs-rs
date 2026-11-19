@@ -33,6 +33,46 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
+async fn import_and_export_pool(pool_name: &str, dev_path: String) -> std::io::Result<()> {
+    let dsname = format!("{pool_name}/ds");
+    let dataset = Dataset::init(&dsname, &dev_path, DatasetType::Data, 4096, true, None).await?;
+
+    dataset.close().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parallel_import_export_test() {
+    uzfs_env_init().await;
+
+    let pool_a = UzfsTestEnv::new(100 * 1024 * 1024);
+    let pool_b = UzfsTestEnv::new(100 * 1024 * 1024);
+
+    for (pool_name, env) in [("parallel-a", &pool_a), ("parallel-b", &pool_b)] {
+        let dsname = format!("{pool_name}/ds");
+        Dataset::init(
+            &dsname,
+            env.get_dev_path(),
+            DatasetType::Data,
+            4096,
+            false,
+            None,
+        )
+        .await
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+    }
+
+    let import_a = import_and_export_pool("parallel-a", pool_a.get_dev_path().to_owned());
+    let import_b = import_and_export_pool("parallel-b", pool_b.get_dev_path().to_owned());
+    let (result_a, result_b) = tokio::join!(import_a, import_b);
+
+    result_a.unwrap();
+    result_b.unwrap();
+    uzfs_env_fini().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn uzfs_test() {
     let rwobj;
