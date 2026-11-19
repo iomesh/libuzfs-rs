@@ -286,7 +286,7 @@ impl UzfsMetrics {
         })
     }
 
-    pub(crate) fn record(&self, method: RequestMethod, request_size: usize) -> MetricsGuard {
+    pub(crate) fn record(&self, method: RequestMethod, request_size: usize) -> MetricsGuard<'_> {
         MetricsGuard::new(method, request_size, &self.req_metrics)
     }
 }

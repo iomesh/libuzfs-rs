@@ -2,6 +2,7 @@
 #[allow(non_upper_case_globals)]
 #[allow(non_snake_case)]
 #[allow(non_camel_case_types)]
+#[allow(clippy::useless_transmute)]
 pub(super) mod aio;
 
 pub(super) mod async_io;

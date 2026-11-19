@@ -46,7 +46,6 @@ impl Stack {
     #[cold]
     unsafe fn new(stack_size: usize) -> Result<Self, Error> {
         let page_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
-        assert!(stack_size % page_size == 0);
         let mem = libc::mmap(
             std::ptr::null_mut(),
             stack_size,
@@ -61,7 +60,6 @@ impl Stack {
         {
             Err(Error::last_os_error())
         } else {
-            assert!(mem as usize % page_size == 0);
             let stack_id = STACK_ID.fetch_add(1, Ordering::Relaxed) as u64;
             assert!(stack_id < MAX_STACK_ID);
             let stack_bottom = mem.byte_add(stack_size);
