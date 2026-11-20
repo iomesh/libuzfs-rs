@@ -8,7 +8,7 @@ pub(super) struct AsyncTimerFd(AsyncFd<TimerFd>);
 impl AsyncTimerFd {
     pub(super) fn new() -> Result<Self> {
         let fd = TimerFd::new_custom(ClockId::Monotonic, true, true)?;
-	#[allow(deprecated)]
+        #[allow(deprecated)]
         let async_fd = AsyncFd::with_interest(fd, Interest::READABLE)?;
         Ok(Self(async_fd))
     }

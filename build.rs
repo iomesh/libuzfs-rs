@@ -3,6 +3,7 @@ use std::{env, fs, process::Command};
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/bindings/wrapper.h");
+    println!("cargo:rerun-if-changed=src/bindings/seq_file.c");
     println!("cargo:rerun-if-changed=src/io/wrapper.h");
     println!("cargo:rerun-if-changed=zfs");
 
@@ -43,9 +44,11 @@ fn main() {
         .header("src/bindings/wrapper.h")
         .allowlist_function("libuzfs_.*")
         .allowlist_function("taskq_.*")
+        .allowlist_function("uzfs_seq_file_set_buffer")
         .allowlist_file("taskq*")
         .allowlist_var("dmu_ot.*")
         .allowlist_type("DMU_OT.*")
+        .opaque_type("seq_file")
         .derive_default(true)
         .derive_copy(false)
         .generate()
@@ -54,6 +57,14 @@ fn main() {
     bindings
         .write_to_file("src/bindings/sys.rs")
         .expect("Couldn't write bindings!");
+
+    let mut bindings_c = cc::Build::new();
+    for path in &lib.include_paths {
+        bindings_c.flag(&format!("-isystem{}", path.display()));
+    }
+    bindings_c
+        .file("src/bindings/seq_file.c")
+        .compile("uzfs_bindings");
 
     cc::Build::new()
         .file("src/context/libcontext.c")
