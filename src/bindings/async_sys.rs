@@ -1137,15 +1137,10 @@ unsafe impl Send for LibuzfsShowStatsArgs {}
 unsafe impl Sync for LibuzfsShowStatsArgs {}
 
 unsafe extern "C" fn generate(arg: *mut c_void, sf: *mut seq_file) {
-    let buf_size = 1024;
     let arg = &mut *(arg as *mut Vec<Vec<u8>>);
-    arg.push(Vec::with_capacity(buf_size));
-    let last = arg.last_mut().unwrap();
-    last.resize(buf_size, 0);
-    *sf = seq_file {
-        buf: last.as_ptr() as *mut _,
-        size: buf_size as i32,
-    };
+    let mut buffer = vec![0; 1024];
+    uzfs_seq_file_set_buffer(sf, buffer.as_mut_ptr().cast(), buffer.len() as i32);
+    arg.push(buffer);
 }
 
 #[allow(clippy::missing_safety_doc)]

@@ -27,10 +27,8 @@ jobs:
         sudo apt install uuid-dev libblkid-dev libudev-dev libtirpc-dev
     - name: Install rustfmt
       run: rustup component add rustfmt
-    - uses: actions-rs/clippy-check@v1
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        args: --all-features
+    - name: Run cargo clippy
+      run: cargo clippy --workspace --all-features -- --no-deps -Dwarnings
     - uses: Swatinem/rust-cache@v1
     - run: cargo fmt --all -- --check
     - name: Run tests

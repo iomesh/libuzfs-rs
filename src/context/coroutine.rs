@@ -113,7 +113,7 @@ impl CoroutineFuture {
         #[cfg(target_arch = "x86_64")]
         #[allow(clippy::fn_to_numeric_cast)]
         unsafe {
-            *(stack.stack_bottom.byte_sub(0x08) as *mut u64) = Self::poll as u64 + 8
+            *(stack.stack_bottom.byte_sub(0x08) as *mut u64) = Self::poll as *const () as u64 + 8
         };
         #[cfg(target_arch = "aarch64")]
         #[allow(clippy::fn_to_numeric_cast)]
