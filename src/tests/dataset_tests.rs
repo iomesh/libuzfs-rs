@@ -1,5 +1,6 @@
 use super::UzfsTestEnv;
 use crate::bindings::sys::timespec;
+use crate::metrics::stats::show_stat;
 use crate::uzfs_env_fini;
 use crate::uzfs_env_init;
 use crate::Dataset;
@@ -506,6 +507,82 @@ async fn uzfs_claim_test() {
     }
 
     uzfs_env_fini().await;
+}
+
+#[test]
+fn bonus_accounting_after_inode_delete_test() {
+    // ARC counters are process-global. Run this case alone even when the
+    // surrounding dataset tests are scheduled concurrently.
+    const CHILD_ENV: &str = "UZFS_BONUS_ACCOUNTING_TEST_CHILD";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::dataset_tests::bonus_accounting_after_inode_delete_test",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "bonus accounting child test failed: {status}"
+        );
+        return;
+    }
+
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        uzfs_env_init().await;
+
+        for (inode_type, kind) in [(InodeType::FILE, "file"), (InodeType::DIR, "directory")] {
+            for release_after_sync in [false, true] {
+                let before = bonus_accounted_bytes().await;
+                let env = UzfsTestEnv::new(100 * 1024 * 1024);
+                let ds = Dataset::init(
+                    "bonus-accounting-test/ds",
+                    env.get_dev_path(),
+                    DatasetType::Meta,
+                    0,
+                    false,
+                )
+                .await
+                .unwrap();
+
+                let mut handle = ds.create_inode(inode_type).await.unwrap();
+                ds.wait_synced().await;
+                ds.delete_inode(&mut handle, inode_type).await.unwrap();
+                if release_after_sync {
+                    // Deleted dnodes reset their slot count while these handles
+                    // still hold the original two-slot bonus allocations.
+                    ds.wait_synced().await;
+                }
+                ds.release_inode_handle(&mut handle).await;
+                ds.wait_synced().await;
+                ds.close().await.unwrap();
+
+                assert_eq!(
+                    bonus_accounted_bytes().await,
+                    before,
+                    "bonus accounting must return to its initial value after \
+                     deleting a {kind} inode \
+                     (release_after_sync={release_after_sync})"
+                );
+            }
+        }
+
+        uzfs_env_fini().await;
+    });
+}
+
+async fn bonus_accounted_bytes() -> u64 {
+    let stats = show_stat("zfs/misc/arcstats").await.unwrap();
+    stats
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            (fields.next() == Some("bonus_size")).then(|| fields.last().unwrap().parse().unwrap())
+        })
+        .expect("ARC statistics must expose bonus_size")
 }
 
 #[tokio::test(flavor = "multi_thread")]
