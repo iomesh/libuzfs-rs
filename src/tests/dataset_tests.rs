@@ -1,5 +1,6 @@
 use super::UzfsTestEnv;
 use crate::bindings::sys::timespec;
+use crate::get_uzfs_stats;
 use crate::metrics::stats::show_stat;
 use crate::uzfs_env_fini;
 use crate::uzfs_env_init;
@@ -239,8 +240,13 @@ async fn uzfs_test() {
             .unwrap());
         ds.delete_object(&mut obj_hdl).await.unwrap();
         ds.release_inode_handle(&mut obj_hdl).await;
+
+        println!("{:?}", get_uzfs_stats().await);
+
         ds.close().await.unwrap();
     }
+
+    println!("{:?}", get_uzfs_stats().await);
 
     {
         let ds = Dataset::init(
