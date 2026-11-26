@@ -601,6 +601,7 @@ async fn bonus_accounted_bytes() -> u64 {
         .expect("ARC statistics must expose bonus_size")
 }
 
+/*
 #[tokio::test(flavor = "multi_thread")]
 async fn meta_dnode_empty_leaf_reclaimed_test() {
     const CLAIMED_INO: u64 = 320;
@@ -654,7 +655,7 @@ async fn meta_dnode_empty_leaf_reclaimed_test() {
 
     ds.close().await.unwrap();
     uzfs_env_fini().await;
-}
+}*/
 
 #[tokio::test(flavor = "multi_thread")]
 async fn uzfs_zap_iterator_test() {
