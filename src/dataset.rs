@@ -42,6 +42,18 @@ pub async fn wakeup_arc_evictor() {
     CoroutineFuture::new(libuzfs_wakeup_arc_evictor_c, 0).await;
 }
 
+pub type UzfsStats = libuzfs_process_stats;
+
+pub async fn get_uzfs_stats() -> UzfsStats {
+    let mut stats = UzfsStats::default();
+
+    let arg_usize = (&mut stats) as *mut _ as usize;
+
+    CoroutineFuture::new(libuzfs_get_process_stats_c, arg_usize).await;
+
+    stats
+}
+
 #[derive(Default)]
 pub struct InodeAttr {
     pub gen: u64,

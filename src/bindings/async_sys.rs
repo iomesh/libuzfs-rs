@@ -343,7 +343,7 @@ pub unsafe extern "C" fn libuzfs_zap_list_c(arg: *mut c_void) {
         // make name end with '\0'
         name.push(0);
         let value_size = libuzfs_zap_iterator_value_size(iter);
-        let mut value = Vec::<u8>::with_capacity(value_size as usize);
+        let mut value = Vec::<u8>::with_capacity(value_size);
         arg.err = libuzfs_zap_lookup(
             arg.dhp,
             arg.obj,
@@ -352,7 +352,7 @@ pub unsafe extern "C" fn libuzfs_zap_list_c(arg: *mut c_void) {
             value_size as u64,
             value.as_mut_ptr() as *mut c_void,
         );
-        value.set_len(value_size as usize);
+        value.set_len(value_size);
         name.pop();
 
         if arg.err != 0 {
@@ -1101,6 +1101,10 @@ pub unsafe extern "C" fn libuzfs_show_stats_c(arg: *mut c_void) {
     };
 
     libuzfs_show_stats(arg.stat_ptr, arg.stat_type, &generator);
+}
+
+pub(crate) unsafe extern "C" fn libuzfs_get_process_stats_c(arg: *mut c_void) {
+    libuzfs_get_process_stats(arg.cast::<libuzfs_process_stats_t>());
 }
 
 #[allow(clippy::missing_safety_doc)]
